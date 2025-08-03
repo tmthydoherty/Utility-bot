@@ -321,7 +321,6 @@ class DailyTrivia(commands.Cog):
             except ValueError:
                  last_announcement_date = datetime.fromisoformat("2000-01-01T00:00:00.000000+00:00")
 
-
             if (now.year > last_announcement_date.year) or (now.month > last_announcement_date.month):
                 async with self.config_lock:
                     scores = cfg.get("monthly_scores")
@@ -381,7 +380,7 @@ class DailyTrivia(commands.Cog):
         async with self.config_lock:
             cfg = self.get_guild_config(interaction.guild_id)
             channel = self.bot.get_channel(cfg.get('channel_id'))
-            embed = discord.Embed(title=⚙️ Trivia Settings", color=EMBED_COLOR_TRIVIA)
+            embed = discord.Embed(title="Trivia Settings", color=EMBED_COLOR_TRIVIA) # Emoji removed
             embed.set_footer(text=self.get_footer_text())
             embed.add_field(name="Status", value="✅ Enabled" if cfg.get('enabled') else "❌ Disabled", inline=True)
             embed.add_field(name="Post Time", value=f"{cfg.get('time')} ({cfg.get('timezone')})", inline=True)

@@ -100,4 +100,64 @@ class MessageForwarder(commands.Cog):
         
         if not isinstance(target_thread.parent, discord.TextChannel):
             embed = discord.Embed(description="❌ Cannot create webhooks in this type of thread. Please select a thread in a standard text channel.", color=discord.Color.red())
-            embed.set_footer(text=self.get_footer_
+            embed.set_footer(text=self.get_footer_text())
+            return await interaction.followup.send(embed=embed)
+
+        webhook = None
+        try:
+            webhook = await asyncio.wait_for(
+                target_thread.parent.create_webhook(name=f"Forwarder - {source_channel.name}"),
+                timeout=15.0
+            )
+        except asyncio.TimeoutError:
+            embed = discord.Embed(description="❌ The request to create a webhook timed out. Discord might be having issues. Please try again later.", color=discord.Color.red())
+            embed.set_footer(text=self.get_footer_text())
+            return await interaction.followup.send(embed=embed)
+        except discord.HTTPException as e:
+            log_forwarder.error(f"Failed to create webhook: {e}")
+            embed = discord.Embed(description=f"❌ An error occurred while creating the webhook. I may be missing permissions, or the thread is archived.", color=discord.Color.red())
+            embed.set_footer(text=self.get_footer_text())
+            return await interaction.followup.send(embed=embed)
+        
+        async with self.config_lock:
+            guild_id_str = str(interaction.guild_id)
+            self.config.setdefault(guild_id_str, {})
+            self.config[guild_id_str][str(source_channel.id)] = {"thread_id": target_thread.id, "webhook_url": webhook.url}
+            self.config_is_dirty = True
+        
+        embed = discord.Embed(description=f"✅ Forwarding enabled from {source_channel.mention} to **{target_thread.name}**.", color=EMBED_COLOR_FORWARDER)
+        embed.set_footer(text=self.get_footer_text())
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(name="forwardremove", description="Stop forwarding messages from a channel.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def forward_remove(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        await interaction.response.defer(ephemeral=True)
+        
+        webhook_url_to_delete = None
+        rule_was_found = False
+        async with self.config_lock:
+            rule = self.config.get(str(interaction.guild_id), {}).pop(str(channel.id), None)
+            if rule:
+                rule_was_found = True
+                webhook_url_to_delete = rule.get("webhook_url")
+                self.config_is_dirty = True
+        
+        if rule_was_found:
+            if webhook_url_to_delete:
+                try:
+                    webhook_to_delete = discord.Webhook.from_url(webhook_url_to_delete, session=self.session)
+                    await asyncio.wait_for(webhook_to_delete.delete(), timeout=10.0)
+                except (discord.NotFound, discord.InvalidArgument, asyncio.TimeoutError, discord.HTTPException):
+                    pass
+            
+            embed = discord.Embed(description=f"✅ Forwarding has been disabled for {channel.mention}.", color=EMBED_COLOR_FORWARDER)
+            embed.set_footer(text=self.get_footer_text())
+            await interaction.followup.send(embed=embed)
+        else:
+            embed = discord.Embed(description=f"There was no forwarding rule set up for {channel.mention} to remove.", color=discord.Color.yellow())
+            embed.set_footer(text=self.get_footer_text())
+            await interaction.followup.send(embed=embed)
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(MessageForwarder(bot))

@@ -37,7 +37,6 @@ class TriviaView(discord.ui.View):
         self.cog = cog_instance
 
     async def handle_button_press(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Acknowledge the interaction immediately before any logic
         await interaction.response.defer(ephemeral=True, thinking=True)
         await self.cog.handle_trivia_answer(interaction, button)
 
@@ -64,15 +63,22 @@ class DailyTrivia(commands.Cog):
         self.config = load_config_trivia()
         self.session = aiohttp.ClientSession()
         self.config_lock = asyncio.Lock()
+        self.config_is_dirty = False
+
         self.trivia_loop.start()
         self.monthly_winner_loop.start()
         self.cache_refill_loop.start()
+        self.save_loop.start()
         self.bot.add_view(TriviaView(self))
 
     def cog_unload(self):
+        if self.config_is_dirty:
+            log_trivia.info("Performing final trivia config save on cog unload.")
+            save_config_trivia(self.config)
         self.trivia_loop.cancel()
         self.monthly_winner_loop.cancel()
         self.cache_refill_loop.cancel()
+        self.save_loop.cancel()
         asyncio.create_task(self.session.close())
         
     def get_footer_text(self):
@@ -107,9 +113,13 @@ class DailyTrivia(commands.Cog):
         self.config[gid].setdefault("reveal_delay", 60)
         return self.config[gid]
 
-    async def save(self):
+    @tasks.loop(seconds=30)
+    async def save_loop(self):
         async with self.config_lock:
-            await self.bot.loop.run_in_executor(None, lambda: save_config_trivia(self.config))
+            if self.config_is_dirty:
+                await self.bot.loop.run_in_executor(None, lambda: save_config_trivia(self.config))
+                self.config_is_dirty = False
+                log_trivia.info("Trivia config changes saved to disk.")
 
     async def fetch_api_questions(self):
         try:
@@ -127,9 +137,8 @@ class DailyTrivia(commands.Cog):
         message_to_send = ""
         
         async with self.config_lock:
-            current_config = load_config_trivia()
             gid_str = str(interaction.guild_id)
-            pending_answers = current_config.get(gid_str, {}).get("pending_answers", [])
+            pending_answers = self.config.get(gid_str, {}).get("pending_answers", [])
             target_question = next((q for q in pending_answers if q.get("message_id") == interaction.message.id), None)
 
             if not target_question:
@@ -148,8 +157,7 @@ class DailyTrivia(commands.Cog):
                     else:
                         message_to_send = "❌ Sorry, that's incorrect."
                     
-                    save_config_trivia(current_config)
-                    self.config = current_config
+                    self.config_is_dirty = True
 
         await interaction.followup.send(message_to_send, ephemeral=True)
 
@@ -175,13 +183,10 @@ class DailyTrivia(commands.Cog):
         total_players = len(all_answers_dict)
 
         async with self.config_lock:
-            current_config = load_config_trivia()
-            cfg = current_config.setdefault(str(channel.guild.id), self.get_guild_config(channel.guild.id))
+            cfg = self.get_guild_config(channel.guild.id)
             for winner_id in winner_ids:
-                cfg.setdefault("monthly_scores", {})
                 cfg["monthly_scores"][str(winner_id)] = cfg["monthly_scores"].get(str(winner_id), 0) + 1
-            save_config_trivia(current_config)
-            self.config = current_config
+            self.config_is_dirty = True
 
         results_embed = discord.Embed(title="🏆 Trivia Results", description=f"**Question:** {answer_data['question']}", color=discord.Color.gold())
         results_embed.add_field(name="Correct Answer", value=f"**`{answer_data['answer']}`**", inline=False)
@@ -208,9 +213,13 @@ class DailyTrivia(commands.Cog):
         channel = self.bot.get_channel(cfg["channel_id"])
         if not channel: return
         question_data = None
-        if cfg.get("question_cache"):
-            question_data = cfg["question_cache"].pop(0)
-        else:
+        
+        async with self.config_lock:
+            if cfg.get("question_cache"):
+                question_data = cfg["question_cache"].pop(0)
+                self.config_is_dirty = True
+        
+        if not question_data:
             log_trivia.warning(f"Trivia cache for guild {guild_id} is empty. Fetching live question.")
             results = await self.fetch_api_questions()
             if results: question_data = results.pop(0)
@@ -235,7 +244,6 @@ class DailyTrivia(commands.Cog):
         try:
             msg = await channel.send(embed=embed, view=view)
             async with self.config_lock:
-                current_config = load_config_trivia()
                 current_cfg = self.get_guild_config(guild_id)
                 current_cfg["asked_questions"].append(question_data["question"])
                 if len(current_cfg["asked_questions"]) > 200: current_cfg["asked_questions"] = current_cfg["asked_questions"][-200:]
@@ -246,8 +254,7 @@ class DailyTrivia(commands.Cog):
                     "winners": [], "all_answers": {}
                 })
                 current_cfg["last_posted_date"] = datetime.now(pytz.timezone(current_cfg["timezone"])).strftime("%Y-%m-%d")
-                save_config_trivia(current_config)
-                self.config = current_config
+                self.config_is_dirty = True
             return msg
         except discord.Forbidden:
             log_trivia.error(f"Missing permissions to post trivia in guild {guild_id}, channel {channel.id}.")
@@ -259,9 +266,7 @@ class DailyTrivia(commands.Cog):
         pending_reveals = []
         
         async with self.config_lock:
-            config_changed = False
-            current_config = load_config_trivia()
-            for guild_id_str, cfg in current_config.items():
+            for guild_id_str, cfg in self.config.items():
                 if pending_answers := cfg.get("pending_answers", []):
                     still_pending = []
                     for ans in pending_answers:
@@ -271,10 +276,7 @@ class DailyTrivia(commands.Cog):
                             still_pending.append(ans)
                     if len(still_pending) < len(pending_answers):
                         cfg["pending_answers"] = still_pending
-                        config_changed = True
-            if config_changed:
-                save_config_trivia(current_config)
-                self.config = current_config
+                        self.config_is_dirty = True
         
         for reveal_data in pending_reveals:
             await self.reveal_trivia_answer(reveal_data)
@@ -291,23 +293,24 @@ class DailyTrivia(commands.Cog):
     
     @tasks.loop(minutes=30)
     async def cache_refill_loop(self):
-        for guild_id_str, cfg in self.config.items():
-            if not cfg.get("enabled"): continue
-            cache = cfg.setdefault("question_cache", [])
-            if len(cache) < CACHE_MIN_SIZE:
-                log_trivia.info(f"Trivia cache for guild {guild_id_str} is low. Refilling.")
-                new_questions = await self.fetch_api_questions()
-                asked_questions = set(cfg.get("asked_questions", []))
-                added_count = 0
-                for q_data in new_questions:
-                    question_text = html.unescape(q_data["question"])
-                    if question_text not in asked_questions:
-                        cache.append(q_data)
-                        added_count += 1
-                    if len(cache) >= CACHE_TARGET_SIZE: break
-                if added_count > 0:
-                    await self.save()
-                    log_trivia.info(f"Added {added_count} new questions to the cache for guild {guild_id_str}.")
+        async with self.config_lock:
+            for guild_id_str, cfg in self.config.items():
+                if not cfg.get("enabled"): continue
+                cache = cfg.setdefault("question_cache", [])
+                if len(cache) < CACHE_MIN_SIZE:
+                    log_trivia.info(f"Trivia cache for guild {guild_id_str} is low. Refilling.")
+                    new_questions = await self.fetch_api_questions()
+                    asked_questions = set(cfg.get("asked_questions", []))
+                    added_count = 0
+                    for q_data in new_questions:
+                        question_text = html.unescape(q_data["question"])
+                        if question_text not in asked_questions:
+                            cache.append(q_data)
+                            added_count += 1
+                        if len(cache) >= CACHE_TARGET_SIZE: break
+                    if added_count > 0:
+                        self.config_is_dirty = True
+                        log_trivia.info(f"Added {added_count} new questions to the cache for guild {guild_id_str}.")
 
     @tasks.loop(hours=1)
     async def monthly_winner_loop(self):
@@ -324,7 +327,7 @@ class DailyTrivia(commands.Cog):
                     if not scores:
                         cfg["monthly_scores"] = {}
                         cfg["last_winner_announcement"] = now.isoformat()
-                        save_config_trivia(self.config)
+                        self.config_is_dirty = True
                         continue
                     
                     max_score = max(scores.values())
@@ -347,13 +350,14 @@ class DailyTrivia(commands.Cog):
                         log_trivia.info(f"Posted monthly trivia winners for guild {guild_id_str}.")
                         cfg["monthly_scores"] = {}
                         cfg["last_winner_announcement"] = now.isoformat()
-                        save_config_trivia(self.config)
+                        self.config_is_dirty = True
                     except discord.Forbidden:
                         log_trivia.warning(f"Could not post monthly winner announcement in guild {guild_id_str}.")
 
     @trivia_loop.before_loop
     @cache_refill_loop.before_loop
     @monthly_winner_loop.before_loop
+    @save_loop.before_loop
     async def before_any_loop(self):
         await self.bot.wait_until_ready()
 
@@ -376,9 +380,10 @@ class DailyTrivia(commands.Cog):
     @app_commands.describe(enabled="Set to True to enable, False to disable.")
     async def trivia_toggle(self, interaction: discord.Interaction, enabled: bool):
         await interaction.response.defer(ephemeral=True)
-        cfg = self.get_guild_config(interaction.guild_id)
-        cfg["enabled"] = enabled
-        await self.save()
+        async with self.config_lock:
+            cfg = self.get_guild_config(interaction.guild_id)
+            cfg["enabled"] = enabled
+            self.config_is_dirty = True
         state_text = "Enabled" if enabled else "Disabled"
         embed = discord.Embed(description=f"✅ Daily trivia is now **{state_text}**.", color=EMBED_COLOR_TRIVIA)
         embed.set_footer(text=self.get_footer_text())
@@ -387,9 +392,10 @@ class DailyTrivia(commands.Cog):
     @trivia.command(name="channel", description="Set the channel for daily trivia questions.")
     async def set_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
         await interaction.response.defer(ephemeral=True)
-        cfg = self.get_guild_config(interaction.guild_id)
-        cfg["channel_id"] = channel.id
-        await self.save()
+        async with self.config_lock:
+            cfg = self.get_guild_config(interaction.guild_id)
+            cfg["channel_id"] = channel.id
+            self.config_is_dirty = True
         embed = discord.Embed(description=f"✅ Trivia will now post in {channel.mention}.", color=EMBED_COLOR_TRIVIA)
         embed.set_footer(text=self.get_footer_text())
         await interaction.followup.send(embed=embed)
@@ -399,9 +405,10 @@ class DailyTrivia(commands.Cog):
         await interaction.response.defer(ephemeral=True)
         try:
             time.fromisoformat(time_str)
-            cfg = self.get_guild_config(interaction.guild_id)
-            cfg["time"] = time_str
-            await self.save()
+            async with self.config_lock:
+                cfg = self.get_guild_config(interaction.guild_id)
+                cfg["time"] = time_str
+                self.config_is_dirty = True
             embed = discord.Embed(description=f"✅ Trivia will now post daily at **{time_str}**.", color=EMBED_COLOR_TRIVIA)
             embed.set_footer(text=self.get_footer_text())
             await interaction.followup.send(embed=embed)
@@ -412,80 +419,4 @@ class DailyTrivia(commands.Cog):
 
     @trivia.command(name="timezone", description="Set your server's timezone for accurate posting.")
     @app_commands.describe(timezone="E.g., America/New_York, Europe/London, etc.")
-    async def set_timezone(self, interaction: discord.Interaction, timezone: str):
-        await interaction.response.defer(ephemeral=True)
-        if timezone not in pytz.all_timezones_set:
-            embed = discord.Embed(title="❌ Invalid Timezone", description="Please use a valid **TZ Database Name**.\nFind a list [here](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones).", color=discord.Color.red())
-            embed.set_footer(text=self.get_footer_text())
-            return await interaction.followup.send(embed=embed)
-        
-        cfg = self.get_guild_config(interaction.guild_id)
-        cfg["timezone"] = timezone
-        await self.save()
-        now_local = datetime.now(pytz.timezone(timezone))
-        embed = discord.Embed(description=f"✅ Timezone set to **{timezone}**.\nMy current time for you is `{now_local.strftime('%H:%M:%S')}`.", color=EMBED_COLOR_TRIVIA)
-        embed.set_footer(text=self.get_footer_text())
-        await interaction.followup.send(embed=embed)
-        
-    @trivia.command(name="reveal_delay", description="Set the delay in minutes to reveal the answer.")
-    @app_commands.describe(minutes="Delay in minutes (1-1440).")
-    async def set_reveal(self, interaction: discord.Interaction, minutes: app_commands.Range[int, 1, 1440]):
-        await interaction.response.defer(ephemeral=True)
-        cfg = self.get_guild_config(interaction.guild_id)
-        cfg["reveal_delay"] = minutes
-        await self.save()
-        embed = discord.Embed(description=f"⏰ The answer will now be revealed **{minutes}** minutes after the question.", color=EMBED_COLOR_TRIVIA)
-        embed.set_footer(text=self.get_footer_text())
-        await interaction.followup.send(embed=embed)
-        
-    @trivia.command(name="postnow", description="Manually post a new trivia question right now.")
-    async def trivia_postnow(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        cfg = self.get_guild_config(interaction.guild_id)
-        
-        if not cfg.get("enabled"):
-            return await interaction.followup.send("Trivia is currently disabled. Enable it with `/trivia toggle`.")
-        if not cfg.get("channel_id"):
-            return await interaction.followup.send("The trivia channel has not been set. Set it with `/trivia channel`.")
-        
-        is_active = any(p['channel_id'] == cfg['channel_id'] for p in cfg.get('pending_answers', []))
-        if is_active:
-            return await interaction.followup.send("A trivia question is already active in the configured channel.")
-
-        posted_message = await self.post_trivia_question(interaction.guild_id, cfg)
-        if posted_message:
-            await interaction.followup.send(f"✅ Trivia question posted successfully in {posted_message.channel.mention}!")
-        else:
-            await interaction.followup.send("❌ Failed to post a trivia question. Please check the console for errors.")
-
-    @trivia.command(name="skip", description="Skips the current active trivia question.")
-    async def trivia_skip(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        active_question = None
-        async with self.config_lock:
-            current_config = load_config_trivia()
-            cfg = current_config.setdefault(str(interaction.guild_id), self.get_guild_config(interaction.guild_id))
-            pending = cfg.get("pending_answers", [])
-            active_question = next((q for q in pending if q.get('channel_id') == cfg.get('channel_id')), None)
-            
-            if not active_question:
-                return await interaction.followup.send("There is no active trivia question to skip.")
-            
-            cfg["pending_answers"].remove(active_question)
-            save_config_trivia(current_config)
-            self.config = current_config
-        
-        try:
-            channel = self.bot.get_channel(active_question['channel_id'])
-            original_msg = await channel.fetch_message(active_question['message_id'])
-            await original_msg.edit(view=None)
-            skip_embed = discord.Embed(description=f"This trivia question has been skipped by an administrator.", color=discord.Color.orange())
-            skip_embed.set_footer(text=self.get_footer_text())
-            await original_msg.reply(embed=skip_embed)
-        except (discord.NotFound, discord.Forbidden):
-            log_trivia.warning(f"Could not find or edit original trivia message {active_question['message_id']} to skip it.")
-        
-        await interaction.followup.send("✅ The active trivia question has been skipped.")
-
-async def setup(bot: commands.Bot):
-    await bot.add_cog(DailyTrivia(bot))
+    async def set_timezone(self, interaction: discord.

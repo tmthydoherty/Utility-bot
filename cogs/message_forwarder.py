@@ -66,6 +66,8 @@ class MessageForwarder(commands.Cog):
     @app_commands.command(name="forwardset", description="Set a channel to be forwarded to a specific thread.")
     @app_commands.checks.has_permissions(administrator=True)
     async def forward_set(self, interaction: discord.Interaction, source_channel: discord.TextChannel, target_thread: discord.Thread):
+        await interaction.response.defer(ephemeral=True)
+
         guild_id_str = str(interaction.guild_id)
         if guild_id_str not in self.config: self.config[guild_id_str] = {}
         
@@ -74,18 +76,20 @@ class MessageForwarder(commands.Cog):
         except discord.Forbidden:
             embed = discord.Embed(description="❌ I don't have permission to create webhooks in that thread.", color=discord.Color.red())
             embed.set_footer(text=self.get_footer_text())
-            return await interaction.response.send_message(embed=embed, ephemeral=True)
+            return await interaction.followup.send(embed=embed)
         
         self.config[guild_id_str][str(source_channel.id)] = {"thread_id": target_thread.id, "webhook_url": webhook.url}
         save_config_forwarder(self.config)
         
         embed = discord.Embed(description=f"✅ Forwarding enabled from {source_channel.mention} to **{target_thread.name}**.", color=EMBED_COLOR_FORWARDER)
         embed.set_footer(text=self.get_footer_text())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="forwardremove", description="Stop forwarding messages from a channel.")
     @app_commands.checks.has_permissions(administrator=True)
     async def forward_remove(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        await interaction.response.defer(ephemeral=True)
+
         rule = self.config.get(str(interaction.guild_id), {}).pop(str(channel.id), None)
         
         if rule:
@@ -97,11 +101,11 @@ class MessageForwarder(commands.Cog):
             save_config_forwarder(self.config)
             embed = discord.Embed(description=f"✅ Forwarding has been disabled for {channel.mention}.", color=EMBED_COLOR_FORWARDER)
             embed.set_footer(text=self.get_footer_text())
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.followup.send(embed=embed)
         else:
             embed = discord.Embed(description=f"There was no forwarding rule set up for {channel.mention} to remove.", color=discord.Color.yellow())
             embed.set_footer(text=self.get_footer_text())
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.followup.send(embed=embed)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(MessageForwarder(bot))

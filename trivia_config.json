@@ -20,7 +20,128 @@
         "monthly_scores": {},
         "last_winner_announcement": "",
         "asked_questions": [],
-        "question_cache": [],
+        "question_cache": [
+            {
+                "type": "multiple",
+                "difficulty": "medium",
+                "category": "Entertainment: Video Games",
+                "question": "In The Elder Scrolls V: Skyrim, who is the jester in the dark brotherhood?",
+                "correct_answer": "Cicero",
+                "incorrect_answers": [
+                    "Lucien Lachance",
+                    "Archimedes",
+                    "Astrid"
+                ]
+            },
+            {
+                "type": "multiple",
+                "difficulty": "easy",
+                "category": "Entertainment: Video Games",
+                "question": "In the Halo series, which era of SPARTAN is Master Chief? ",
+                "correct_answer": "SPARTAN-II",
+                "incorrect_answers": [
+                    "SPARTAN-I",
+                    "SPARTAN-III",
+                    "SPARTAN-IV"
+                ]
+            },
+            {
+                "type": "multiple",
+                "difficulty": "medium",
+                "category": "Vehicles",
+                "question": "Which car brand does NOT belong to General Motors?",
+                "correct_answer": "Ford",
+                "incorrect_answers": [
+                    "Buick",
+                    "Cadillac",
+                    "Chevrolet"
+                ]
+            },
+            {
+                "type": "multiple",
+                "difficulty": "medium",
+                "category": "Entertainment: Music",
+                "question": "Which European capital city gives its name to a 1981 song by Ultravox?",
+                "correct_answer": "Vienna",
+                "incorrect_answers": [
+                    "Berlin",
+                    "Paris",
+                    "Brussels"
+                ]
+            },
+            {
+                "type": "multiple",
+                "difficulty": "hard",
+                "category": "Entertainment: Japanese Anime &amp; Manga",
+                "question": "In &quot;One Piece&quot;, who confirms the existence of the legendary treasure, One Piece?",
+                "correct_answer": "Edward &quot;Whitebeard&quot; Newgate",
+                "incorrect_answers": [
+                    "Former Marine Fleet Admiral Sengoku",
+                    "Pirate King Gol D Roger",
+                    "Silvers Rayleigh"
+                ]
+            },
+            {
+                "type": "multiple",
+                "difficulty": "medium",
+                "category": "Entertainment: Music",
+                "question": "Where did the British Boy Band &quot;Bros&quot; come from?",
+                "correct_answer": "Camberley",
+                "incorrect_answers": [
+                    "Guildford",
+                    "Aldershot",
+                    "Bagshot"
+                ]
+            },
+            {
+                "type": "multiple",
+                "difficulty": "medium",
+                "category": "Entertainment: Video Games",
+                "question": "In the game &quot;Subnautica&quot;, which feature was removed due to performance issues in 2016?",
+                "correct_answer": "Terraforming",
+                "incorrect_answers": [
+                    "Building",
+                    "Crafting",
+                    "Multiplayer"
+                ]
+            },
+            {
+                "type": "multiple",
+                "difficulty": "easy",
+                "category": "Science &amp; Nature",
+                "question": "Which of these bones is hardest to break?",
+                "correct_answer": "Femur",
+                "incorrect_answers": [
+                    "Cranium",
+                    "Humerus",
+                    "Tibia"
+                ]
+            },
+            {
+                "type": "multiple",
+                "difficulty": "medium",
+                "category": "General Knowledge",
+                "question": "Which of these Nicktoons were NOT originally a short on Oh Yeah! Cartoons before becoming their own series?",
+                "correct_answer": "Danny Phantom",
+                "incorrect_answers": [
+                    "ChalkZone",
+                    "My Life as a Teenage Robot",
+                    "The Fairly OddParents"
+                ]
+            },
+            {
+                "type": "multiple",
+                "difficulty": "hard",
+                "category": "Entertainment: Books",
+                "question": "Which author and poet famously wrote the line, &quot;The female of the species is more deadly than the male&quot;?",
+                "correct_answer": "Rudyard Kipling",
+                "incorrect_answers": [
+                    "Edgar Allan Poe",
+                    "William Shakespeare",
+                    "William Wordsworth"
+                ]
+            }
+        ],
         "reveal_delay": 60,
         "last_posted_date": "2025-08-03"
     }

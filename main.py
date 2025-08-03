@@ -26,7 +26,6 @@ class MyBot(commands.Bot):
         # This function is called when the bot logs in
         # It finds and loads all .py files in the 'cogs' directory
         for filename in os.listdir('./cogs'):
-            # MODIFIED LINE
             if filename.endswith('.py') and not filename.startswith('__'):
                 try:
                     await self.load_extension(f'cogs.{filename[:-3]}')
@@ -34,12 +33,28 @@ class MyBot(commands.Bot):
                 except Exception as e:
                     print(f"❌ Failed to load cog {filename}: {e}")
         
-        # Sync slash commands to Discord
+        # This initial sync is a good default, but the manual command is faster for testing
         await self.tree.sync()
 
     async def on_ready(self):
         print(f'Logged in as {self.user} (ID: {self.user.id})')
         print('------')
+    
+    # MODIFIED - More powerful manual sync command
+    @commands.command()
+    @commands.is_owner()
+    async def sync(self, ctx: commands.Context, guild: str = None):
+        """
+        Manually syncs slash commands.
+        Usage: !sync -> global sync
+               !sync guild -> syncs to the current guild
+        """
+        if guild and guild.lower() == 'guild':
+            synced = await self.tree.sync(guild=ctx.guild)
+            await ctx.send(f"✅ Synced {len(synced)} commands to this guild.")
+        else:
+            synced = await self.tree.sync()
+            await ctx.send(f"✅ Synced {len(synced)} commands globally.")
 
 async def main():
     if not BOT_TOKEN:

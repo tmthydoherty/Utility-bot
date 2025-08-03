@@ -56,6 +56,7 @@ class MessageForwarder(commands.Cog):
     async def on_message(self, message: discord.Message):
         if not message.guild or message.webhook_id: return
         
+        rule = None
         async with self.config_lock:
             rule = self.config.get(str(message.guild.id), {}).get(str(message.channel.id))
         
@@ -90,10 +91,21 @@ class MessageForwarder(commands.Cog):
     async def forward_set(self, interaction: discord.Interaction, source_channel: discord.TextChannel, target_thread: discord.Thread):
         await interaction.response.defer(ephemeral=True)
         
+        webhook = None
         try:
-            webhook = await target_thread.create_webhook(name=f"Forwarder - {source_channel.name}")
-        except discord.Forbidden:
-            embed = discord.Embed(description="❌ I don't have permission to create webhooks in that thread.", color=discord.Color.red())
+            # Add a 10-second timeout to the API call
+            webhook = await asyncio.wait_for(
+                target_thread.create_webhook(name=f"Forwarder - {source_channel.name}"),
+                timeout=10.0
+            )
+        except asyncio.TimeoutError:
+            embed = discord.Embed(description="❌ The request to create a webhook timed out. Discord might be having issues. Please try again later.", color=discord.Color.red())
+            embed.set_footer(text=self.get_footer_text())
+            return await interaction.followup.send(embed=embed)
+        except discord.HTTPException as e:
+            # Catch other potential API errors (like forbidden, invalid name, etc.)
+            log_forwarder.error(f"Failed to create webhook: {e}")
+            embed = discord.Embed(description=f"❌ An error occurred while creating the webhook. I may be missing permissions, or the thread is archived.", color=discord.Color.red())
             embed.set_footer(text=self.get_footer_text())
             return await interaction.followup.send(embed=embed)
         
@@ -124,8 +136,11 @@ class MessageForwarder(commands.Cog):
         if rule_was_found:
             if webhook_url_to_delete:
                 try:
-                    await discord.Webhook.from_url(webhook_url_to_delete, session=self.session).delete()
-                except (discord.NotFound, discord.InvalidArgument): pass
+                    # Also add a timeout here for safety
+                    webhook_to_delete = discord.Webhook.from_url(webhook_url_to_delete, session=self.session)
+                    await asyncio.wait_for(webhook_to_delete.delete(), timeout=10.0)
+                except (discord.NotFound, discord.InvalidArgument, asyncio.TimeoutError, discord.HTTPException):
+                    pass # We don't need to tell the user if deleting the webhook fails
             
             embed = discord.Embed(description=f"✅ Forwarding has been disabled for {channel.mention}.", color=EMBED_COLOR_FORWARDER)
             embed.set_footer(text=self.get_footer_text())

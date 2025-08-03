@@ -169,8 +169,8 @@ class ModDiscussion(commands.Cog):
             for thread in list(channel.threads):
                 if thread.owner_id == self.bot.user.id and not thread.archived:
                     try:
-                        history = await thread.history(limit=1).flatten()
-                        last_message = history[0] if history else None
+                        history = [msg async for msg in thread.history(limit=1)]
+			last_message = history[0] if history else None
                         
                         if last_message:
                             inactive_duration = datetime.now(timezone.utc) - last_message.created_at

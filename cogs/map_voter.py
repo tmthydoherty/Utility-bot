@@ -11,7 +11,7 @@ import logging
 log_map = logging.getLogger(__name__)
 
 CONFIG_FILE_MAP = "map_voter_config.json"
-EMBED_COLOR_MAP = 0xE91E63 # A magenta/pink color for games
+EMBED_COLOR_MAP = 0xE91E63
 
 def load_config_map():
     if os.path.exists(CONFIG_FILE_MAP):
@@ -49,10 +49,5 @@ class MapVoter(commands.Cog):
         
     def get_footer_text(self):
         return f"{self.bot.user.name} • Map Voter"
-
-    # All methods from the final version of MapVoter go here, updated with the
-    # new footer and EMBED_COLOR. The logic remains the same.
-    # ... (Full code for MapVoter cog) ...
-
-async def setup(bot: commands.Bot):
-    await bot.add_cog(MapVoter(bot))
+        
+    # ... (The rest of the cog's methods like _ensure_new_map_format, handle_vote, conclude_vote, loops, and commands go here)

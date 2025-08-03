@@ -16,9 +16,9 @@ class MyBot(commands.Bot):
     def __init__(self):
         # Define the intents your bot needs
         intents = discord.Intents.default()
-        intents.message_content = True # Needed for some commands/features
-        intents.members = True         # Needed to get member data
-        intents.presences = True       # Needed for status-based features
+        intents.message_content = True 
+        intents.members = True
+        intents.presences = True
 
         super().__init__(command_prefix="!", intents=intents)
 
@@ -26,7 +26,8 @@ class MyBot(commands.Bot):
         # This function is called when the bot logs in
         # It finds and loads all .py files in the 'cogs' directory
         for filename in os.listdir('./cogs'):
-            if filename.endswith('.py'):
+            # MODIFIED LINE
+            if filename.endswith('.py') and not filename.startswith('__'):
                 try:
                     await self.load_extension(f'cogs.{filename[:-3]}')
                     print(f"✅ Loaded Cog: {filename}")
@@ -42,11 +43,4 @@ class MyBot(commands.Bot):
 
 async def main():
     if not BOT_TOKEN:
-        print("Error: DISCORD_BOT_TOKEN not found in .env file.")
-        return
-        
-    bot = MyBot()
-    await bot.start(BOT_TOKEN)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+        print("Error: DIS

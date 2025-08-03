@@ -43,4 +43,11 @@ class MyBot(commands.Bot):
 
 async def main():
     if not BOT_TOKEN:
-        print("Error: DIS
+        print("Error: DISCORD_BOT_TOKEN not found in .env file.")
+        return
+        
+    bot = MyBot()
+    await bot.start(BOT_TOKEN)
+
+if __name__ == "__main__":
+    asyncio.run(main())

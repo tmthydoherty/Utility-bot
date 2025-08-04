@@ -23,6 +23,7 @@ EMBED_COLOR_TRIVIA = 0x1ABC9C
 CACHE_MIN_SIZE = 5
 CACHE_TARGET_SIZE = 10
 INTERACTION_HISTORY_DAYS = 60
+LEADERBOARD_LIMIT = 15
 
 def load_config_trivia():
     if os.path.exists(CONFIG_FILE_TRIVIA):
@@ -110,8 +111,7 @@ class DONQuestionView(discord.ui.View):
         self.answered = True
         self.stop()
         self.cog.don_pending_users.discard(self.user_id)
-        for item in self.children:
-            item.disabled = True
+        for item in self.children: item.disabled = True
         
         is_correct = (button.label == self.correct_answer)
         
@@ -176,6 +176,12 @@ class HelpView(discord.ui.View):
 
 # --- Main Cog ---
 class DailyTrivia(commands.Cog):
+    # Command groups are defined as class attributes.
+    # This is a standard pattern and should not cause registration issues
+    # unless the cog is loaded multiple times without a full bot restart.
+    trivia = app_commands.Group(name="trivia", description="Commands for the daily trivia.")
+    mystats = app_commands.Group(name="mystats", description="Commands for viewing personal trivia stats.")
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.config = load_config_trivia()
@@ -217,6 +223,10 @@ class DailyTrivia(commands.Cog):
                 log_trivia.info(f"Removed configuration for guild {guild.id} as I have left.")
 
     async def on_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        # Prevent double-logging CommandAlreadyRegistered on reload
+        if isinstance(error, app_commands.CommandAlreadyRegistered):
+            return
+
         embed = discord.Embed(color=discord.Color.red())
         embed.set_footer(text="Daily Trivia")
         if isinstance(error, app_commands.MissingPermissions):
@@ -236,12 +246,15 @@ class DailyTrivia(commands.Cog):
             self.config[gid] = {
                 "channel_id": None, "time": "12:00", "timezone": "UTC", "enabled": False,
                 "pending_answers": [], "asked_questions": [], "question_cache": [], 
-                "reveal_delay": 60, "monthly_firsts": {}, 
+                "reveal_delay": 60, 
                 "last_winner_announcement": datetime.now(timezone.utc).isoformat(),
                 "daily_interactions": [], "admin_role_id": None, "last_day_winner_id": None,
-                "last_question_data": None, "mutes": {}, "question_stats": []
+                "last_question_data": None, "mutes": {}, "question_stats": [],
+                "monthly_firsts": {}, "monthly_correct_answers": {}
             }
+        # Set default for new keys to avoid KeyErrors on old configs
         self.config[gid].setdefault("monthly_firsts", {})
+        self.config[gid].setdefault("monthly_correct_answers", {})
         self.config[gid].setdefault("last_winner_announcement", "2000-01-01T00:00:00.000000+00:00")
         self.config[gid].setdefault("question_cache", [])
         self.config[gid].setdefault("reveal_delay", 60)
@@ -333,10 +346,17 @@ class DailyTrivia(commands.Cog):
 
         async with self.config_lock:
             cfg = self.get_guild_config(channel.guild.id)
+            
+            # Update scores for all winners
+            correct_answers_board = cfg.setdefault("monthly_correct_answers", {})
+            for winner_id in winner_ids:
+                winner_id_str = str(winner_id)
+                correct_answers_board[winner_id_str] = correct_answers_board.get(winner_id_str, 0) + 1
+
             if winner_ids:
                 first_winner_id = winner_ids[0]
-                monthly_firsts = cfg.setdefault("monthly_firsts", {})
-                monthly_firsts[str(first_winner_id)] = monthly_firsts.get(str(first_winner_id), 0) + 1
+                firsts_board = cfg.setdefault("monthly_firsts", {})
+                firsts_board[str(first_winner_id)] = firsts_board.get(str(first_winner_id), 0) + 1
                 cfg["last_day_winner_id"] = first_winner_id
 
                 if first_winner_id not in self.don_pending_users:
@@ -583,6 +603,7 @@ class DailyTrivia(commands.Cog):
                     if not firsts:
                         async with self.config_lock:
                             cfg["monthly_firsts"] = {}
+                            cfg["monthly_correct_answers"] = {}
                             cfg["question_stats"] = []
                             cfg["last_winner_announcement"] = now.isoformat()
                             self.config_is_dirty = True
@@ -622,6 +643,7 @@ class DailyTrivia(commands.Cog):
                     async with self.config_lock:
                         cfg_to_update = self.get_guild_config(int(guild_id_str))
                         cfg_to_update["monthly_firsts"] = {}
+                        cfg_to_update["monthly_correct_answers"] = {}
                         cfg_to_update["question_stats"] = []
                         cfg_to_update["last_winner_announcement"] = now.isoformat()
                         self.config_is_dirty = True
@@ -697,10 +719,8 @@ class DailyTrivia(commands.Cog):
     async def before_save_loop(self):
         await self.bot.wait_until_ready()
 
-    # --- Commands ---
-    trivia = app_commands.Group(name="trivia", description="Commands for the daily trivia.")
-    mystats = app_commands.Group(name="mystats", description="Commands for viewing personal trivia stats.")
-    
+    # --- Utility Methods for Commands ---
+
     async def timezone_autocomplete(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
         return [app_commands.Choice(name=tz, value=tz) for tz in pytz.all_timezones if current.lower() in tz.lower()][:25]
         
@@ -709,13 +729,14 @@ class DailyTrivia(commands.Cog):
         if category == "Game Rules":
             embed.description = "Detailed explanation of the trivia game rules."
             embed.add_field(name="\U0001F4DC Gameplay Flow", value="A new question is posted daily. Click the buttons to submit your answer. After a delay, the answer is revealed, and scores are updated.", inline=False)
-            embed.add_field(name="\U0001F947 First Correct Answer", value="The first person to answer correctly gets a point on the monthly `/trivia firstsboard`.", inline=False)
-            embed.add_field(name="\U0001F3B2 Double or Nothing", value="The first winner is offered a high-stakes bonus round via a private prompt in the channel. Win, and you get a bonus point. Lose, and you lose the point you just earned.", inline=False)
-            embed.add_field(name="\u2694\uFE0F Sudden Death Tiebreaker", value="If the month ends in a tie, the contenders face off in a live, 5-round, fast-paced match to determine the ultimate champion.", inline=False)
+            embed.add_field(name="\U0001F947 Scoring: Firsts vs. Totals", value="There are two leaderboards: `/trivia firstsboard` for the fastest correct answer, and `/trivia leaderboard` for the most total correct answers. Both reset monthly.", inline=False)
+            embed.add_field(name="\U0001F3B2 Double or Nothing", value="The first winner is offered a high-stakes bonus round. Win, and you get a bonus point on the `firstsboard`. Lose, and you lose the point you just earned.", inline=False)
+            embed.add_field(name="\u2694\uFE0F Sudden Death Tiebreaker", value="If the month ends in a tie on the `firstsboard`, the contenders face off in a live match to determine the champion.", inline=False)
             embed.add_field(name="\U0001F91D Nemesis & Ally", value="The `/mystats` command shows which user most often beats you to the first answer (your Nemesis) and who you most often win alongside (your Ally).", inline=False)
         elif category == "User Commands":
             embed.description = "Commands available to everyone."
             embed.add_field(name="`/trivia help`", value="Shows this interactive help message.", inline=False)
+            embed.add_field(name="`/trivia leaderboard`", value="Displays the monthly leaderboard for most correct answers.", inline=False)
             embed.add_field(name="`/trivia firstsboard`", value="Displays the monthly leaderboard for fastest answers.", inline=False)
             embed.add_field(name="`/mystats view`", value="Shows your personal trivia stats.", inline=False)
             embed.add_field(name="`/mystats compare`", value="Compares your stats against another user.", inline=False)
@@ -730,10 +751,63 @@ class DailyTrivia(commands.Cog):
             embed.add_field(name="`/trivia resetserver`", value="[DANGEROUS] Wipes all trivia data for the server.", inline=False)
         return embed
 
+    # --- Application Commands ---
+
     @trivia.command(name="help", description="Explains the trivia rules and lists commands.")
     async def trivia_help(self, interaction: discord.Interaction):
         embed = self.get_help_embed("Game Rules")
         await interaction.response.send_message(embed=embed, view=HelpView(self), ephemeral=True)
+
+    @trivia.command(name="leaderboard", description="Shows the monthly leaderboard for total correct answers.")
+    async def trivia_leaderboard(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        cfg = self.get_guild_config(interaction.guild_id)
+        scores = cfg.get("monthly_correct_answers", {})
+
+        if not scores:
+            embed = discord.Embed(description="The monthly leaderboard is empty! Be the first to get a correct answer.", color=EMBED_COLOR_TRIVIA)
+            await interaction.followup.send(embed=embed)
+            return
+
+        sorted_scores = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+        
+        month_name = datetime.now(pytz.timezone(cfg.get("timezone", "UTC"))).strftime("%B")
+        embed = discord.Embed(title=f"\U0001F4C8 Monthly Leaderboard: {month_name}", description="Top players by total correct answers.", color=EMBED_COLOR_TRIVIA)
+        
+        lines = []
+        for i, (user_id, score) in enumerate(sorted_scores[:LEADERBOARD_LIMIT]):
+            rank_emoji = {0: "\U0001F947", 1: "\U0001F948", 2: "\U0001F949"}.get(i, f"**#{i+1}**")
+            lines.append(f"{rank_emoji} <@{user_id}>: `{score}` point(s)")
+        
+        embed.description = "\n".join(lines)
+        embed.set_footer(text="Scores reset on the 1st of each month.")
+        await interaction.followup.send(embed=embed)
+
+    @trivia.command(name="firstsboard", description="Shows the monthly leaderboard for fastest correct answers.")
+    async def trivia_firstsboard(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        cfg = self.get_guild_config(interaction.guild_id)
+        scores = cfg.get("monthly_firsts", {})
+
+        if not scores:
+            embed = discord.Embed(description="The monthly firsts board is empty! Be the first to get a fastest answer.", color=EMBED_COLOR_TRIVIA)
+            await interaction.followup.send(embed=embed)
+            return
+
+        sorted_scores = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+        
+        month_name = datetime.now(pytz.timezone(cfg.get("timezone", "UTC"))).strftime("%B")
+        embed = discord.Embed(title=f"\U0001F3C5 Monthly Firsts Board: {month_name}", description="Top players by fastest correct answers.", color=0xFFD700)
+        
+        lines = []
+        for i, (user_id, score) in enumerate(sorted_scores[:LEADERBOARD_LIMIT]):
+            rank_emoji = {0: "\U0001F947", 1: "\U0001F948", 2: "\U0001F949"}.get(i, f"**#{i+1}**")
+            lines.append(f"{rank_emoji} <@{user_id}>: `{score}` point(s)")
+        
+        embed.description = "\n".join(lines)
+        embed.set_footer(text="Scores reset on the 1st of each month. Winner may be decided by a tiebreaker.")
+        await interaction.followup.send(embed=embed)
+
 
     @trivia.command(name="lastquestion", description="Shows the results of the last trivia question.")
     async def lastquestion(self, interaction: discord.Interaction):
@@ -745,7 +819,6 @@ class DailyTrivia(commands.Cog):
             await interaction.followup.send("There is no previous question data to show.", ephemeral=True)
             return
         
-        # Reconstruct the results embed from stored data
         winner_ids = last_question_data.get("winners", [])
         all_answers_dict = last_question_data.get("all_answers", {})
         reconstructed_embed = discord.Embed(title="\U0001F3C6 Last Trivia Results", description=f"**Question:** {last_question_data['question']}", color=discord.Color.gold())

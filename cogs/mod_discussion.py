@@ -95,15 +95,28 @@ class ModDiscussion(commands.Cog):
             embed.set_footer(text=self.get_footer_text())
             return await interaction.response.send_message(embed=embed, ephemeral=True)
         
-        # Only add the command author to the thread
+        # Add the command author to the thread
         await thread.add_user(interaction.user)
 
         # Confirm creation to the moderator
         embed = discord.Embed(description=f"✅ Thread created: {thread.mention}", color=EMBED_COLOR_MOD)
         embed.set_footer(text=self.get_footer_text())
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        # Send an initial message in the new thread, then edit it to ping mods
+        mod_roles_ids = cfg.get("mod_roles", [])
+        if mod_roles_ids:
+            initial_message = await thread.send("Initializing discussion...")
+            role_mentions = " ".join(f"<@&{role_id}>" for role_id in mod_roles_ids)
+            thread_embed = discord.Embed(
+                title=f"Discussion Regarding {user.display_name}",
+                description=f"This thread was created by {interaction.user.mention} to discuss the user {user.mention}.",
+                color=EMBED_COLOR_MOD
+            )
+            thread_embed.set_footer(text=self.get_footer_text())
+            await initial_message.edit(content=role_mentions, embed=thread_embed, allowed_mentions=discord.AllowedMentions(roles=True))
         
-        # If an update channel is set, send a log and then silently ping roles
+        # Send a clean log to the update channel (no image, no pings)
         if update_channel_id := cfg.get("update_channel_id"):
             if update_channel := self.bot.get_channel(update_channel_id):
                 log_embed = discord.Embed(
@@ -114,18 +127,7 @@ class ModDiscussion(commands.Cog):
                 )
                 log_embed.set_author(name=f"Moderation Action")
                 log_embed.set_footer(text=self.get_footer_text())
-                
-                # Send the initial message without pings
-                log_message = await update_channel.send(embed=log_embed)
-                
-                # Prepare the silent pings
-                mod_roles_ids = cfg.get("mod_roles", [])
-                if mod_roles_ids:
-                    allowed_mentions = discord.AllowedMentions(roles=True)
-                    role_mentions = " ".join(f"<@&{role_id}>" for role_id in mod_roles_ids)
-                    
-                    # Edit the message to add the pings
-                    await log_message.edit(content=role_mentions, allowed_mentions=allowed_mentions)
+                await update_channel.send(embed=log_embed)
 
         # Note: The reminder system is still tied to the target user.
         # This functionality may need to be reconsidered if the user is not in the thread.

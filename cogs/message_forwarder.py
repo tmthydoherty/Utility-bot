@@ -54,11 +54,21 @@ class MessageForwarder(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if not message.guild or message.webhook_id: return
-        
-        rule = None
+        if not message.guild:
+            return
+
         async with self.config_lock:
-            rule = self.config.get(str(message.guild.id), {}).get(str(message.channel.id))
+            guild_cfg = self.config.get(str(message.guild.id), {})
+            
+            # MODIFIED - Loop prevention logic
+            # Check if the message is from one of OUR OWN managed webhooks
+            if message.webhook_id:
+                managed_webhook_ids = guild_cfg.get("managed_webhook_ids", [])
+                if message.webhook_id in managed_webhook_ids:
+                    return # It's our own message, so we stop to prevent a loop.
+            
+            # If we reach here, it's either a user message or an external webhook message
+            rule = guild_cfg.get(str(message.channel.id))
         
         if not rule or not rule.get("webhook_url"): return
 
@@ -71,8 +81,6 @@ class MessageForwarder(commands.Cog):
                 return
 
             files = [await attachment.to_file() for attachment in message.attachments]
-            
-            # MODIFIED - Removed the "Jump to Original" link
             content_to_send = message.content
             
             if not content_to_send.strip() and not files and not message.embeds:
@@ -83,7 +91,7 @@ class MessageForwarder(commands.Cog):
                 username=message.author.display_name,
                 avatar_url=message.author.display_avatar.url,
                 files=files,
-                embed=message.embeds[0] if message.embeds else None,
+                embeds=message.embeds, # Use embeds to support multiple
                 allowed_mentions=discord.AllowedMentions.none(),
                 thread=target_thread
             )
@@ -91,8 +99,8 @@ class MessageForwarder(commands.Cog):
             if isinstance(e, discord.NotFound) or (isinstance(e, discord.HTTPException) and e.code == 10015):
                 log_forwarder.warning(f"Webhook for guild {message.guild.id}, channel {message.channel.id} not found. Removing rule.")
                 async with self.config_lock:
-                    guild_cfg = self.config.get(str(message.guild.id), {})
-                    guild_cfg.pop(str(message.channel.id), None)
+                    current_guild_cfg = self.config.get(str(message.guild.id), {})
+                    current_guild_cfg.pop(str(message.channel.id), None)
                     self.config_is_dirty = True
             else:
                 log_forwarder.error(f"Failed to forward message via webhook: {e}")
@@ -125,8 +133,14 @@ class MessageForwarder(commands.Cog):
         
         async with self.config_lock:
             guild_id_str = str(interaction.guild_id)
-            self.config.setdefault(guild_id_str, {})
-            self.config[guild_id_str][str(source_channel.id)] = {"thread_id": target_thread.id, "webhook_url": webhook.url}
+            guild_cfg = self.config.setdefault(guild_id_str, {})
+            guild_cfg[str(source_channel.id)] = {"thread_id": target_thread.id, "webhook_url": webhook.url}
+            
+            # MODIFIED - Add the new webhook's ID to our managed list
+            managed_ids = guild_cfg.setdefault("managed_webhook_ids", [])
+            if webhook.id not in managed_ids:
+                managed_ids.append(webhook.id)
+                
             self.config_is_dirty = True
         
         embed = discord.Embed(description=f"✅ Forwarding enabled from {source_channel.mention} to **{target_thread.name}**.", color=EMBED_COLOR_FORWARDER)
@@ -138,22 +152,32 @@ class MessageForwarder(commands.Cog):
     async def forward_remove(self, interaction: discord.Interaction, channel: discord.TextChannel):
         await interaction.response.defer(ephemeral=True)
         
-        webhook_url_to_delete = None
+        webhook_to_delete = None
         rule_was_found = False
         async with self.config_lock:
-            rule = self.config.get(str(interaction.guild.id), {}).pop(str(channel.id), None)
+            guild_cfg = self.config.get(str(interaction.guild.id), {})
+            rule = guild_cfg.pop(str(channel.id), None)
+            
             if rule:
                 rule_was_found = True
-                webhook_url_to_delete = rule.get("webhook_url")
+                webhook_url = rule.get("webhook_url")
+                if webhook_url:
+                    try:
+                        # Extract the ID from the URL to remove it from our managed list
+                        webhook_id = int(webhook_url.split('/')[-2])
+                        if "managed_webhook_ids" in guild_cfg and webhook_id in guild_cfg["managed_webhook_ids"]:
+                            guild_cfg["managed_webhook_ids"].remove(webhook_id)
+                        webhook_to_delete = discord.Webhook.from_url(webhook_url, session=self.session)
+                    except (ValueError, IndexError):
+                        pass
                 self.config_is_dirty = True
         
         if rule_was_found:
-            if webhook_url_to_delete:
+            if webhook_to_delete:
                 try:
-                    webhook_to_delete = discord.Webhook.from_url(webhook_url_to_delete, session=self.session)
                     await asyncio.wait_for(webhook_to_delete.delete(), timeout=10.0)
                 except (discord.NotFound, discord.HTTPException, asyncio.TimeoutError):
-                    pass # Ignore if we can't delete the webhook
+                    pass
             
             embed = discord.Embed(description=f"✅ Forwarding has been disabled for {channel.mention}.", color=EMBED_COLOR_FORWARDER)
             embed.set_footer(text=self.get_footer_text())

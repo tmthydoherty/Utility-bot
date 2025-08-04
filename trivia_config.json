@@ -4,19 +4,7 @@
         "time": "12:00",
         "timezone": "UTC",
         "enabled": true,
-        "pending_answers": [
-            {
-                "message_id": 1401706598971215983,
-                "channel_id": 1401706501030285433,
-                "question": "Dry ice is the solid form of what substance?",
-                "answer": "Carbon dioxide",
-                "reveal_at_iso": "2025-08-04T00:21:35.723691+00:00",
-                "winners": [],
-                "all_answers": {
-                    "356774449032331264": "Nitrogen"
-                }
-            }
-        ],
+        "pending_answers": [],
         "monthly_scores": {},
         "last_winner_announcement": "2025-08-03T23:59:15.890221+00:00",
         "asked_questions": [],

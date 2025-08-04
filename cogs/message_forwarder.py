@@ -57,32 +57,39 @@ class MessageForwarder(commands.Cog):
         if not message.guild:
             return
 
+        # First, check if this message should be forwarded at all.
         async with self.config_lock:
             guild_cfg = self.config.get(str(message.guild.id), {})
+            rule = guild_cfg.get(str(message.channel.id))
             
-            # MODIFIED - Loop prevention logic
-            # Check if the message is from one of OUR OWN managed webhooks
+            # If there's no rule for this channel, stop.
+            if not rule or not rule.get("webhook_url"):
+                return
+            
+            # If the message is from a webhook, check if it's one of our own to prevent loops.
             if message.webhook_id:
                 managed_webhook_ids = guild_cfg.get("managed_webhook_ids", [])
                 if message.webhook_id in managed_webhook_ids:
-                    return # It's our own message, so we stop to prevent a loop.
-            
-            # If we reach here, it's either a user message or an external webhook message
-            rule = guild_cfg.get(str(message.channel.id))
+                    return # It's our own message, so we stop.
         
-        if not rule or not rule.get("webhook_url"): return
-
+        # If we reach here, it's a valid message to be forwarded.
         try:
             webhook = discord.Webhook.from_url(rule["webhook_url"], session=self.session)
             target_thread = self.bot.get_channel(rule.get("thread_id"))
 
             if not target_thread:
-                log_forwarder.warning(f"Target thread {rule.get('thread_id')} not found for forwarding. Skipping.")
+                log_forwarder.warning(f"Target thread {rule.get('thread_id')} not found. Skipping.")
                 return
 
             files = [await attachment.to_file() for attachment in message.attachments]
             content_to_send = message.content
             
+            if message.stickers:
+                sticker_urls = "\n".join([sticker.url for sticker in message.stickers])
+                separator = "\n" if content_to_send else ""
+                content_to_send = f"{content_to_send}{separator}{sticker_urls}"
+
+            # Only send the placeholder if there's truly nothing in the message
             if not content_to_send.strip() and not files and not message.embeds:
                 content_to_send = "*Message had no text content or embeds.*"
 
@@ -91,7 +98,7 @@ class MessageForwarder(commands.Cog):
                 username=message.author.display_name,
                 avatar_url=message.author.display_avatar.url,
                 files=files,
-                embeds=message.embeds, # Use embeds to support multiple
+                embeds=message.embeds, # Now correctly sends all embeds
                 allowed_mentions=discord.AllowedMentions.none(),
                 thread=target_thread
             )
@@ -136,7 +143,6 @@ class MessageForwarder(commands.Cog):
             guild_cfg = self.config.setdefault(guild_id_str, {})
             guild_cfg[str(source_channel.id)] = {"thread_id": target_thread.id, "webhook_url": webhook.url}
             
-            # MODIFIED - Add the new webhook's ID to our managed list
             managed_ids = guild_cfg.setdefault("managed_webhook_ids", [])
             if webhook.id not in managed_ids:
                 managed_ids.append(webhook.id)
@@ -163,7 +169,6 @@ class MessageForwarder(commands.Cog):
                 webhook_url = rule.get("webhook_url")
                 if webhook_url:
                     try:
-                        # Extract the ID from the URL to remove it from our managed list
                         webhook_id = int(webhook_url.split('/')[-2])
                         if "managed_webhook_ids" in guild_cfg and webhook_id in guild_cfg["managed_webhook_ids"]:
                             guild_cfg["managed_webhook_ids"].remove(webhook_id)
@@ -184,8 +189,4 @@ class MessageForwarder(commands.Cog):
             await interaction.followup.send(embed=embed)
         else:
             embed = discord.Embed(description=f"There was no forwarding rule set up for {channel.mention} to remove.", color=discord.Color.yellow())
-            embed.set_footer(text=self.get_footer_text())
-            await interaction.followup.send(embed=embed)
-
-async def setup(bot: commands.Bot):
-    await bot.add_cog(MessageForwarder(bot))
+            embed.set_footer(text=self.get_footer_text

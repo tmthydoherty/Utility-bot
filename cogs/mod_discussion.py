@@ -71,7 +71,7 @@ class ModDiscussion(commands.Cog):
                     embed.set_footer(text=self.get_footer_text())
                     await update_channel.send(embed=embed)
 
-    @app_commands.command(name="moddiscussion", description="Create a private mod discussion thread for a user.")
+    @app_commands.command(name="moddiscussion", description="Create a private mod discussion thread about a user.")
     @app_commands.checks.has_permissions(manage_messages=True)
     async def moddiscussion(self, interaction: discord.Interaction, user: discord.Member):
         cfg = self.get_guild_config(interaction.guild_id)
@@ -113,7 +113,6 @@ class ModDiscussion(commands.Cog):
                     timestamp=datetime.now(timezone.utc)
                 )
                 log_embed.set_author(name=f"Moderation Action")
-                log_embed.set_thumbnail(url="https://i.imgur.com/8dKnsaG.png") # Shield icon
                 log_embed.set_footer(text=self.get_footer_text())
                 
                 # Send the initial message without pings
@@ -122,13 +121,14 @@ class ModDiscussion(commands.Cog):
                 # Prepare the silent pings
                 mod_roles_ids = cfg.get("mod_roles", [])
                 if mod_roles_ids:
-                    # Allow mentions for roles, but no others
                     allowed_mentions = discord.AllowedMentions(roles=True)
                     role_mentions = " ".join(f"<@&{role_id}>" for role_id in mod_roles_ids)
                     
                     # Edit the message to add the pings
                     await log_message.edit(content=role_mentions, allowed_mentions=allowed_mentions)
 
+        # Note: The reminder system is still tied to the target user.
+        # This functionality may need to be reconsidered if the user is not in the thread.
         cfg["threads"][str(thread.id)] = { "user_id": user.id, "created_at": datetime.now(timezone.utc).isoformat(), "reminded_24h": False, "reminded_36h": False }
         self.save()
 
@@ -219,12 +219,12 @@ class ModDiscussion(commands.Cog):
         embed.set_footer(text=self.get_footer_text())
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @modconfig.command(name="add_role", description="Add a role whose members will be added to new discussion threads.")
+    @modconfig.command(name="add_role", description="Add a role to be pinged for new discussions.")
     async def add_role(self, interaction: discord.Interaction, role: discord.Role):
         cfg = self.get_guild_config(interaction.guild_id)
         if role.id not in cfg["mod_roles"]:
             cfg["mod_roles"].append(role.id); self.save()
-            embed = discord.Embed(description=f"✅ The {role.mention} role will now be added to new discussions.", color=EMBED_COLOR_MOD)
+            embed = discord.Embed(description=f"✅ The {role.mention} role will now be pinged for new discussions.", color=EMBED_COLOR_MOD)
             embed.set_footer(text=self.get_footer_text())
             await interaction.response.send_message(embed=embed, ephemeral=True)
         else:
@@ -232,12 +232,12 @@ class ModDiscussion(commands.Cog):
             embed.set_footer(text=self.get_footer_text())
             await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @modconfig.command(name="remove_role", description="Remove a role from the mod discussion list.")
+    @modconfig.command(name="remove_role", description="Remove a role from the ping list.")
     async def remove_role(self, interaction: discord.Interaction, role: discord.Role):
         cfg = self.get_guild_config(interaction.guild_id)
         if role.id in cfg["mod_roles"]:
             cfg["mod_roles"].remove(role.id); self.save()
-            embed = discord.Embed(description=f"❌ The {role.mention} role will no longer be added to new discussions.", color=EMBED_COLOR_MOD)
+            embed = discord.Embed(description=f"❌ The {role.mention} role will no longer be pinged.", color=EMBED_COLOR_MOD)
             embed.set_footer(text=self.get_footer_text())
             await interaction.response.send_message(embed=embed, ephemeral=True)
         else:

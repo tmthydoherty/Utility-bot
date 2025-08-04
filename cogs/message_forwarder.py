@@ -57,28 +57,24 @@ class MessageForwarder(commands.Cog):
         if not message.guild:
             return
 
-        # First, check if this message should be forwarded at all.
         async with self.config_lock:
             guild_cfg = self.config.get(str(message.guild.id), {})
-            rule = guild_cfg.get(str(message.channel.id))
             
-            # If there's no rule for this channel, stop.
-            if not rule or not rule.get("webhook_url"):
-                return
-            
-            # If the message is from a webhook, check if it's one of our own to prevent loops.
             if message.webhook_id:
                 managed_webhook_ids = guild_cfg.get("managed_webhook_ids", [])
                 if message.webhook_id in managed_webhook_ids:
-                    return # It's our own message, so we stop.
+                    return
+            
+            rule = guild_cfg.get(str(message.channel.id))
         
-        # If we reach here, it's a valid message to be forwarded.
+        if not rule or not rule.get("webhook_url"): return
+
         try:
             webhook = discord.Webhook.from_url(rule["webhook_url"], session=self.session)
             target_thread = self.bot.get_channel(rule.get("thread_id"))
 
             if not target_thread:
-                log_forwarder.warning(f"Target thread {rule.get('thread_id')} not found. Skipping.")
+                log_forwarder.warning(f"Target thread {rule.get('thread_id')} not found for forwarding. Skipping.")
                 return
 
             files = [await attachment.to_file() for attachment in message.attachments]
@@ -89,7 +85,6 @@ class MessageForwarder(commands.Cog):
                 separator = "\n" if content_to_send else ""
                 content_to_send = f"{content_to_send}{separator}{sticker_urls}"
 
-            # Only send the placeholder if there's truly nothing in the message
             if not content_to_send.strip() and not files and not message.embeds:
                 content_to_send = "*Message had no text content or embeds.*"
 
@@ -98,7 +93,7 @@ class MessageForwarder(commands.Cog):
                 username=message.author.display_name,
                 avatar_url=message.author.display_avatar.url,
                 files=files,
-                embeds=message.embeds, # Now correctly sends all embeds
+                embeds=message.embeds,
                 allowed_mentions=discord.AllowedMentions.none(),
                 thread=target_thread
             )
@@ -189,4 +184,8 @@ class MessageForwarder(commands.Cog):
             await interaction.followup.send(embed=embed)
         else:
             embed = discord.Embed(description=f"There was no forwarding rule set up for {channel.mention} to remove.", color=discord.Color.yellow())
-            embed.set_footer(text=self.get_footer_text
+            embed.set_footer(text=self.get_footer_text())
+            await interaction.followup.send(embed=embed)
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(MessageForwarder(bot))

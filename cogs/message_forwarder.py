@@ -57,29 +57,45 @@ class MessageForwarder(commands.Cog):
         if not message.guild:
             return
 
+        # First, check if this message should be forwarded at all.
         async with self.config_lock:
             guild_cfg = self.config.get(str(message.guild.id), {})
+            rule = guild_cfg.get(str(message.channel.id))
+            
+            if not rule or not rule.get("webhook_url"):
+                return
             
             if message.webhook_id:
                 managed_webhook_ids = guild_cfg.get("managed_webhook_ids", [])
                 if message.webhook_id in managed_webhook_ids:
                     return
-            
-            rule = guild_cfg.get(str(message.channel.id))
         
-        if not rule or not rule.get("webhook_url"): return
+        # --- DIAGNOSTIC LOGGING ---
+        print("----- New Message for Forwarding -----")
+        print(f"Message Type: {message.type}")
+        print(f"Content: '{message.content}'")
+        print(f"System Content: '{message.system_content}'")
+        print(f"Number of Embeds: {len(message.embeds)}")
+        if message.embeds:
+            print(f"Embeds Data: {[embed.to_dict() for embed in message.embeds]}")
+        print(f"Number of Attachments: {len(message.attachments)}")
+        print(f"Number of Stickers: {len(message.stickers)}")
+        print(f"Webhook ID: {message.webhook_id}")
+        print("------------------------------------")
 
         try:
             webhook = discord.Webhook.from_url(rule["webhook_url"], session=self.session)
             target_thread = self.bot.get_channel(rule.get("thread_id"))
 
             if not target_thread:
-                log_forwarder.warning(f"Target thread {rule.get('thread_id')} not found for forwarding. Skipping.")
+                log_forwarder.warning(f"Target thread {rule.get('thread_id')} not found. Skipping.")
                 return
 
             files = [await attachment.to_file() for attachment in message.attachments]
-            content_to_send = message.content
             
+            # Proactive Fix: Use system_content if regular content is empty
+            content_to_send = message.content or message.system_content
+
             if message.stickers:
                 sticker_urls = "\n".join([sticker.url for sticker in message.stickers])
                 separator = "\n" if content_to_send else ""
@@ -173,19 +189,4 @@ class MessageForwarder(commands.Cog):
                 self.config_is_dirty = True
         
         if rule_was_found:
-            if webhook_to_delete:
-                try:
-                    await asyncio.wait_for(webhook_to_delete.delete(), timeout=10.0)
-                except (discord.NotFound, discord.HTTPException, asyncio.TimeoutError):
-                    pass
-            
-            embed = discord.Embed(description=f"✅ Forwarding has been disabled for {channel.mention}.", color=EMBED_COLOR_FORWARDER)
-            embed.set_footer(text=self.get_footer_text())
-            await interaction.followup.send(embed=embed)
-        else:
-            embed = discord.Embed(description=f"There was no forwarding rule set up for {channel.mention} to remove.", color=discord.Color.yellow())
-            embed.set_footer(text=self.get_footer_text())
-            await interaction.followup.send(embed=embed)
-
-async def setup(bot: commands.Bot):
-    await bot.add_cog(MessageForwarder(bot))
+            if webhook_to_delete

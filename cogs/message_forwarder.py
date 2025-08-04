@@ -189,4 +189,19 @@ class MessageForwarder(commands.Cog):
                 self.config_is_dirty = True
         
         if rule_was_found:
-            if webhook_to_delete
+            if webhook_to_delete:
+                try:
+                    await asyncio.wait_for(webhook_to_delete.delete(), timeout=10.0)
+                except (discord.NotFound, discord.HTTPException, asyncio.TimeoutError):
+                    pass
+            
+            embed = discord.Embed(description=f"✅ Forwarding has been disabled for {channel.mention}.", color=EMBED_COLOR_FORWARDER)
+            embed.set_footer(text=self.get_footer_text())
+            await interaction.followup.send(embed=embed)
+        else:
+            embed = discord.Embed(description=f"There was no forwarding rule set up for {channel.mention} to remove.", color=discord.Color.yellow())
+            embed.set_footer(text=self.get_footer_text())
+            await interaction.followup.send(embed=embed)
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(MessageForwarder(bot))

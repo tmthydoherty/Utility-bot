@@ -64,7 +64,7 @@ class MessageForwarder(commands.Cog):
 
         try:
             webhook = discord.Webhook.from_url(rule["webhook_url"], session=self.session)
-            target_thread = self.bot.get_thread(rule.get("thread_id"))
+            target_thread = self.bot.get_channel(rule.get("thread_id"))
 
             if not target_thread:
                 log_forwarder.warning(f"Target thread {rule.get('thread_id')} not found for forwarding. Skipping.")
@@ -84,21 +84,21 @@ class MessageForwarder(commands.Cog):
                 allowed_mentions=discord.AllowedMentions.none(),
                 thread=target_thread
             )
-        except (discord.NotFound, discord.InvalidArgument):
-            log_forwarder.warning(f"Webhook for guild {message.guild.id}, channel {message.channel.id} not found. Removing rule.")
-            async with self.config_lock:
-                guild_cfg = self.config.get(str(message.guild.id), {})
-                guild_cfg.pop(str(message.channel.id), None)
-                self.config_is_dirty = True
-        except Exception as e:
-            log_forwarder.error(f"Failed to forward message via webhook: {e}")
+        except (discord.NotFound, discord.HTTPException) as e:
+            if isinstance(e, discord.NotFound) or (isinstance(e, discord.HTTPException) and e.code == 10015):
+                log_forwarder.warning(f"Webhook for guild {message.guild.id}, channel {message.channel.id} not found. Removing rule.")
+                async with self.config_lock:
+                    guild_cfg = self.config.get(str(message.guild.id), {})
+                    guild_cfg.pop(str(message.channel.id), None)
+                    self.config_is_dirty = True
+            else:
+                log_forwarder.error(f"Failed to forward message via webhook: {e}")
 
     @app_commands.command(name="forwardset", description="Set a channel to be forwarded to a specific thread.")
     @app_commands.checks.has_permissions(administrator=True)
     async def forward_set(self, interaction: discord.Interaction, source_channel: discord.TextChannel, target_thread: discord.Thread):
         await interaction.response.defer(ephemeral=True)
         
-        # MODIFIED - This check now allows threads in Forum Channels
         if not isinstance(target_thread.parent, (discord.TextChannel, discord.ForumChannel)):
             embed = discord.Embed(description="❌ Cannot create webhooks in this type of thread. Please select a thread in a standard text or forum channel.", color=discord.Color.red())
             embed.set_footer(text=self.get_footer_text())
@@ -138,7 +138,7 @@ class MessageForwarder(commands.Cog):
         webhook_url_to_delete = None
         rule_was_found = False
         async with self.config_lock:
-            rule = self.config.get(str(interaction.guild_id), {}).pop(str(channel.id), None)
+            rule = self.config.get(str(interaction.guild.id), {}).pop(str(channel.id), None)
             if rule:
                 rule_was_found = True
                 webhook_url_to_delete = rule.get("webhook_url")
@@ -149,8 +149,8 @@ class MessageForwarder(commands.Cog):
                 try:
                     webhook_to_delete = discord.Webhook.from_url(webhook_url_to_delete, session=self.session)
                     await asyncio.wait_for(webhook_to_delete.delete(), timeout=10.0)
-                except (discord.NotFound, discord.InvalidArgument, asyncio.TimeoutError, discord.HTTPException):
-                    pass
+                except (discord.NotFound, discord.HTTPException, asyncio.TimeoutError):
+                    pass # Ignore if we can't delete the webhook
             
             embed = discord.Embed(description=f"✅ Forwarding has been disabled for {channel.mention}.", color=EMBED_COLOR_FORWARDER)
             embed.set_footer(text=self.get_footer_text())

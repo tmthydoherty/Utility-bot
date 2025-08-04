@@ -76,49 +76,59 @@ class ModDiscussion(commands.Cog):
     async def moddiscussion(self, interaction: discord.Interaction, user: discord.Member):
         cfg = self.get_guild_config(interaction.guild_id)
         thread_channel_id = cfg.get("thread_channel_id")
+        
         if not thread_channel_id:
             embed = discord.Embed(description="❌ The mod discussion channel has not been set. Use `/modconfig set_channel`.", color=discord.Color.red())
+            embed.set_footer(text=self.get_footer_text())
             return await interaction.response.send_message(embed=embed, ephemeral=True)
+            
         thread_channel = self.bot.get_channel(thread_channel_id)
         if not thread_channel or not isinstance(thread_channel, discord.TextChannel):
             embed = discord.Embed(description="❌ The configured mod discussion channel was not found.", color=discord.Color.red())
+            embed.set_footer(text=self.get_footer_text())
             return await interaction.response.send_message(embed=embed, ephemeral=True)
+
         try:
             thread = await thread_channel.create_thread(name=f"Discussion - {user.display_name}", type=discord.ChannelType.private_thread)
         except discord.Forbidden:
             embed = discord.Embed(description="❌ I don't have permission to create threads in that channel.", color=discord.Color.red())
+            embed.set_footer(text=self.get_footer_text())
             return await interaction.response.send_message(embed=embed, ephemeral=True)
+        
+        # Only add the command author to the thread
         await thread.add_user(interaction.user)
-        await thread.add_user(user)
-        mod_roles_ids = cfg.get("mod_roles", [])
-        mods_to_add = set()
-        for role_id in mod_roles_ids:
-            role = interaction.guild.get_role(role_id)
-            if role:
-                for member in role.members:
-                    if member.id not in (interaction.user.id, user.id):
-                        mods_to_add.add(member)
-        for member in mods_to_add:
-            try:
-                await thread.add_user(member)
-            except discord.HTTPException:
-                log_mod.warning(f"Could not add {member.display_name} to thread {thread.id}")
-                pass
+
+        # Confirm creation to the moderator
         embed = discord.Embed(description=f"✅ Thread created: {thread.mention}", color=EMBED_COLOR_MOD)
         embed.set_footer(text=self.get_footer_text())
         await interaction.response.send_message(embed=embed, ephemeral=True)
+        
+        # If an update channel is set, send a log and then silently ping roles
         if update_channel_id := cfg.get("update_channel_id"):
             if update_channel := self.bot.get_channel(update_channel_id):
                 log_embed = discord.Embed(
                     title="New Mod Discussion", 
-                    description=f"**Created by:** {interaction.user.mention}\n**For User:** {user.mention}\n**Thread:** {thread.mention}", 
+                    description=f"**Created by:** {interaction.user.mention}\n**Regarding User:** {user.mention}\n**Thread:** {thread.mention}", 
                     color=EMBED_COLOR_MOD, 
                     timestamp=datetime.now(timezone.utc)
                 )
                 log_embed.set_author(name=f"Moderation Action")
                 log_embed.set_thumbnail(url="https://i.imgur.com/8dKnsaG.png") # Shield icon
                 log_embed.set_footer(text=self.get_footer_text())
-                await update_channel.send(embed=log_embed)
+                
+                # Send the initial message without pings
+                log_message = await update_channel.send(embed=log_embed)
+                
+                # Prepare the silent pings
+                mod_roles_ids = cfg.get("mod_roles", [])
+                if mod_roles_ids:
+                    # Allow mentions for roles, but no others
+                    allowed_mentions = discord.AllowedMentions(roles=True)
+                    role_mentions = " ".join(f"<@&{role_id}>" for role_id in mod_roles_ids)
+                    
+                    # Edit the message to add the pings
+                    await log_message.edit(content=role_mentions, allowed_mentions=allowed_mentions)
+
         cfg["threads"][str(thread.id)] = { "user_id": user.id, "created_at": datetime.now(timezone.utc).isoformat(), "reminded_24h": False, "reminded_36h": False }
         self.save()
 

@@ -2,15 +2,18 @@
     "1378533495286268078": {
         "games": {
             "Siege": {
-                "unseen_maps": [
-                    "Oregon"
-                ],
-                "seen_maps": []
+                "unseen_maps": [],
+                "seen_maps": [
+                    "chalet",
+                    "Oregon",
+                    "kafe"
+                ]
             },
             "valorant": {
                 "unseen_maps": [],
                 "seen_maps": []
             }
-        }
+        },
+        "active_votes": {}
     }
 }

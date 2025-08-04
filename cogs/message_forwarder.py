@@ -54,10 +54,13 @@ class MessageForwarder(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if not message.guild:
+        # NEW - This line ignores the temporary "loading" messages
+        if message.flags.loading:
             return
 
-        # First, check if this message should be forwarded at all.
+        if not message.guild:
+            return
+        
         async with self.config_lock:
             guild_cfg = self.config.get(str(message.guild.id), {})
             rule = guild_cfg.get(str(message.channel.id))
@@ -70,19 +73,6 @@ class MessageForwarder(commands.Cog):
                 if message.webhook_id in managed_webhook_ids:
                     return
         
-        # --- DIAGNOSTIC LOGGING ---
-        print("----- New Message for Forwarding -----")
-        print(f"Message Type: {message.type}")
-        print(f"Content: '{message.content}'")
-        print(f"System Content: '{message.system_content}'")
-        print(f"Number of Embeds: {len(message.embeds)}")
-        if message.embeds:
-            print(f"Embeds Data: {[embed.to_dict() for embed in message.embeds]}")
-        print(f"Number of Attachments: {len(message.attachments)}")
-        print(f"Number of Stickers: {len(message.stickers)}")
-        print(f"Webhook ID: {message.webhook_id}")
-        print("------------------------------------")
-
         try:
             webhook = discord.Webhook.from_url(rule["webhook_url"], session=self.session)
             target_thread = self.bot.get_channel(rule.get("thread_id"))
@@ -92,10 +82,8 @@ class MessageForwarder(commands.Cog):
                 return
 
             files = [await attachment.to_file() for attachment in message.attachments]
+            content_to_send = message.content
             
-            # Proactive Fix: Use system_content if regular content is empty
-            content_to_send = message.content or message.system_content
-
             if message.stickers:
                 sticker_urls = "\n".join([sticker.url for sticker in message.stickers])
                 separator = "\n" if content_to_send else ""

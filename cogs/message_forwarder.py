@@ -52,21 +52,13 @@ class MessageForwarder(commands.Cog):
     async def before_save_loop(self):
         await self.bot.wait_until_ready()
 
-    @commands.Cog.listener()
-    async def on_message(self, message: discord.Message):
-        if not message.guild:
+    async def _forward_message(self, message: discord.Message):
+        """Internal helper function to handle the actual forwarding logic."""
+        # This check is important to avoid forwarding empty updates
+        if not message.content.strip() and not message.embeds and not message.attachments and not message.stickers:
             return
 
-        # If it's a "loading" message, wait 1 second for it to be edited with content.
-        if message.flags.loading:
-            await asyncio.sleep(1)
-            try:
-                # Re-fetch the message to get the updated version
-                message = await message.channel.fetch_message(message.id)
-            except discord.NotFound:
-                return # The message was deleted before it could be fetched
-
-        # Now, proceed with the forwarding logic using the final message object.
+        rule = None
         async with self.config_lock:
             guild_cfg = self.config.get(str(message.guild.id), {})
             rule = guild_cfg.get(str(message.channel.id))
@@ -94,10 +86,6 @@ class MessageForwarder(commands.Cog):
                 separator = "\n" if content_to_send else ""
                 content_to_send = f"{content_to_send}{separator}{sticker_urls}"
 
-            if not content_to_send.strip() and not files and not message.embeds:
-                # After the delay, if it's still empty, do nothing.
-                return
-
             await webhook.send(
                 content=content_to_send,
                 username=message.author.display_name,
@@ -116,6 +104,21 @@ class MessageForwarder(commands.Cog):
                     self.config_is_dirty = True
             else:
                 log_forwarder.error(f"Failed to forward message via webhook: {e}")
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        # Ignore DMs, messages with the loading flag, and messages from other bots (except non-managed webhooks)
+        if not message.guild or message.flags.loading or (message.author.bot and not message.webhook_id):
+            return
+        await self._forward_message(message)
+
+    @commands.Cog.listener()
+    async def on_message_edit(self, before: discord.Message, after: discord.Message):
+        # We only care about edits where the original was a "loading" message that is now filled.
+        if not after.guild or not before.flags.loading or after.flags.loading:
+            return
+        
+        await self._forward_message(after)
 
     @app_commands.command(name="forwardset", description="Set a channel to be forwarded to a specific thread.")
     @app_commands.checks.has_permissions(administrator=True)

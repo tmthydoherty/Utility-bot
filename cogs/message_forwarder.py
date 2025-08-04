@@ -98,8 +98,9 @@ class MessageForwarder(commands.Cog):
     async def forward_set(self, interaction: discord.Interaction, source_channel: discord.TextChannel, target_thread: discord.Thread):
         await interaction.response.defer(ephemeral=True)
         
-        if not isinstance(target_thread.parent, discord.TextChannel):
-            embed = discord.Embed(description="❌ Cannot create webhooks in this type of thread. Please select a thread in a standard text channel.", color=discord.Color.red())
+        # MODIFIED - This check now allows threads in Forum Channels
+        if not isinstance(target_thread.parent, (discord.TextChannel, discord.ForumChannel)):
+            embed = discord.Embed(description="❌ Cannot create webhooks in this type of thread. Please select a thread in a standard text or forum channel.", color=discord.Color.red())
             embed.set_footer(text=self.get_footer_text())
             return await interaction.followup.send(embed=embed)
 

@@ -176,11 +176,9 @@ class HelpView(discord.ui.View):
 
 # --- Main Cog ---
 class DailyTrivia(commands.Cog):
-    # Command groups are defined as class attributes.
-    # This is a standard pattern and should not cause registration issues
-    # unless the cog is loaded multiple times without a full bot restart.
+    # --- DIAGNOSTIC CHANGE: Renamed 'mystats' to 'trivia_stats' ---
     trivia = app_commands.Group(name="trivia", description="Commands for the daily trivia.")
-    mystats = app_commands.Group(name="mystats", description="Commands for viewing personal trivia stats.")
+    trivia_stats = app_commands.Group(name="trivia_stats", description="Commands for viewing personal trivia stats.")
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -223,8 +221,8 @@ class DailyTrivia(commands.Cog):
                 log_trivia.info(f"Removed configuration for guild {guild.id} as I have left.")
 
     async def on_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-        # Prevent double-logging CommandAlreadyRegistered on reload
         if isinstance(error, app_commands.CommandAlreadyRegistered):
+            log_trivia.error(f"COMMAND ALREADY REGISTERED: {error.name}. This is likely due to the cog being loaded twice or a command conflict with another cog.")
             return
 
         embed = discord.Embed(color=discord.Color.red())
@@ -235,10 +233,13 @@ class DailyTrivia(commands.Cog):
             log_trivia.error(f"An unhandled error occurred in a command: {error}", exc_info=True)
             embed.description = "An unexpected error occurred. Please try again later."
         
-        if interaction.response.is_done():
-            await interaction.followup.send(embed=embed, ephemeral=True)
-        else:
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(embed=embed, ephemeral=True)
+            else:
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+        except discord.NotFound:
+             log_trivia.warning("Could not send error message to interaction, it might have expired.")
             
     def get_guild_config(self, guild_id: int) -> dict:
         gid = str(guild_id)
@@ -347,7 +348,6 @@ class DailyTrivia(commands.Cog):
         async with self.config_lock:
             cfg = self.get_guild_config(channel.guild.id)
             
-            # Update scores for all winners
             correct_answers_board = cfg.setdefault("monthly_correct_answers", {})
             for winner_id in winner_ids:
                 winner_id_str = str(winner_id)
@@ -630,7 +630,6 @@ class DailyTrivia(commands.Cog):
                         embed.set_footer(text="Will they defend their title? A new challenge starts now!").timestamp = now
                         await channel.send(content=winner_mentions, embed=embed)
                     
-                    # Announce Most Elusive Question
                     question_stats = cfg.get("question_stats", [])
                     if question_stats:
                         hardest_question = min(question_stats, key=lambda q: (q['correct_count'] / q['participants']) if q['participants'] > 0 else 1)
@@ -732,14 +731,14 @@ class DailyTrivia(commands.Cog):
             embed.add_field(name="\U0001F947 Scoring: Firsts vs. Totals", value="There are two leaderboards: `/trivia firstsboard` for the fastest correct answer, and `/trivia leaderboard` for the most total correct answers. Both reset monthly.", inline=False)
             embed.add_field(name="\U0001F3B2 Double or Nothing", value="The first winner is offered a high-stakes bonus round. Win, and you get a bonus point on the `firstsboard`. Lose, and you lose the point you just earned.", inline=False)
             embed.add_field(name="\u2694\uFE0F Sudden Death Tiebreaker", value="If the month ends in a tie on the `firstsboard`, the contenders face off in a live match to determine the champion.", inline=False)
-            embed.add_field(name="\U0001F91D Nemesis & Ally", value="The `/mystats` command shows which user most often beats you to the first answer (your Nemesis) and who you most often win alongside (your Ally).", inline=False)
+            embed.add_field(name="\U0001F91D Nemesis & Ally", value="The `/trivia_stats` command shows which user most often beats you to the first answer (your Nemesis) and who you most often win alongside (your Ally).", inline=False)
         elif category == "User Commands":
             embed.description = "Commands available to everyone."
             embed.add_field(name="`/trivia help`", value="Shows this interactive help message.", inline=False)
             embed.add_field(name="`/trivia leaderboard`", value="Displays the monthly leaderboard for most correct answers.", inline=False)
             embed.add_field(name="`/trivia firstsboard`", value="Displays the monthly leaderboard for fastest answers.", inline=False)
-            embed.add_field(name="`/mystats view`", value="Shows your personal trivia stats.", inline=False)
-            embed.add_field(name="`/mystats compare`", value="Compares your stats against another user.", inline=False)
+            embed.add_field(name="`/trivia_stats view`", value="Shows your personal trivia stats.", inline=False)
+            embed.add_field(name="`/trivia_stats compare`", value="Compares your stats against another user.", inline=False)
             embed.add_field(name="`/trivia lastquestion`", value="Shows the results of the most recent trivia question.", inline=False)
         elif category == "Admin Commands":
             embed.description = "Commands for server administrators."
@@ -848,7 +847,7 @@ class DailyTrivia(commands.Cog):
         
         await interaction.followup.send(embed=reconstructed_embed)
 
-    @mystats.command(name="view", description="Shows your personal trivia statistics or those of another user.")
+    @trivia_stats.command(name="view", description="Shows your personal trivia statistics or those of another user.")
     @app_commands.describe(user="The user whose stats you want to see (optional).")
     async def mystats_view(self, interaction: discord.Interaction, user: discord.Member = None):
         target_user = user or interaction.user
@@ -893,7 +892,7 @@ class DailyTrivia(commands.Cog):
         embed.set_footer(text=f"Stats based on the last {len(interactions)} questions.")
         await interaction.followup.send(embed=embed)
 
-    @mystats.command(name="compare", description="Compares the trivia stats of two users.")
+    @trivia_stats.command(name="compare", description="Compares the trivia stats of two users.")
     async def mystats_compare(self, interaction: discord.Interaction, user1: discord.Member, user2: discord.Member):
         await interaction.response.defer(ephemeral=True)
         

@@ -19,7 +19,7 @@ log_trivia = logging.getLogger(__name__)
 CONFIG_FILE_TRIVIA = "trivia_config.json"
 TRIVIA_API_URL_BASE = "https://opentdb.com/api.php?type=multiple"
 CACHE_FETCH_AMOUNT = 50
-EMBED_COLOR_TRIVIA = 0x1ABC9C 
+EMBED_COLOR_TRIVIA = 0x1ABC9C
 CACHE_MIN_SIZE = 5
 CACHE_TARGET_SIZE = 10
 INTERACTION_HISTORY_DAYS = 60
@@ -345,7 +345,7 @@ class DailyTrivia(commands.Cog):
                         offer_text = (
                             f"You got the fastest answer! Want to risk your point for a bonus?\n"
                             f"[Click here to view the question]({view.original_question_url})\n\n"
-                            ⚠️ **Warning:** If you accept, you will only have **30 seconds** to answer the next question."
+                            f"\u26a0 **Warning:** If you accept, you will only have **30 seconds** to answer the next question."
                         )
                         message = await channel.send(f"<@{first_winner_id}>", content=offer_text, view=view, ephemeral=True)
                         view.message = message
@@ -353,7 +353,7 @@ class DailyTrivia(commands.Cog):
                     except Exception as e:
                         log_trivia.warning(f"Could not send ephemeral D-o-N prompt in guild {channel.guild.id}: {e}")
             else:
-                 cfg["last_day_winner_id"] = None
+                cfg["last_day_winner_id"] = None
 
             interactions = cfg.setdefault("daily_interactions", [])
             interactions.append({"date": datetime.now(timezone.utc).isoformat(), "first_winner": winner_ids[0] if winner_ids else None, "all_winners": winner_ids})
@@ -573,7 +573,7 @@ class DailyTrivia(commands.Cog):
                 try:
                     last_announcement_date = datetime.fromisoformat(last_announcement_str)
                 except ValueError:
-                     last_announcement_date = datetime.fromisoformat("2000-01-01T00:00:00.000000+00:00")
+                        last_announcement_date = datetime.fromisoformat("2000-01-01T00:00:00.000000+00:00")
 
                 if (now.year > last_announcement_date.year) or (now.month > last_announcement_date.month):
                     channel = self.bot.get_channel(cfg.get("channel_id"))
@@ -592,7 +592,7 @@ class DailyTrivia(commands.Cog):
                     top_scorers = [int(uid) for uid, score in firsts.items() if score == max_score]
                     
                     if len(top_scorers) > 1:
-                        tie_embed = discord.Embed(title="⚔️ Monthly Tiebreaker! ⚔️", description="We have a tie for Player of the Month! A live Sudden Death round will begin shortly to determine the ultimate champion.", color=discord.Color.orange())
+                        tie_embed = discord.Embed(title=⚔️ Monthly Tiebreaker! ⚔️", description="We have a tie for Player of the Month! A live Sudden Death round will begin shortly to determine the ultimate champion.", color=discord.Color.orange())
                         tie_embed.add_field(name="Contenders", value=", ".join(f"<@{uid}>" for uid in top_scorers))
                         await channel.send(embed=tie_embed)
                         await asyncio.sleep(10)

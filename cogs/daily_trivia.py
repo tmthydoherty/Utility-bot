@@ -380,7 +380,7 @@ class DailyTrivia(commands.Cog):
         async with self.config_lock:
             cfg = self.get_guild_config(interaction.guild_id)
             channel = self.bot.get_channel(cfg.get('channel_id'))
-            embed = discord.Embed(title="Trivia Settings", color=EMBED_COLOR_TRIVIA) # Emoji removed
+            embed = discord.Embed(title="Trivia Settings", color=EMBED_COLOR_TRIVIA)
             embed.set_footer(text=self.get_footer_text())
             embed.add_field(name="Status", value="✅ Enabled" if cfg.get('enabled') else "❌ Disabled", inline=True)
             embed.add_field(name="Post Time", value=f"{cfg.get('time')} ({cfg.get('timezone')})", inline=True)

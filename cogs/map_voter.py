@@ -12,7 +12,7 @@ log_map = logging.getLogger(__name__)
 
 # --- Configuration ---
 CONFIG_FILE_MAP = "map_voter_config.json"
-EMBED_COLOR_MAP = 0xE91E63 # A magenta/pink color for games
+EMBED_COLOR_MAP = 0xE91E63
 
 # --- Helper Functions ---
 def load_config_map():
@@ -32,7 +32,6 @@ class VotingView(discord.ui.View):
         self.cog = cog_instance
 
     async def handle_button_press(self, interaction: discord.Interaction, map_index: int):
-        # Acknowledge the interaction immediately before any logic
         await interaction.response.defer(ephemeral=True, thinking=True)
         await self.cog.handle_vote(interaction, map_index)
 
@@ -77,7 +76,7 @@ class MapVoter(commands.Cog):
             await interaction.followup.send(embed=embed, ephemeral=True)
         else:
             await interaction.response.send_message(embed=embed, ephemeral=True)
-            
+
     def _ensure_new_map_format(self, guild_id_str: str, game_name: str):
         games = self.config.get(guild_id_str, {}).get("games", {})
         if game_name in games and isinstance(games[game_name], list):
@@ -179,7 +178,6 @@ class MapVoter(commands.Cog):
         now = datetime.now(timezone.utc)
         concluded_votes = []
         
-        # Make a deep copy to iterate over safely while the config might be modified elsewhere
         config_copy = json.loads(json.dumps(self.config))
         for gid, g_cfg in config_copy.items():
             for msg_id, vote_data in g_cfg.get("active_votes", {}).items():

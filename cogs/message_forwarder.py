@@ -71,12 +71,15 @@ class MessageForwarder(commands.Cog):
                 return
 
             files = [await attachment.to_file() for attachment in message.attachments]
-            content_with_link = f"{message.content}\n\n[Jump to Original]({message.jump_url})"
-            if not content_with_link.strip() and not files and not message.embeds:
-                content_with_link = "*Message had no text content or embeds.*"
+            
+            # MODIFIED - Removed the "Jump to Original" link
+            content_to_send = message.content
+            
+            if not content_to_send.strip() and not files and not message.embeds:
+                content_to_send = "*Message had no text content or embeds.*"
 
             await webhook.send(
-                content=content_with_link,
+                content=content_to_send,
                 username=message.author.display_name,
                 avatar_url=message.author.display_avatar.url,
                 files=files,

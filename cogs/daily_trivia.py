@@ -1,3 +1,6 @@
+# This version uses the name `trivia_stats` for the stats command group.
+# If you still get an error about `mystats`, it means you have a conflicting file in your `cogs` directory.
+
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
@@ -176,7 +179,6 @@ class HelpView(discord.ui.View):
 
 # --- Main Cog ---
 class DailyTrivia(commands.Cog):
-    # --- DIAGNOSTIC CHANGE: Renamed 'mystats' to 'trivia_stats' ---
     trivia = app_commands.Group(name="trivia", description="Commands for the daily trivia.")
     trivia_stats = app_commands.Group(name="trivia_stats", description="Commands for viewing personal trivia stats.")
 
@@ -253,7 +255,6 @@ class DailyTrivia(commands.Cog):
                 "last_question_data": None, "mutes": {}, "question_stats": [],
                 "monthly_firsts": {}, "monthly_correct_answers": {}
             }
-        # Set default for new keys to avoid KeyErrors on old configs
         self.config[gid].setdefault("monthly_firsts", {})
         self.config[gid].setdefault("monthly_correct_answers", {})
         self.config[gid].setdefault("last_winner_announcement", "2000-01-01T00:00:00.000000+00:00")
@@ -731,7 +732,7 @@ class DailyTrivia(commands.Cog):
             embed.add_field(name="\U0001F947 Scoring: Firsts vs. Totals", value="There are two leaderboards: `/trivia firstsboard` for the fastest correct answer, and `/trivia leaderboard` for the most total correct answers. Both reset monthly.", inline=False)
             embed.add_field(name="\U0001F3B2 Double or Nothing", value="The first winner is offered a high-stakes bonus round. Win, and you get a bonus point on the `firstsboard`. Lose, and you lose the point you just earned.", inline=False)
             embed.add_field(name="\u2694\uFE0F Sudden Death Tiebreaker", value="If the month ends in a tie on the `firstsboard`, the contenders face off in a live match to determine the champion.", inline=False)
-            embed.add_field(name="\U0001F91D Nemesis & Ally", value="The `/trivia_stats` command shows which user most often beats you to the first answer (your Nemesis) and who you most often win alongside (your Ally).", inline=False)
+            embed.add_field(name="\U0001F91D Nemesis & Ally", value="The `/trivia_stats view` command shows which user most often beats you to the first answer (your Nemesis) and who you most often win alongside (your Ally).", inline=False)
         elif category == "User Commands":
             embed.description = "Commands available to everyone."
             embed.add_field(name="`/trivia help`", value="Shows this interactive help message.", inline=False)

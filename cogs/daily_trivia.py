@@ -1,6 +1,3 @@
-# This version uses the name `trivia_stats` for the stats command group.
-# If you still get an error about `mystats`, it means you have a conflicting file in your `cogs` directory.
-
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
@@ -397,10 +394,15 @@ class DailyTrivia(commands.Cog):
         
         results_embed.add_field(name="Correct Answer", value=f"**`{answer_data['answer']}`**", inline=False)
         
+        label_map = answer_data.get("label_map", {})
         answer_counts = Counter(all_answers_dict.values())
         stats_value = ""
-        for answer, count in answer_counts.items(): stats_value += f"`{answer}`: {count} vote(s)\n"
-        if stats_value: results_embed.add_field(name="\U0001F4CA Vote Distribution", value=stats_value, inline=False)
+        for label, count in answer_counts.items():
+            full_text = label_map.get(label, label)
+            stats_value += f"`{full_text}`: {count} vote(s)\n"
+
+        if stats_value: 
+            results_embed.add_field(name="\U0001F4CA Vote Distribution", value=stats_value, inline=False)
         
         if not winner_ids:
             results_embed.add_field(name="\U0001F389 Winners", value="No one got the correct answer this time!", inline=False)
@@ -414,7 +416,9 @@ class DailyTrivia(commands.Cog):
         search_term = urllib.parse.quote_plus(answer_data['answer'])
         wiki_url = f"https://en.wikipedia.org/w/index.php?search={search_term}"
         results_embed.add_field(name="Learn More", value=f"[Search for '{answer_data['answer']}' on Wikipedia]({wiki_url})", inline=False)
-        results_embed.set_footer(text="Daily Trivia").timestamp = datetime.now(timezone.utc)
+        
+        category = answer_data.get("category", "General Knowledge")
+        results_embed.set_footer(text=f"Daily Trivia | Category: {category}")
         
         if original_msg:
             await original_msg.reply(embed=results_embed)
@@ -485,15 +489,18 @@ class DailyTrivia(commands.Cog):
             await channel.send("Could not retrieve any trivia question. The trivia API might be down. Please try again later.")
             return
         
-        question_data["question"] = html.unescape(question_data["question"])
-        question_data["correct_answer"] = html.unescape(question_data["correct_answer"])
-        question_data["incorrect_answers"] = [html.unescape(ans) for ans in question_data["incorrect_answers"]]
-        all_answers = question_data["incorrect_answers"] + [question_data["correct_answer"]]
+        question_text = html.unescape(question_data["question"])
+        correct_answer = html.unescape(question_data["correct_answer"])
+        all_answers = [html.unescape(ans) for ans in q["incorrect_answers"]] + [correct_answer]
         random.shuffle(all_answers)
 
         reveal_time = datetime.now(timezone.utc) + timedelta(minutes=cfg["reveal_delay"])
-        
-        description = f"**{question_data['question']}**\n\n*Answer will be revealed <t:{int(reveal_time.timestamp())}:R>.*"
+        reveal_timestamp = int(reveal_time.timestamp())
+
+        description = (
+            f"**{question_text}**\n\n"
+            f"*This question closes at <t:{reveal_timestamp}:t> (<t:{reveal_timestamp}:R>).*"
+        )
         
         embed = discord.Embed(title="\u2753 Daily Trivia Question!", description=description, color=EMBED_COLOR_TRIVIA)
         
@@ -501,18 +508,35 @@ class DailyTrivia(commands.Cog):
         if last_winner_id:
             embed.add_field(name="Yesterday's Fastest Answer", value=f"From <@{last_winner_id}>! \U0001F3C6", inline=False)
 
-        embed.set_footer(text=f"Daily Trivia | Category: {html.unescape(question_data['category'])}")
+        category = html.unescape(question_data['category'])
+        embed.set_footer(text=f"Daily Trivia | Category: {category}")
+        
         view = TriviaView(self)
+        label_map = {}
         for i, answer_text in enumerate(all_answers):
             if i < len(view.children):
-                if len(answer_text) > 80: answer_text = answer_text[:77] + "..."
-                view.children[i].label = answer_text
+                label = answer_text
+                if len(label) > 80:
+                    label = label[:77] + "..."
+                view.children[i].label = label
+                label_map[label] = answer_text
 
         try:
             msg = await channel.send(embed=embed, view=view)
             async with self.config_lock:
                 current_cfg = self.get_guild_config(guild_id)
-                current_cfg["pending_answers"].append({"message_id": msg.id, "channel_id": channel.id, "question": question_data["question"], "answer": question_data["correct_answer"], "reveal_at_iso": reveal_time.isoformat(), "winners": [], "all_answers": {}})
+                pending_question = {
+                    "message_id": msg.id,
+                    "channel_id": channel.id,
+                    "question": question_text,
+                    "answer": correct_answer,
+                    "reveal_at_iso": reveal_time.isoformat(),
+                    "winners": [],
+                    "all_answers": {},
+                    "category": category,
+                    "label_map": label_map
+                }
+                current_cfg["pending_answers"].append(pending_question)
                 current_cfg["last_posted_date"] = datetime.now(pytz.timezone(current_cfg["timezone"])).strftime("%Y-%m-%d")
                 self.config_is_dirty = True
             return msg

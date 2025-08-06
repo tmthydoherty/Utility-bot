@@ -3,20 +3,40 @@
         "games": {
             "Siege": {
                 "unseen_maps": [
-                    "Oregon",
-                    "kafe"
+                    "chalet",
+                    "kafe",
+                    "Oregon"
                 ],
                 "seen_maps": [
                     "Nighthaven Labs",
-                    "chalet",
                     "Lair"
-                ]
+                ],
+                "win_history": {
+                    "Lair": 1
+                }
             },
             "valorant": {
                 "unseen_maps": [],
                 "seen_maps": []
             }
         },
-        "active_votes": {}
+        "active_votes": {},
+        "vote_counter": 2,
+        "user_stats": {
+            "356774449032331264": {
+                "total_votes": 1,
+                "wins": 1,
+                "map_votes": {
+                    "Lair": 1
+                }
+            },
+            "739592205265535007": {
+                "total_votes": 1,
+                "wins": 0,
+                "map_votes": {
+                    "kafe": 1
+                }
+            }
+        }
     }
 }

@@ -107,7 +107,7 @@ class Retention(commands.Cog):
             print(f"Failed to load VADER lexicon for sentiment analysis: {e}")
             self.sentiment_analyzer = None
 
-    async def setup_hook(self) -> None:
+    async def cog_load(self) -> None:
         self.db_conn = await aiosqlite.connect(DB_FILE)
         await self.setup_database()
         self.bot.add_view(ExitSurveyView(self))
@@ -334,16 +334,24 @@ class Retention(commands.Cog):
         embed.add_field(name="Reasons Given", value=data_text, inline=False)
         return embed, None
 
-    # --- Main Command ---
-    @app_commands.command(name="retention", description="Display the member retention and community health dashboard.")
-    @app_commands.checks.has_permissions(manage_guild=True) # Basic check, more detailed one is inside
+    # --- Main Command Group ---
+    # FIXED: Replaced the single command with a command group structure.
+    retention_group = app_commands.Group(name="retention", description="Commands for the Retention Analyzer.")
+
+    @retention_group.command(name="panel", description="Display the main retention dashboard.")
+    @app_commands.checks.has_permissions(manage_guild=True)
     async def panel(self, interaction: discord.Interaction):
         if not await self.has_permission(interaction): return
         view = RetentionPanelView(self, interaction.user.id)
         embed, file = await self.get_overview_panel(interaction.guild)
         await interaction.response.send_message(embed=embed, view=view, file=file if file else discord.utils.MISSING, ephemeral=True)
     
-    # ... Other commands for settings, data, etc. would be added here ...
+    @retention_group.command(name="leaderboard", description="View the 'Local Legends' who contribute most to community health.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def leaderboard(self, interaction: discord.Interaction):
+        if not await self.has_permission(interaction): return
+        embed, file = await self.get_leaderboard_panel(interaction.guild)
+        await interaction.response.send_message(embed=embed, file=file if file else discord.utils.MISSING, ephemeral=True)
 
 async def setup(bot: commands.Bot):
     """Adds the Retention cog to the bot."""

@@ -4,17 +4,7 @@
         "time": "12:00",
         "timezone": "UTC",
         "enabled": true,
-        "pending_answers": [
-            {
-                "message_id": 1402074920074084412,
-                "channel_id": 1401706501030285433,
-                "question": "In The Elder Scrolls V: Skyrim, who is the jester in the dark brotherhood?",
-                "answer": "Cicero",
-                "reveal_at_iso": "2025-08-05T00:45:10.098045+00:00",
-                "winners": [],
-                "all_answers": {}
-            }
-        ],
+        "pending_answers": [],
         "monthly_scores": {},
         "last_winner_announcement": "2025-08-03T23:59:15.890221+00:00",
         "asked_questions": [],

@@ -2,11 +2,14 @@
     "1378533495286268078": {
         "games": {
             "Siege": {
-                "unseen_maps": [],
-                "seen_maps": [
-                    "chalet",
+                "unseen_maps": [
                     "Oregon",
                     "kafe"
+                ],
+                "seen_maps": [
+                    "Nighthaven Labs",
+                    "chalet",
+                    "Lair"
                 ]
             },
             "valorant": {

@@ -4,17 +4,7 @@
         "time": "12:00",
         "timezone": "UTC",
         "enabled": true,
-        "pending_answers": [
-            {
-                "message_id": 1402074920074084412,
-                "channel_id": 1401706501030285433,
-                "question": "In The Elder Scrolls V: Skyrim, who is the jester in the dark brotherhood?",
-                "answer": "Cicero",
-                "reveal_at_iso": "2025-08-05T00:45:10.098045+00:00",
-                "winners": [],
-                "all_answers": {}
-            }
-        ],
+        "pending_answers": [],
         "monthly_scores": {},
         "last_winner_announcement": "2025-08-03T23:59:15.890221+00:00",
         "asked_questions": [],
@@ -131,11 +121,36 @@
         "reveal_delay": 60,
         "last_posted_date": "2025-08-04",
         "monthly_firsts": {},
-        "daily_interactions": [],
+        "daily_interactions": [
+            {
+                "date": "2025-08-05T00:45:13.116455+00:00",
+                "first_winner": null,
+                "all_winners": []
+            }
+        ],
         "admin_role_id": null,
         "last_day_winner_id": null,
-        "last_question_data": null,
+        "last_question_data": {
+            "message_id": 1402074920074084412,
+            "channel_id": 1401706501030285433,
+            "question": "In The Elder Scrolls V: Skyrim, who is the jester in the dark brotherhood?",
+            "answer": "Cicero",
+            "reveal_at_iso": "2025-08-05T00:45:10.098045+00:00",
+            "winners": [],
+            "all_answers": {
+                "356774449032331264": "Answer D",
+                "739592205265535007": "Answer D"
+            }
+        },
         "mutes": {},
-        "question_stats": []
+        "question_stats": [
+            {
+                "question_text": "In The Elder Scrolls V: Skyrim, who is the jester in the dark brotherhood?",
+                "participants": 2,
+                "correct_count": 0,
+                "date": "2025-08-05T00:45:13.116477+00:00"
+            }
+        ],
+        "monthly_correct_answers": {}
     }
 }

@@ -55,7 +55,6 @@ async def is_trivia_admin_check(interaction: discord.Interaction) -> bool:
     return await cog.is_user_admin(interaction)
 
 # --- UI Components (Views, Modals) ---
-# These classes are now self-contained and reference the main cog via interaction.client
 class TriviaView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -321,11 +320,8 @@ class AdminPanelView(discord.ui.View):
         await cog.post_random_question(interaction)
 
 # --- Main Cog Class ---
-# This class now holds ALL logic, tasks, AND commands.
-# This is a simpler, more robust structure that avoids the previous error.
 @app_commands.guild_only()
-class DailyTrivia(commands.Cog):
-    # Create command groups directly in the class
+class DailyTrivia(commands.Cog, name="DailyTrivia"):
     trivia = app_commands.Group(name="trivia", description="Commands for the daily trivia.")
     trivia_admin = app_commands.Group(name="trivia_admin", description="Admin commands for the daily trivia.", default_permissions=discord.Permissions(manage_guild=True))
 
@@ -391,11 +387,521 @@ class DailyTrivia(commands.Cog):
         }
         for key, value in defaults.items(): self.config[gid].setdefault(key, value)
         return self.config[gid]
-
-    # --- All other helper methods, loops, and logic functions go here ---
-    # Omitted for brevity, they are unchanged from the previous correct version.
-    # ... (save_loop, fetch_api_questions, handle_trivia_answer, etc.) ...
     
+    @tasks.loop(seconds=30)
+    async def save_loop(self):
+        try:
+            async with self.config_lock:
+                if self.config_is_dirty:
+                    await self.bot.loop.run_in_executor(None, lambda: save_config_trivia(self.config))
+                    self.config_is_dirty = False
+                    log_trivia.info("Trivia config changes saved to disk.")
+        except Exception as e:
+            log_trivia.error(f"An unhandled error occurred in the save_loop: {e}", exc_info=True)
+
+    async def fetch_api_questions(self, amount: int = CACHE_FETCH_AMOUNT):
+        url = f"{TRIVIA_API_URL_BASE}&amount={amount}"
+        try:
+            async with self.session.get(url) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get("response_code") == 0:
+                        return data.get("results", [])
+        except Exception as e:
+            log_trivia.error(f"Failed to fetch trivia from API: {e}")
+        return []
+
+    async def handle_trivia_answer(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cfg = self.get_guild_config(interaction.guild_id)
+        mutes = cfg.get("mutes", {})
+        user_id_str = str(interaction.user.id)
+
+        if user_id_str in mutes:
+            mute_end_time = datetime.fromisoformat(mutes[user_id_str])
+            if datetime.now(timezone.utc) < mute_end_time:
+                await interaction.followup.send("❌ You are currently muted from participating in trivia.", ephemeral=True)
+                return
+            else:
+                async with self.config_lock:
+                    mutes.pop(user_id_str, None)
+                    self.config_is_dirty = True
+
+        message_to_send = ""
+        async with self.config_lock:
+            pending_answers = cfg.get("pending_answers", [])
+            target_question = next((q for q in pending_answers if q.get("message_id") == interaction.message.id), None)
+
+            if not target_question:
+                message_to_send = "This trivia question has expired."
+            elif user_id_str in target_question.get("all_answers", {}):
+                message_to_send = "You have already answered this question!"
+            else:
+                target_question.setdefault("all_answers", {})[user_id_str] = button.label
+                is_correct = (button.label == target_question["answer"])
+
+                if is_correct:
+                    target_question.setdefault("winners", []).append(interaction.user.id)
+                    message_to_send = f"✅ Correct! You answered: `{button.label}`."
+                else:
+                    message_to_send = f"❌ Sorry, that's incorrect. You answered: `{button.label}`."
+
+                self.config_is_dirty = True
+
+        disabled_view = TriviaView()
+        for item in disabled_view.children: item.disabled = True
+        await interaction.followup.send(message_to_send, view=disabled_view, ephemeral=True)
+
+    async def reveal_trivia_answer(self, answer_data: dict):
+        channel = self.bot.get_channel(answer_data["channel_id"])
+        if not channel: return
+
+        original_msg = None
+        try:
+            original_msg = await channel.fetch_message(answer_data["message_id"])
+            await original_msg.edit(view=None)
+        except (discord.NotFound, discord.Forbidden):
+            pass
+
+        winner_ids = answer_data.get("winners", [])
+        all_answers_dict = answer_data.get("all_answers", {})
+
+        async with self.config_lock:
+            cfg = self.get_guild_config(channel.guild.id)
+            correct_answers_board = cfg.setdefault("monthly_correct_answers", {})
+            for winner_id in winner_ids:
+                winner_id_str = str(winner_id)
+                correct_answers_board[winner_id_str] = correct_answers_board.get(winner_id_str, 0) + 1
+
+            if winner_ids:
+                first_winner_id = winner_ids[0]
+                firsts_board = cfg.setdefault("monthly_firsts", {})
+                firsts_board[str(first_winner_id)] = firsts_board.get(str(first_winner_id), 0) + 1
+                cfg["last_day_winner_id"] = first_winner_id
+
+                if first_winner_id not in self.don_pending_users:
+                    try:
+                        first_winner_user = await self.bot.fetch_user(first_winner_id)
+                        if first_winner_user and not first_winner_user.bot:
+                            view = DoubleOrNothingView(first_winner_id, original_msg.jump_url if original_msg else "")
+                            offer_text = (
+                                f"You got the fastest answer in **{channel.guild.name}**! Want to risk your point for a bonus?\n"
+                                f"[Click here to view the question]({view.original_question_url})\n\n"
+                                f"⚠️ **Warning:** If you accept, you will only have **30 seconds** to answer the next question."
+                            )
+                            message = await first_winner_user.send(content=offer_text, view=view)
+                            view.message = message
+                            self.don_pending_users.add(first_winner_id)
+                    except discord.Forbidden:
+                        log_trivia.warning(f"Could not DM user {first_winner_id} for D-o-N prompt.")
+                    except Exception as e:
+                        log_trivia.error(f"Failed to send D-o-N prompt to {first_winner_id}: {e}")
+            else:
+                cfg["last_day_winner_id"] = None
+
+            interactions = cfg.setdefault("daily_interactions", [])
+            interactions.append({"date": datetime.now(timezone.utc).isoformat(), "first_winner": winner_ids[0] if winner_ids else None, "all_winners": winner_ids})
+            while len(interactions) > INTERACTION_HISTORY_DAYS: interactions.pop(0)
+
+            total_participants = len(all_answers_dict)
+            if total_participants > 0:
+                question_stats = cfg.setdefault("question_stats", [])
+                question_stats.append({"question_text": answer_data["question"], "participants": total_participants, "correct_count": len(winner_ids), "date": datetime.now(timezone.utc).isoformat()})
+
+            cfg["last_question_data"] = answer_data
+            self.config_is_dirty = True
+
+        results_embed = await self._build_results_embed(answer_data)
+        if original_msg:
+            await original_msg.reply(embed=results_embed)
+        else:
+            await channel.send(embed=results_embed)
+
+    async def start_double_or_nothing_game(self, interaction: discord.Interaction, user_id: int):
+        question_data_list = await self.fetch_api_questions(10)
+        if not question_data_list:
+            self.don_pending_users.discard(user_id)
+            await interaction.edit_original_response(content="I couldn't fetch a new question for you, sorry! Your point is safe.", view=None)
+            return
+
+        q_data = question_data_list[0]
+        correct_answer = html.unescape(q_data["correct_answer"])
+        all_answers = [html.unescape(ans) for ans in q_data["incorrect_answers"]] + [correct_answer]
+        random.shuffle(all_answers)
+
+        end_time = datetime.now(timezone.utc) + timedelta(seconds=30)
+        end_timestamp = int(end_time.timestamp())
+
+        embed = discord.Embed(
+            title="🎲 Double or Nothing!",
+            description=f"**Question:** {html.unescape(q_data['question'])}\n\n"
+                        f"⏳ Time remaining: <t:{end_timestamp}:R>",
+            color=discord.Color.orange())
+
+        view = DONQuestionView(user_id, correct_answer)
+        for answer_text in all_answers:
+            label = answer_text[:77] + "..." if len(answer_text) > 80 else answer_text
+            button = discord.ui.Button(label=label, style=discord.ButtonStyle.secondary)
+            async def button_callback(interaction: discord.Interaction, btn=button):
+                await view.handle_don_answer(interaction, btn)
+            button.callback = button_callback
+            view.add_item(button)
+
+        await interaction.edit_original_response(embed=embed, view=view)
+
+        timed_out = await view.wait()
+        if timed_out and not view.answered:
+            self.don_pending_users.discard(user_id)
+            async with self.config_lock:
+                cfg = self.get_guild_config(interaction.guild_id)
+                firsts = cfg.setdefault("monthly_firsts", {})
+                user_id_str = str(user_id)
+                firsts[user_id_str] = firsts.get(user_id_str, 1) - 1
+                self.config_is_dirty = True
+            timeout_embed = discord.Embed(title="⌛ Time's Up!", description=f"You ran out of time. The correct answer was **{correct_answer}**.\nYou lost the point you just earned.", color=discord.Color.red())
+            await interaction.edit_original_response(embed=timeout_embed, view=None)
+
+    async def post_trivia_question(self, guild_id: int, cfg: dict):
+        channel = self.bot.get_channel(cfg["channel_id"])
+        if not channel: return
+
+        question_data = None
+        async with self.config_lock:
+            if cfg.get("question_cache"):
+                question_data = cfg["question_cache"].pop(0)
+                self.config_is_dirty = True
+
+        if not question_data:
+            log_trivia.warning(f"Trivia cache for guild {guild_id} is empty. Fetching live question.")
+            results = await self.fetch_api_questions(10)
+            if results: question_data = results.pop(0)
+
+        if not question_data:
+            await channel.send("Could not retrieve any trivia question. The trivia API might be down.")
+            return
+
+        question_text = html.unescape(question_data["question"])
+        correct_answer = html.unescape(question_data["correct_answer"])
+        all_answers = [html.unescape(ans) for ans in q_data["incorrect_answers"]] + [correct_answer]
+        random.shuffle(all_answers)
+
+        reveal_time = datetime.now(timezone.utc) + timedelta(minutes=cfg["reveal_delay"])
+        description = f"**{question_text}**\n\n*This question closes at <t:{int(reveal_time.timestamp())}:t> (<t:{int(reveal_time.timestamp())}:R>).*"
+        embed = discord.Embed(title="❓ Daily Trivia Question!", description=description, color=EMBED_COLOR_TRIVIA)
+        
+        if last_winner_id := cfg.get("last_day_winner_id"):
+            embed.add_field(name="Yesterday's Fastest Answer", value=f"From <@{last_winner_id}>! 🏆", inline=False)
+
+        category = html.unescape(question_data['category'])
+        embed.set_footer(text=f"Daily Trivia | Category: {category}")
+        
+        view = TriviaView()
+        label_map = {}
+        for i, answer_text in enumerate(all_answers):
+            if i < len(view.children):
+                label = answer_text[:77] + "..." if len(answer_text) > 80 else answer_text
+                view.children[i].label = label
+                label_map[label] = answer_text
+
+        try:
+            msg = await channel.send(embed=embed, view=view)
+            async with self.config_lock:
+                current_cfg = self.get_guild_config(guild_id)
+                pending_question = {
+                    "message_id": msg.id, "channel_id": channel.id,
+                    "question": question_text, "answer": correct_answer,
+                    "reveal_at_iso": reveal_time.isoformat(), "winners": [],
+                    "all_answers": {}, "category": category, "label_map": label_map
+                }
+                current_cfg["pending_answers"].append(pending_question)
+                current_cfg["last_posted_date"] = datetime.now(pytz.timezone(current_cfg["timezone"])).strftime("%Y-%m-%d")
+                asked_list = current_cfg.setdefault("asked_questions", [])
+                asked_list.append(question_text)
+                while len(asked_list) > MAX_ASKED_QUESTIONS_HISTORY: asked_list.pop(0)
+                self.config_is_dirty = True
+            return msg
+        except discord.Forbidden:
+            log_trivia.error(f"Missing permissions to post trivia in guild {guild_id}, channel {channel.id}.")
+        return None
+
+    @tasks.loop(minutes=1)
+    async def trivia_loop(self):
+        try:
+            now_utc = datetime.now(timezone.utc)
+            pending_reveals = []
+            
+            async with self.config_lock:
+                for guild_id_str, cfg in self.config.items():
+                    if pending_answers := cfg.get("pending_answers", []):
+                        still_pending = [ans for ans in pending_answers if not (isinstance(ans.get("reveal_at_iso"), str) and now_utc >= datetime.fromisoformat(ans["reveal_at_iso"]))]
+                        pending_reveals.extend([ans for ans in pending_answers if ans not in still_pending])
+                        if len(still_pending) < len(pending_answers):
+                            cfg["pending_answers"] = still_pending
+                            self.config_is_dirty = True
+            
+            for reveal_data in pending_reveals: await self.reveal_trivia_answer(reveal_data)
+
+            for guild_id_str, cfg in self.config.items():
+                if cfg.get("enabled") and cfg.get("channel_id"):
+                    try:
+                        tz = pytz.timezone(cfg.get("timezone", "UTC"))
+                        now_local = now_utc.astimezone(tz)
+                        if now_local.time() >= time.fromisoformat(cfg.get("time", "12:00")) and cfg.get("last_posted_date") != now_local.strftime("%Y-%m-%d"):
+                            if not any(p['channel_id'] == cfg['channel_id'] for p in cfg.get('pending_answers', [])):
+                                await self.post_trivia_question(int(guild_id_str), cfg)
+                    except Exception as e:
+                        log_trivia.error(f"Error during trivia scheduling for guild {guild_id_str}: {e}")
+        except Exception as e:
+            log_trivia.error(f"An unhandled error in trivia_loop: {e}", exc_info=True)
+    
+    @tasks.loop(minutes=30)
+    async def cache_refill_loop(self):
+        try:
+            async with self.config_lock:
+                for guild_id_str, cfg in self.config.items():
+                    if not cfg.get("enabled"): continue
+                    cache = cfg.setdefault("question_cache", [])
+                    if len(cache) < CACHE_MIN_SIZE:
+                        log_trivia.info(f"Trivia cache for guild {guild_id_str} is low. Refilling.")
+                        new_questions = await self.fetch_api_questions()
+                        asked_questions = set(cfg.get("asked_questions", []))
+                        added_count = 0
+                        for q_data in new_questions:
+                            if html.unescape(q_data["question"]) not in asked_questions:
+                                cache.append(q_data)
+                                added_count += 1
+                            if len(cache) >= CACHE_TARGET_SIZE: break
+                        if added_count > 0:
+                            self.config_is_dirty = True
+                            log_trivia.info(f"Added {added_count} new questions to cache for guild {guild_id_str}.")
+        except Exception as e:
+            log_trivia.error(f"An unhandled error in cache_refill_loop: {e}", exc_info=True)
+
+    @tasks.loop(hours=1)
+    async def monthly_winner_loop(self):
+        try:
+            now = datetime.now(timezone.utc)
+            if now.day != 1: return
+
+            for guild_id_str, cfg in list(self.config.items()):
+                last_announcement_str = cfg.get("last_winner_announcement") or "2000-01-01T00:00:00.000000+00:00"
+                try:
+                    last_announcement_date = datetime.fromisoformat(last_announcement_str)
+                except ValueError:
+                    last_announcement_date = datetime.fromisoformat("2000-01-01T00:00:00.000000+00:00")
+
+                if (now.year > last_announcement_date.year) or (now.month > last_announcement_date.month):
+                    channel = self.bot.get_channel(cfg.get("channel_id"))
+                    if not channel: continue
+                    
+                    firsts = cfg.get("monthly_firsts", {})
+                    if not firsts:
+                        async with self.config_lock:
+                            cfg["last_winner_announcement"] = now.isoformat()
+                            self.config_is_dirty = True
+                        continue
+                    
+                    max_score = max(firsts.values())
+                    top_scorers = [int(uid) for uid, score in firsts.items() if score == max_score]
+                    
+                    if len(top_scorers) > 1:
+                        tie_embed = discord.Embed(title="⚔️ Monthly Tiebreaker! ⚔️", description="We have a tie for Player of the Month! A live Sudden Death round will begin shortly to determine the ultimate champion.", color=discord.Color.orange())
+                        tie_embed.add_field(name="Contenders", value=", ".join(f"<@{uid}>" for uid in top_scorers))
+                        await channel.send(embed=tie_embed)
+                        await asyncio.sleep(10)
+                        await self.run_sudden_death(channel, top_scorers)
+                    else:
+                        month_to_announce = last_announcement_date
+                        month_name = month_to_announce.strftime("%B")
+                        year = month_to_announce.strftime("%Y")
+                        embed = discord.Embed(title=f"🏅 Trivia Player of the Month: {month_name} {year}", description=f"A new month of trivia begins! Let's recognize the champion from last month.", color=0xFFD700)
+                        embed.set_thumbnail(url="https://i.imgur.com/SceEM4y.png")
+                        winner_mention = f"<@{top_scorers[0]}>"
+                        embed.add_field(name="🏆 Champion of Firsts", value=f"Congratulations to {winner_mention}!", inline=False)
+                        embed.add_field(name="Top Score", value=f"They achieved an incredible **{max_score}** first correct answers!", inline=False)
+                        embed.set_footer(text="Will they defend their title? A new challenge starts now!").timestamp = now
+                        await channel.send(content=winner_mention, embed=embed)
+                    
+                    question_stats = cfg.get("question_stats", [])
+                    if question_stats:
+                        hardest_question = min(question_stats, key=lambda q: (q['correct_count'] / q['participants']) if q['participants'] > 0 else 1)
+                        h_embed = discord.Embed(title="🧠 Most Elusive Question of the Month", color=0x992D22)
+                        h_embed.add_field(name="Question", value=hardest_question['question_text'], inline=False)
+                        correct_percent = (hardest_question['correct_count'] / hardest_question['participants']) * 100 if hardest_question['participants'] > 0 else 0
+                        h_embed.add_field(name="Statistics", value=f"{hardest_question['participants']} Participants, only **{correct_percent:.1f}%** answered correctly!", inline=False)
+                        await channel.send(embed=h_embed)
+
+                    async with self.config_lock:
+                        cfg_to_update = self.get_guild_config(int(guild_id_str))
+                        cfg_to_update["monthly_firsts"] = {}
+                        cfg_to_update["monthly_correct_answers"] = {}
+                        cfg_to_update["question_stats"] = []
+                        cfg_to_update["last_winner_announcement"] = now.isoformat()
+                        self.config_is_dirty = True
+        except Exception as e:
+            log_trivia.error(f"An unhandled error occurred in the monthly_winner_loop: {e}", exc_info=True)
+
+    async def run_sudden_death(self, channel: discord.TextChannel, contenders: list[int]):
+        scores = Counter()
+        contender_set = set(contenders)
+
+        for i in range(5):
+            q_list = await self.fetch_api_questions(1)
+            if not q_list:
+                await channel.send("Could not fetch a question for the tiebreaker. Ending now.")
+                break
+            
+            q = q_list[0]
+            correct_answer = html.unescape(q["correct_answer"])
+            all_answers = [html.unescape(ans) for ans in q["incorrect_answers"]] + [correct_answer]
+            random.shuffle(all_answers)
+            
+            view = TriviaView()
+            for j, ans_text in enumerate(all_answers):
+                view.children[j].label = ans_text[:80]
+            
+            embed = discord.Embed(title=f"Tiebreaker Round {i+1}/5", description=f"**{html.unescape(q['question'])}**", color=discord.Color.red())
+            msg = await channel.send(embed=embed, view=view)
+
+            try:
+                def check(interaction: discord.Interaction):
+                    return interaction.user.id in contender_set and interaction.message.id == msg.id
+
+                interaction = await self.bot.wait_for("interaction", timeout=20.0, check=check)
+                
+                answered_button = discord.utils.get(view.children, custom_id=interaction.custom_id)
+                if answered_button.label == correct_answer:
+                    scores[interaction.user.id] += 1
+                    await interaction.response.send_message(f"✅ {interaction.user.mention} answered correctly and gets a point!", ephemeral=False)
+                else:
+                    scores[interaction.user.id] -= 1
+                    await interaction.response.send_message(f"❌ {interaction.user.mention} was first, but incorrect! **They lose a point.**", ephemeral=False)
+
+            except asyncio.TimeoutError:
+                await msg.channel.send("No one answered in time for this round!")
+            
+            await msg.edit(view=None)
+            await asyncio.sleep(5)
+
+        if not scores:
+            final_winners = contenders
+        else:
+            max_score = max(scores.values())
+            final_winners = [uid for uid, score in scores.items() if score == max_score]
+
+        embed = discord.Embed(title="Sudden Death Concluded!", color=0xFFD700)
+        winner_mentions = ", ".join(f"<@{uid}>" for uid in final_winners)
+        embed.description = f"Congratulations to our new Player(s) of the Month: {winner_mentions}!"
+        await channel.send(embed=embed)
+
+    @trivia_loop.before_loop
+    @cache_refill_loop.before_loop
+    @monthly_winner_loop.before_loop
+    @save_loop.before_loop
+    async def before_loops(self): await self.bot.wait_until_ready()
+
+    def get_help_embed(self, category: str) -> discord.Embed:
+        embed = discord.Embed(title=f"❓ Trivia Help: {category}", color=EMBED_COLOR_TRIVIA)
+        if category == "Game Rules":
+            embed.description = "Detailed explanation of the trivia game rules."
+            embed.add_field(name="📜 Gameplay Flow", value="A new question is posted daily. Click the buttons to submit your answer. After a delay, the answer is revealed, and scores are updated.", inline=False)
+            embed.add_field(name="🥇 Scoring: Firsts vs. Totals", value="There are two leaderboards: `/trivia firstsboard` for the fastest correct answer, and `/trivia leaderboard` for the most total correct answers. Both reset monthly.", inline=False)
+            embed.add_field(name="🎲 Double or Nothing", value="The first winner is offered a high-stakes bonus round. Win, and you get a bonus point on the `firstsboard`. Lose, and you lose the point you just earned.", inline=False)
+            embed.add_field(name="⚔️ Sudden Death Tiebreaker", value="If the month ends in a tie on the `firstsboard`, the contenders face off in a live match to determine the champion.", inline=False)
+            embed.add_field(name="🤝 Nemesis & Ally", value="The `/trivia stats` command shows which user most often beats you to the first answer (your Nemesis) and who you most often win alongside (your Ally).", inline=False)
+        elif category == "User Commands":
+            embed.description = "Commands available to everyone."
+            embed.add_field(name="`/trivia help`", value="Shows this interactive help message.", inline=False)
+            embed.add_field(name="`/trivia leaderboard`", value="Displays the monthly leaderboard for most correct answers.", inline=False)
+            embed.add_field(name="`/trivia firstsboard`", value="Displays the monthly leaderboard for fastest answers.", inline=False)
+            embed.add_field(name="`/trivia stats`", value="Shows your personal trivia stats.", inline=False)
+            embed.add_field(name="`/trivia lastquestion`", value="Shows the results of the most recent trivia question.", inline=False)
+        elif category == "Admin Commands":
+            embed.description = "Commands for server administrators."
+            embed.add_field(name="`/trivia_admin panel`", value="Opens the main admin control panel.", inline=False)
+        return embed
+    
+    async def _build_results_embed(self, answer_data: dict) -> discord.Embed:
+        winner_ids = answer_data.get("winners", [])
+        all_answers_dict = answer_data.get("all_answers", {})
+
+        embed = discord.Embed(title="🏆 Trivia Results", description=f"**Question:** {answer_data['question']}", color=discord.Color.gold())
+        if winner_ids:
+            try:
+                winner_user = await self.bot.fetch_user(winner_ids[0])
+                embed.set_thumbnail(url=winner_user.display_avatar.url)
+            except (discord.NotFound, discord.Forbidden): pass
+
+        embed.add_field(name="Correct Answer", value=f"**`{answer_data['answer']}`**", inline=False)
+
+        label_map = answer_data.get("label_map", {})
+        answer_counts = Counter(all_answers_dict.values())
+        stats_value = ""
+        for label, count in answer_counts.items():
+            full_text = label_map.get(label, label)
+            stats_value += f"`{full_text}`: {count} vote(s)\n"
+
+        if stats_value:
+            embed.add_field(name="📊 Vote Distribution", value=stats_value, inline=False)
+
+        if not winner_ids:
+            embed.add_field(name="🎉 Winners", value="No one got the correct answer this time!", inline=False)
+        else:
+            embed.add_field(name="🥇 Fastest Correct Answer", value=f"<@{winner_ids[0]}>", inline=False)
+            other_winners = winner_ids[1:]
+            if other_winners:
+                mentions = ", ".join(f"<@{uid}>" for uid in other_winners)
+                embed.add_field(name="Other Correct Answers", value=mentions, inline=False)
+
+        search_term = urllib.parse.quote_plus(answer_data['answer'])
+        wiki_url = f"https://en.wikipedia.org/w/index.php?search={search_term}"
+        embed.add_field(name="Learn More", value=f"[Search for '{answer_data['answer']}' on Wikipedia]({wiki_url})", inline=False)
+
+        category = answer_data.get("category", "General Knowledge")
+        embed.set_footer(text=f"Daily Trivia | Category: {category}")
+        return embed
+
+    async def manual_post_daily_question(self, interaction: discord.Interaction):
+        cfg = self.get_guild_config(interaction.guild_id)
+        if not cfg.get("channel_id"):
+            await interaction.followup.send("❌ A trivia channel must be set before posting.", ephemeral=True)
+            return
+        if any(p['channel_id'] == cfg['channel_id'] for p in cfg.get('pending_answers', [])):
+            await interaction.followup.send("❌ A daily trivia question is already active.", ephemeral=True)
+            return
+        await self.post_trivia_question(interaction.guild_id, cfg)
+        await interaction.followup.send("✅ Successfully posted the daily trivia question.", ephemeral=True)
+
+    async def post_random_question(self, interaction: discord.Interaction):
+        cfg = self.get_guild_config(interaction.guild_id)
+        channel = self.bot.get_channel(cfg.get("channel_id"))
+        if not channel:
+            await interaction.followup.send("❌ A trivia channel must be set.", ephemeral=True)
+            return
+        q_list = await self.fetch_api_questions(1)
+        if not q_list:
+            await interaction.followup.send("❌ Could not fetch a question from the API.", ephemeral=True)
+            return
+        q = q_list[0]
+        question_text = html.unescape(q["question"])
+        correct_answer = html.unescape(q["correct_answer"])
+        all_answers = [html.unescape(ans) for ans in q["incorrect_answers"]] + [correct_answer]
+        random.shuffle(all_answers)
+        embed = discord.Embed(title="🎲 Random Trivia Question!", description=f"**{question_text}**", color=0x7289DA)
+        embed.set_footer(text=f"Posted by {interaction.user.display_name} | This does not count for points.")
+        view = discord.ui.View(timeout=120)
+        for answer_text in all_answers:
+            button = discord.ui.Button(label=answer_text[:80], style=discord.ButtonStyle.secondary)
+            async def btn_callback(inter: discord.Interaction, btn=button, correct_ans=correct_answer):
+                for child in view.children: child.disabled = True
+                if btn.label == correct_ans: result_embed = discord.Embed(title="🎉 Correct!", description=f"{inter.user.mention} got the right answer: **{correct_ans}**", color=discord.Color.green())
+                else: result_embed = discord.Embed(title="❌ Incorrect!", description=f"{inter.user.mention} chose `{btn.label}`. The correct answer was **{correct_ans}**", color=discord.Color.red())
+                await inter.response.edit_message(embed=result_embed, view=view)
+                view.stop()
+            button.callback = btn_callback
+            view.add_item(button)
+        await channel.send(embed=embed, view=view)
+        await interaction.followup.send(f"✅ Random question posted in {channel.mention}.", ephemeral=True)
+
     # --- Application Commands ---
     
     @trivia.command(name="help", description="Explains the trivia rules and lists commands.")
@@ -408,26 +914,89 @@ class DailyTrivia(commands.Cog):
         await interaction.response.defer()
         cfg = self.get_guild_config(interaction.guild_id)
         scores = cfg.get("monthly_correct_answers", {})
+
         if not scores:
-            await interaction.followup.send(embed=discord.Embed(description="The monthly leaderboard is empty!", color=EMBED_COLOR_TRIVIA))
+            embed = discord.Embed(description="The monthly leaderboard is empty! Be the first to get a correct answer.", color=EMBED_COLOR_TRIVIA)
+            await interaction.followup.send(embed=embed)
             return
-        # ... leaderboard logic ...
+
+        sorted_scores = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+        
+        month_name = datetime.now(pytz.timezone(cfg.get("timezone", "UTC"))).strftime("%B")
+        embed = discord.Embed(title=f"📊 Monthly Leaderboard: {month_name}", description="Top players by total correct answers.", color=EMBED_COLOR_TRIVIA)
+        
+        lines = []
+        for i, (user_id, score) in enumerate(sorted_scores[:LEADERBOARD_LIMIT]):
+            rank_emoji = {0: "🥇", 1: "🥈", 2: "🥉"}.get(i, f"**#{i+1}**")
+            lines.append(f"{rank_emoji} <@{user_id}>: `{score}` point(s)")
+        
+        embed.description = "\n".join(lines)
+        embed.set_footer(text="Scores reset on the 1st of each month.")
+        await interaction.followup.send(embed=embed)
 
     @trivia.command(name="firstsboard", description="Shows the monthly leaderboard for fastest correct answers.")
     async def trivia_firstsboard(self, interaction: discord.Interaction):
         await interaction.response.defer()
         cfg = self.get_guild_config(interaction.guild_id)
         scores = cfg.get("monthly_firsts", {})
+
         if not scores:
-            await interaction.followup.send(embed=discord.Embed(description="The monthly firsts board is empty!", color=EMBED_COLOR_TRIVIA))
+            embed = discord.Embed(description="The monthly firsts board is empty! Be the first to get a fastest answer.", color=EMBED_COLOR_TRIVIA)
+            await interaction.followup.send(embed=embed)
             return
-        # ... firstsboard logic ...
+
+        sorted_scores = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+        
+        month_name = datetime.now(pytz.timezone(cfg.get("timezone", "UTC"))).strftime("%B")
+        embed = discord.Embed(title=f"🏆 Monthly Firsts Board: {month_name}", description="Top players by fastest correct answers.", color=0xFFD700)
+        
+        lines = []
+        for i, (user_id, score) in enumerate(sorted_scores[:LEADERBOARD_LIMIT]):
+            rank_emoji = {0: "🥇", 1: "🥈", 2: "🥉"}.get(i, f"**#{i+1}**")
+            lines.append(f"{rank_emoji} <@{user_id}>: `{score}` point(s)")
+        
+        embed.description = "\n".join(lines)
+        embed.set_footer(text="Scores reset on the 1st of each month. Winner may be decided by a tiebreaker.")
+        await interaction.followup.send(embed=embed)
 
     @trivia.command(name="stats", description="Shows your personal trivia statistics or those of another user.")
     @app_commands.describe(user="The user whose stats you want to see (optional).")
     async def trivia_stats(self, interaction: discord.Interaction, user: discord.Member = None):
-        # ... stats logic ...
-        pass
+        target_user = user or interaction.user
+        await interaction.response.defer(ephemeral=True)
+        
+        cfg = self.get_guild_config(interaction.guild_id)
+        interactions = cfg.get("daily_interactions", [])
+        
+        correct_answers, nemesis_counter, ally_counter = 0, Counter(), Counter()
+
+        for event in interactions:
+            all_winners = event.get("all_winners", [])
+            if target_user.id in all_winners:
+                correct_answers += 1
+                for winner_id in all_winners:
+                    if winner_id != target_user.id:
+                        ally_counter[winner_id] += 1
+                first_winner = event.get("first_winner")
+                if first_winner and first_winner != target_user.id:
+                    nemesis_counter[first_winner] += 1
+        
+        if correct_answers == 0:
+            embed = discord.Embed(description=f"{target_user.mention} has not answered any trivia questions correctly yet.", color=discord.Color.yellow())
+            return await interaction.followup.send(embed=embed)
+
+        embed = discord.Embed(title=f"📊 Trivia Stats for {target_user.display_name}", color=EMBED_COLOR_TRIVIA)
+        embed.set_thumbnail(url=target_user.display_avatar.url)
+        embed.add_field(name="Correct Answers", value=f"`{correct_answers}`", inline=True)
+        
+        nemesis_id, _ = nemesis_counter.most_common(1)[0] if nemesis_counter else (None, None)
+        embed.add_field(name="Nemesis ⚔️", value=f"<@{nemesis_id}>" if nemesis_id else "None", inline=True)
+            
+        ally_id, _ = ally_counter.most_common(1)[0] if ally_counter else (None, None)
+        embed.add_field(name="Ally 🤝", value=f"<@{ally_id}>" if ally_id else "None", inline=True)
+        
+        embed.set_footer(text=f"Stats based on the last {len(interactions)} questions.")
+        await interaction.followup.send(embed=embed)
 
     @trivia_admin.command(name="panel", description="Opens the all-in-one trivia admin control panel.")
     @app_commands.check(is_trivia_admin_check)
@@ -452,20 +1021,12 @@ class DailyTrivia(commands.Cog):
     async def _update_admin_panel(self, interaction: discord.Interaction, response_text: str | None = None):
         embed = await self._build_admin_panel_embed(interaction.guild_id)
         view = AdminPanelView(interaction.user)
-        # Use response.edit_message for subsequent updates from the panel itself
         if not interaction.response.is_done():
             await interaction.response.edit_message(content=response_text, embed=embed, view=view)
         else:
             await interaction.edit_original_response(content=response_text, embed=embed, view=view)
-            
-    # NOTE: The rest of the cog's methods (loops, helpers, etc.) are assumed to be here, unchanged.
-    # They have been omitted to keep the code block focused on the structural fix.
-
 
 # --- Setup Function ---
 async def setup(bot: commands.Bot):
     """The setup function to load the single, unified trivia cog."""
     await bot.add_cog(DailyTrivia(bot))
-
-
-After you perform these two steps, your bot should load correctly. We're very close!

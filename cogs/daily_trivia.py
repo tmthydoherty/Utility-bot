@@ -75,7 +75,7 @@ class DoubleOrNothingView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="Double or Nothing?", style=discord.ButtonStyle.success, emoji="\U0001F3B2")
+    @discord.ui.button(label="Double or Nothing?", style=discord.ButtonStyle.success, emoji="🎲")
     async def double_or_nothing(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         button.disabled = True
@@ -90,8 +90,9 @@ class DoubleOrNothingView(discord.ui.View):
         if self.message:
             try:
                 await self.message.edit(content="You took too long to decide. The offer has expired.", view=self)
-            except discord.NotFound:
+            except (discord.NotFound, discord.HTTPException):
                 pass
+
 
 class DONQuestionView(discord.ui.View):
     def __init__(self, cog_instance: 'DailyTrivia', user_id: int, correct_answer: str):
@@ -122,10 +123,10 @@ class DONQuestionView(discord.ui.View):
 
             if is_correct:
                 firsts[user_id_str] = firsts.get(user_id_str, 0) + 1
-                embed = discord.Embed(title="\U0001F389 You did it!", description="You answered correctly and earned a bonus point!", color=discord.Color.green())
+                embed = discord.Embed(title="🎉 You did it!", description="You answered correctly and earned a bonus point!", color=discord.Color.green())
             else:
                 firsts[user_id_str] = firsts.get(user_id_str, 1) - 1
-                embed = discord.Embed(title="\u274C Oh no!", description=f"That was incorrect. The correct answer was **{self.correct_answer}**.\nYou lost the point you just earned.", color=discord.Color.red())
+                embed = discord.Embed(title="❌ Oh no!", description=f"That was incorrect. The correct answer was **{self.correct_answer}**.\nYou lost the point you just earned.", color=discord.Color.red())
             
             self.cog.config_is_dirty = True
         
@@ -165,19 +166,65 @@ class HelpView(discord.ui.View):
     @discord.ui.select(
         placeholder="Choose a help category...",
         options=[
-            discord.SelectOption(label="Game Rules", description="Learn how to play and how scoring works.", emoji="\U0001F4DC"),
-            discord.SelectOption(label="User Commands", description="Commands available to everyone.", emoji="\U0001F464"),
-            discord.SelectOption(label="Admin Commands", description="Commands for server administrators.", emoji="\U0001F451"),
+            discord.SelectOption(label="Game Rules", description="Learn how to play and how scoring works.", emoji="📜"),
+            discord.SelectOption(label="User Commands", description="Commands available to everyone.", emoji="👤"),
+            discord.SelectOption(label="Admin Commands", description="Commands for server administrators.", emoji="👑"),
         ]
     )
     async def select_callback(self, interaction: discord.Interaction, select: discord.ui.Select):
         embed = self.cog.get_help_embed(select.values[0])
         await interaction.response.edit_message(embed=embed)
 
+# --- NEW: Admin Panel UI ---
+class AdminPanelView(discord.ui.View):
+    def __init__(self, cog_instance: 'DailyTrivia', original_interaction_user: discord.User):
+        super().__init__(timeout=300)
+        self.cog = cog_instance
+        self.original_user = original_interaction_user
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.original_user.id:
+            await interaction.response.send_message("Only the user who opened the panel can use these buttons.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Set Channel", style=discord.ButtonStyle.secondary, emoji="📺")
+    async def set_channel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # This would typically open a modal or use a channel select menu
+        await interaction.response.send_message("Please use the `/trivia set channel` command for now.", ephemeral=True)
+
+    @discord.ui.button(label="Set Admin Role", style=discord.ButtonStyle.secondary, emoji="👑")
+    async def set_admin_role(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = discord.ui.View()
+        select = discord.ui.RoleSelect(placeholder="Select the trivia admin role...")
+
+        async def select_callback(inter: discord.Interaction):
+            role = inter.data['values'][0]
+            async with self.cog.config_lock:
+                cfg = self.cog.get_guild_config(inter.guild_id)
+                cfg['admin_role_id'] = int(role)
+                self.cog.config_is_dirty = True
+            await inter.response.send_message(f"✅ Trivia Admin role set to <@&{role}>.", ephemeral=True)
+            view.stop()
+
+        select.callback = select_callback
+        view.add_item(select)
+        await interaction.response.send_message("Select a role to be the Trivia Admin:", view=view, ephemeral=True)
+
+    @discord.ui.button(label="Force Daily Question", style=discord.ButtonStyle.primary, emoji="📅")
+    async def force_daily_question(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        await self.cog.manual_post_daily_question(interaction)
+
+    @discord.ui.button(label="Post Random Question", style=discord.ButtonStyle.success, emoji="🎲")
+    async def post_random_question(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        await self.cog.post_random_question(interaction)
+
 # --- Main Cog ---
 class DailyTrivia(commands.Cog):
     trivia = app_commands.Group(name="trivia", description="Commands for the daily trivia.")
-    trivia_stats = app_commands.Group(name="trivia_stats", description="Commands for viewing personal trivia stats.")
+    trivia_admin = app_commands.Group(name="trivia_admin", description="Admin commands for the daily trivia.")
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -208,7 +255,10 @@ class DailyTrivia(commands.Cog):
         if interaction.user.guild_permissions.manage_guild: return True
         cfg = self.get_guild_config(interaction.guild_id)
         admin_role_id = cfg.get("admin_role_id")
-        if admin_role_id and discord.utils.get(interaction.user.roles, id=admin_role_id): return True
+        if admin_role_id:
+            role = interaction.guild.get_role(admin_role_id)
+            if role and role in interaction.user.roles:
+                return True
         return False
 
     @commands.Cog.listener()
@@ -220,17 +270,15 @@ class DailyTrivia(commands.Cog):
                 log_trivia.info(f"Removed configuration for guild {guild.id} as I have left.")
 
     async def on_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-        if isinstance(error, app_commands.CommandAlreadyRegistered):
-            log_trivia.error(f"COMMAND ALREADY REGISTERED: {error.name}. This is likely due to the cog being loaded twice or a command conflict with another cog.")
-            return
+        if isinstance(error, app_commands.CommandInvokeError) and isinstance(error.original, app_commands.CheckFailure):
+             embed = discord.Embed(description="❌ You don't have permission to use this command.", color=discord.Color.red())
+             await interaction.response.send_message(embed=embed, ephemeral=True)
+             return
 
         embed = discord.Embed(color=discord.Color.red())
         embed.set_footer(text="Daily Trivia")
-        if isinstance(error, app_commands.MissingPermissions):
-            embed.description = "\u274C You don't have the required permissions for this command."
-        else:
-            log_trivia.error(f"An unhandled error occurred in a command: {error}", exc_info=True)
-            embed.description = "An unexpected error occurred. Please try again later."
+        log_trivia.error(f"An unhandled error occurred in a command: {error}", exc_info=True)
+        embed.description = "An unexpected error occurred. Please try again later."
         
         try:
             if interaction.response.is_done():
@@ -252,17 +300,16 @@ class DailyTrivia(commands.Cog):
                 "last_question_data": None, "mutes": {}, "question_stats": [],
                 "monthly_firsts": {}, "monthly_correct_answers": {}
             }
-        self.config[gid].setdefault("monthly_firsts", {})
-        self.config[gid].setdefault("monthly_correct_answers", {})
-        self.config[gid].setdefault("last_winner_announcement", "2000-01-01T00:00:00.000000+00:00")
-        self.config[gid].setdefault("question_cache", [])
-        self.config[gid].setdefault("reveal_delay", 60)
-        self.config[gid].setdefault("daily_interactions", [])
-        self.config[gid].setdefault("admin_role_id", None)
-        self.config[gid].setdefault("last_day_winner_id", None)
-        self.config[gid].setdefault("last_question_data", None)
-        self.config[gid].setdefault("mutes", {})
-        self.config[gid].setdefault("question_stats", [])
+        # Ensure all default keys exist on load
+        defaults = {
+            "monthly_firsts": {}, "monthly_correct_answers": {}, 
+            "last_winner_announcement": "2000-01-01T00:00:00.000000+00:00",
+            "question_cache": [], "reveal_delay": 60, "daily_interactions": [],
+            "admin_role_id": None, "last_day_winner_id": None, "last_question_data": None,
+            "mutes": {}, "question_stats": [], "last_posted_date": None
+        }
+        for key, value in defaults.items():
+            self.config[gid].setdefault(key, value)
         return self.config[gid]
 
     @tasks.loop(seconds=30)
@@ -296,7 +343,7 @@ class DailyTrivia(commands.Cog):
         if user_id_str in mutes:
             mute_end_time = datetime.fromisoformat(mutes[user_id_str])
             if datetime.now(timezone.utc) < mute_end_time:
-                await interaction.followup.send("\u274C You are currently muted from participating in trivia.", ephemeral=True)
+                await interaction.followup.send("❌ You are currently muted from participating in trivia.", ephemeral=True)
                 return
             else:
                 async with self.config_lock:
@@ -319,9 +366,9 @@ class DailyTrivia(commands.Cog):
                     
                     if is_correct:
                         target_question.setdefault("winners", []).append(interaction.user.id)
-                        message_to_send = f"\u2705 Correct! You answered: `{button.label}`."
+                        message_to_send = f"✅ Correct! You answered: `{button.label}`."
                     else:
-                        message_to_send = f"\u274C Sorry, that's incorrect. You answered: `{button.label}`."
+                        message_to_send = f"❌ Sorry, that's incorrect. You answered: `{button.label}`."
                     
                     self.config_is_dirty = True
 
@@ -359,17 +406,21 @@ class DailyTrivia(commands.Cog):
 
                 if first_winner_id not in self.don_pending_users:
                     try:
-                        view = DoubleOrNothingView(self, first_winner_id, original_msg.jump_url if original_msg else "")
-                        offer_text = (
-                            f"You got the fastest answer! Want to risk your point for a bonus?\n"
-                            f"[Click here to view the question]({view.original_question_url})\n\n"
-                            f"\u26a0 **Warning:** If you accept, you will only have **30 seconds** to answer the next question."
-                        )
-                        message = await channel.send(f"<@{first_winner_id}>", content=offer_text, view=view, ephemeral=True)
-                        view.message = message
-                        self.don_pending_users.add(first_winner_id)
+                        first_winner_user = await self.bot.fetch_user(first_winner_id)
+                        if first_winner_user:
+                            view = DoubleOrNothingView(self, first_winner_id, original_msg.jump_url if original_msg else "")
+                            offer_text = (
+                                f"You got the fastest answer in **{channel.guild.name}**! Want to risk your point for a bonus?\n"
+                                f"[Click here to view the question]({view.original_question_url})\n\n"
+                                f"⚠️ **Warning:** If you accept, you will only have **30 seconds** to answer the next question."
+                            )
+                            message = await first_winner_user.send(content=offer_text, view=view)
+                            view.message = message
+                            self.don_pending_users.add(first_winner_id)
+                    except discord.Forbidden:
+                        log_trivia.warning(f"Could not DM user {first_winner_id} for D-o-N prompt. They may have DMs disabled.")
                     except Exception as e:
-                        log_trivia.warning(f"Could not send ephemeral D-o-N prompt in guild {channel.guild.id}: {e}")
+                        log_trivia.error(f"Failed to send D-o-N prompt to {first_winner_id}: {e}")
             else:
                 cfg["last_day_winner_id"] = None
 
@@ -385,7 +436,7 @@ class DailyTrivia(commands.Cog):
             cfg["last_question_data"] = answer_data
             self.config_is_dirty = True
 
-        results_embed = discord.Embed(title="\U0001F3C6 Trivia Results", description=f"**Question:** {answer_data['question']}", color=discord.Color.gold())
+        results_embed = discord.Embed(title="🏆 Trivia Results", description=f"**Question:** {answer_data['question']}", color=discord.Color.gold())
         if winner_ids:
             try:
                 winner_user = await self.bot.fetch_user(winner_ids[0])
@@ -402,12 +453,12 @@ class DailyTrivia(commands.Cog):
             stats_value += f"`{full_text}`: {count} vote(s)\n"
 
         if stats_value: 
-            results_embed.add_field(name="\U0001F4CA Vote Distribution", value=stats_value, inline=False)
+            results_embed.add_field(name="📊 Vote Distribution", value=stats_value, inline=False)
         
         if not winner_ids:
-            results_embed.add_field(name="\U0001F389 Winners", value="No one got the correct answer this time!", inline=False)
+            results_embed.add_field(name="🎉 Winners", value="No one got the correct answer this time!", inline=False)
         else:
-            results_embed.add_field(name="\U0001F947 Fastest Correct Answer", value=f"<@{winner_ids[0]}>", inline=False)
+            results_embed.add_field(name="🥇 Fastest Correct Answer", value=f"<@{winner_ids[0]}>", inline=False)
             other_winners = winner_ids[1:]
             if other_winners:
                 mentions = ", ".join(f"<@{uid}>" for uid in other_winners)
@@ -432,18 +483,18 @@ class DailyTrivia(commands.Cog):
             await interaction.edit_original_response(content="I couldn't fetch a new question for you, sorry! Your point is safe.", view=None)
             return
 
-        q = question_data_list[0]
-        correct_answer = html.unescape(q["correct_answer"])
-        all_answers = [html.unescape(ans) for ans in q["incorrect_answers"]] + [correct_answer]
+        q_data = question_data_list[0]
+        correct_answer = html.unescape(q_data["correct_answer"])
+        all_answers = [html.unescape(ans) for ans in q_data["incorrect_answers"]] + [correct_answer]
         random.shuffle(all_answers)
 
         end_time = datetime.now(timezone.utc) + timedelta(seconds=30)
         end_timestamp = int(end_time.timestamp())
 
         embed = discord.Embed(
-            title="\U0001F3B2 Double or Nothing!",
-            description=f"**Question:** {html.unescape(q['question'])}\n\n"
-                        f"\u23F3 Time remaining: <t:{end_timestamp}:R>",
+            title="🎲 Double or Nothing!",
+            description=f"**Question:** {html.unescape(q_data['question'])}\n\n"
+                        f"⏳ Time remaining: <t:{end_timestamp}:R>",
             color=discord.Color.orange())
         
         view = DONQuestionView(self, user_id, correct_answer)
@@ -467,7 +518,7 @@ class DailyTrivia(commands.Cog):
                 firsts[user_id_str] = firsts.get(user_id_str, 1) - 1
                 self.config_is_dirty = True
             
-            timeout_embed = discord.Embed(title="\u23F0 Time's Up!", description=f"You ran out of time. The correct answer was **{correct_answer}**.\nYou lost the point you just earned.", color=discord.Color.red())
+            timeout_embed = discord.Embed(title="⌛ Time's Up!", description=f"You ran out of time. The correct answer was **{correct_answer}**.\nYou lost the point you just earned.", color=discord.Color.red())
             await interaction.edit_original_response(embed=timeout_embed, view=None)
 
     async def post_trivia_question(self, guild_id: int, cfg: dict):
@@ -491,7 +542,7 @@ class DailyTrivia(commands.Cog):
         
         question_text = html.unescape(question_data["question"])
         correct_answer = html.unescape(question_data["correct_answer"])
-        all_answers = [html.unescape(ans) for ans in q["incorrect_answers"]] + [correct_answer]
+        all_answers = [html.unescape(ans) for ans in question_data["incorrect_answers"]] + [correct_answer]
         random.shuffle(all_answers)
 
         reveal_time = datetime.now(timezone.utc) + timedelta(minutes=cfg["reveal_delay"])
@@ -502,11 +553,11 @@ class DailyTrivia(commands.Cog):
             f"*This question closes at <t:{reveal_timestamp}:t> (<t:{reveal_timestamp}:R>).*"
         )
         
-        embed = discord.Embed(title="\u2753 Daily Trivia Question!", description=description, color=EMBED_COLOR_TRIVIA)
+        embed = discord.Embed(title="❓ Daily Trivia Question!", description=description, color=EMBED_COLOR_TRIVIA)
         
         last_winner_id = cfg.get("last_day_winner_id")
         if last_winner_id:
-            embed.add_field(name="Yesterday's Fastest Answer", value=f"From <@{last_winner_id}>! \U0001F3C6", inline=False)
+            embed.add_field(name="Yesterday's Fastest Answer", value=f"From <@{last_winner_id}>! 🏆", inline=False)
 
         category = html.unescape(question_data['category'])
         embed.set_footer(text=f"Daily Trivia | Category: {category}")
@@ -638,7 +689,7 @@ class DailyTrivia(commands.Cog):
                     top_scorers = [int(uid) for uid, score in firsts.items() if score == max_score]
                     
                     if len(top_scorers) > 1:
-                        tie_embed = discord.Embed(title="\u2694\uFE0F Monthly Tiebreaker! \u2694\uFE0F", description="We have a tie for Player of the Month! A live Sudden Death round will begin shortly to determine the ultimate champion.", color=discord.Color.orange())
+                        tie_embed = discord.Embed(title="⚔️ Monthly Tiebreaker! ⚔️", description="We have a tie for Player of the Month! A live Sudden Death round will begin shortly to determine the ultimate champion.", color=discord.Color.orange())
                         tie_embed.add_field(name="Contenders", value=", ".join(f"<@{uid}>" for uid in top_scorers))
                         await channel.send(embed=tie_embed)
                         await asyncio.sleep(10)
@@ -647,10 +698,10 @@ class DailyTrivia(commands.Cog):
                         month_to_announce = last_announcement_date
                         month_name = month_to_announce.strftime("%B")
                         year = month_to_announce.strftime("%Y")
-                        embed = discord.Embed(title=f"\U0001F3C5 Trivia Player of the Month: {month_name} {year}", description=f"A new month of trivia begins! Let's recognize the champion from last month.", color=0xFFD700)
+                        embed = discord.Embed(title=f"🏅 Trivia Player of the Month: {month_name} {year}", description=f"A new month of trivia begins! Let's recognize the champion from last month.", color=0xFFD700)
                         embed.set_thumbnail(url="https://i.imgur.com/SceEM4y.png")
                         winner_mentions = f"<@{top_scorers[0]}>"
-                        embed.add_field(name="\U0001F3C6 Champion of Firsts", value=f"Congratulations to {winner_mentions}!", inline=False)
+                        embed.add_field(name="🏆 Champion of Firsts", value=f"Congratulations to {winner_mentions}!", inline=False)
                         embed.add_field(name="Top Score", value=f"They achieved an incredible **{max_score}** first correct answers!", inline=False)
                         embed.set_footer(text="Will they defend their title? A new challenge starts now!").timestamp = now
                         await channel.send(content=winner_mentions, embed=embed)
@@ -658,7 +709,7 @@ class DailyTrivia(commands.Cog):
                     question_stats = cfg.get("question_stats", [])
                     if question_stats:
                         hardest_question = min(question_stats, key=lambda q: (q['correct_count'] / q['participants']) if q['participants'] > 0 else 1)
-                        h_embed = discord.Embed(title="\U0001F9E0 Most Elusive Question of the Month", color=0x992D22)
+                        h_embed = discord.Embed(title="🧠 Most Elusive Question of the Month", color=0x992D22)
                         h_embed.add_field(name="Question", value=hardest_question['question_text'], inline=False)
                         correct_percent = (hardest_question['correct_count'] / hardest_question['participants']) * 100 if hardest_question['participants'] > 0 else 0
                         h_embed.add_field(name="Statistics", value=f"{hardest_question['participants']} Participants, only **{correct_percent:.1f}%** answered correctly!", inline=False)
@@ -705,10 +756,10 @@ class DailyTrivia(commands.Cog):
                 answered_button = discord.utils.get(view.children, custom_id=interaction.custom_id)
                 if answered_button.label == correct_answer:
                     scores[interaction.user.id] += 1
-                    await interaction.response.send_message(f"\u2705 {interaction.user.mention} answered correctly and gets a point!", ephemeral=False)
+                    await interaction.response.send_message(f"✅ {interaction.user.mention} answered correctly and gets a point!", ephemeral=False)
                 else:
                     scores[interaction.user.id] -= 1
-                    await interaction.response.send_message(f"\u274C {interaction.user.mention} was first, but incorrect! **They lose a point.**", ephemeral=False)
+                    await interaction.response.send_message(f"❌ {interaction.user.mention} was first, but incorrect! **They lose a point.**", ephemeral=False)
 
             except asyncio.TimeoutError:
                 await msg.channel.send("No one answered in time for this round!")
@@ -742,21 +793,16 @@ class DailyTrivia(commands.Cog):
     @save_loop.before_loop
     async def before_save_loop(self):
         await self.bot.wait_until_ready()
-
-    # --- Utility Methods for Commands ---
-
-    async def timezone_autocomplete(self, interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
-        return [app_commands.Choice(name=tz, value=tz) for tz in pytz.all_timezones if current.lower() in tz.lower()][:25]
         
     def get_help_embed(self, category: str) -> discord.Embed:
-        embed = discord.Embed(title="\u2753 Trivia Help", color=EMBED_COLOR_TRIVIA)
+        embed = discord.Embed(title="❓ Trivia Help", color=EMBED_COLOR_TRIVIA)
         if category == "Game Rules":
             embed.description = "Detailed explanation of the trivia game rules."
-            embed.add_field(name="\U0001F4DC Gameplay Flow", value="A new question is posted daily. Click the buttons to submit your answer. After a delay, the answer is revealed, and scores are updated.", inline=False)
-            embed.add_field(name="\U0001F947 Scoring: Firsts vs. Totals", value="There are two leaderboards: `/trivia firstsboard` for the fastest correct answer, and `/trivia leaderboard` for the most total correct answers. Both reset monthly.", inline=False)
-            embed.add_field(name="\U0001F3B2 Double or Nothing", value="The first winner is offered a high-stakes bonus round. Win, and you get a bonus point on the `firstsboard`. Lose, and you lose the point you just earned.", inline=False)
-            embed.add_field(name="\u2694\uFE0F Sudden Death Tiebreaker", value="If the month ends in a tie on the `firstsboard`, the contenders face off in a live match to determine the champion.", inline=False)
-            embed.add_field(name="\U0001F91D Nemesis & Ally", value="The `/trivia_stats view` command shows which user most often beats you to the first answer (your Nemesis) and who you most often win alongside (your Ally).", inline=False)
+            embed.add_field(name="📜 Gameplay Flow", value="A new question is posted daily. Click the buttons to submit your answer. After a delay, the answer is revealed, and scores are updated.", inline=False)
+            embed.add_field(name="🥇 Scoring: Firsts vs. Totals", value="There are two leaderboards: `/trivia firstsboard` for the fastest correct answer, and `/trivia leaderboard` for the most total correct answers. Both reset monthly.", inline=False)
+            embed.add_field(name="🎲 Double or Nothing", value="The first winner is offered a high-stakes bonus round. Win, and you get a bonus point on the `firstsboard`. Lose, and you lose the point you just earned.", inline=False)
+            embed.add_field(name="⚔️ Sudden Death Tiebreaker", value="If the month ends in a tie on the `firstsboard`, the contenders face off in a live match to determine the champion.", inline=False)
+            embed.add_field(name="🤝 Nemesis & Ally", value="The `/trivia_stats view` command shows which user most often beats you to the first answer (your Nemesis) and who you most often win alongside (your Ally).", inline=False)
         elif category == "User Commands":
             embed.description = "Commands available to everyone."
             embed.add_field(name="`/trivia help`", value="Shows this interactive help message.", inline=False)
@@ -767,13 +813,69 @@ class DailyTrivia(commands.Cog):
             embed.add_field(name="`/trivia lastquestion`", value="Shows the results of the most recent trivia question.", inline=False)
         elif category == "Admin Commands":
             embed.description = "Commands for server administrators."
-            embed.add_field(name="`/trivia settings`", value="Shows an overview of the current settings.", inline=False)
-            embed.add_field(name="`/trivia set_admin_role`", value="Assigns a role that can manage the trivia bot.", inline=False)
-            embed.add_field(name="`/trivia mute/unmute`", value="Manages a user's ability to participate in trivia.", inline=False)
-            embed.add_field(name="`/trivia postnow/skip`", value="Manually posts or skips a question.", inline=False)
-            embed.add_field(name="`/trivia purgecache`", value="Clears the server's question history.", inline=False)
-            embed.add_field(name="`/trivia resetserver`", value="[DANGEROUS] Wipes all trivia data for the server.", inline=False)
+            embed.add_field(name="`/trivia_admin panel`", value="Opens the main admin control panel.", inline=False)
+            embed.add_field(name="`/trivia_admin set`", value="Sets core settings like the trivia channel and time.", inline=False)
+            embed.add_field(name="`/trivia_admin toggle`", value="Enables or disables the daily trivia.", inline=False)
+            embed.add_field(name="`/trivia_admin mute/unmute`", value="Manages a user's ability to participate in trivia.", inline=False)
         return embed
+
+    # --- NEW: Admin Panel Logic ---
+    async def manual_post_daily_question(self, interaction: discord.Interaction):
+        cfg = self.get_guild_config(interaction.guild_id)
+        if not cfg.get("channel_id"):
+            await interaction.followup.send("❌ A trivia channel must be set before posting a question.", ephemeral=True)
+            return
+
+        is_active = any(p['channel_id'] == cfg['channel_id'] for p in cfg.get('pending_answers', []))
+        if is_active:
+            await interaction.followup.send("❌ A daily trivia question is already active in the channel.", ephemeral=True)
+            return
+
+        await self.post_trivia_question(interaction.guild_id, cfg)
+        await interaction.followup.send("✅ Successfully posted the daily trivia question.", ephemeral=True)
+
+    async def post_random_question(self, interaction: discord.Interaction):
+        cfg = self.get_guild_config(interaction.guild_id)
+        channel = self.bot.get_channel(cfg.get("channel_id"))
+        if not channel:
+            await interaction.followup.send("❌ A trivia channel must be set before posting a random question.", ephemeral=True)
+            return
+
+        q_list = await self.fetch_api_questions(1)
+        if not q_list:
+            await interaction.followup.send("❌ Could not fetch a question from the API.", ephemeral=True)
+            return
+
+        q = q_list[0]
+        question_text = html.unescape(q["question"])
+        correct_answer = html.unescape(q["correct_answer"])
+        all_answers = [html.unescape(ans) for ans in q["incorrect_answers"]] + [correct_answer]
+        random.shuffle(all_answers)
+
+        embed = discord.Embed(title="🎲 Random Trivia Question!", description=f"**{question_text}**", color=0x7289DA)
+        embed.set_footer(text=f"Posted by {interaction.user.display_name} | This question is just for fun and does not count for points.")
+
+        view = discord.ui.View(timeout=120)
+        for answer_text in all_answers:
+            button = discord.ui.Button(label=answer_text[:80], style=discord.ButtonStyle.secondary)
+            
+            async def btn_callback(inter: discord.Interaction, btn=button, correct_ans=correct_answer):
+                for child in view.children:
+                    child.disabled = True
+                
+                if btn.label == correct_ans:
+                    result_embed = discord.Embed(title="🎉 Correct!", description=f"{inter.user.mention} got the right answer: **{correct_ans}**", color=discord.Color.green())
+                else:
+                    result_embed = discord.Embed(title="❌ Incorrect!", description=f"{inter.user.mention} chose `{btn.label}`. The correct answer was **{correct_ans}**", color=discord.Color.red())
+                
+                await inter.response.edit_message(embed=result_embed, view=view)
+                view.stop()
+
+            button.callback = btn_callback
+            view.add_item(button)
+        
+        await channel.send(embed=embed, view=view)
+        await interaction.followup.send(f"✅ Random question posted in {channel.mention}.", ephemeral=True)
 
     # --- Application Commands ---
 
@@ -796,11 +898,11 @@ class DailyTrivia(commands.Cog):
         sorted_scores = sorted(scores.items(), key=lambda item: item[1], reverse=True)
         
         month_name = datetime.now(pytz.timezone(cfg.get("timezone", "UTC"))).strftime("%B")
-        embed = discord.Embed(title=f"\U0001F4C8 Monthly Leaderboard: {month_name}", description="Top players by total correct answers.", color=EMBED_COLOR_TRIVIA)
+        embed = discord.Embed(title=f"📊 Monthly Leaderboard: {month_name}", description="Top players by total correct answers.", color=EMBED_COLOR_TRIVIA)
         
         lines = []
         for i, (user_id, score) in enumerate(sorted_scores[:LEADERBOARD_LIMIT]):
-            rank_emoji = {0: "\U0001F947", 1: "\U0001F948", 2: "\U0001F949"}.get(i, f"**#{i+1}**")
+            rank_emoji = {0: "🥇", 1: "🥈", 2: "🥉"}.get(i, f"**#{i+1}**")
             lines.append(f"{rank_emoji} <@{user_id}>: `{score}` point(s)")
         
         embed.description = "\n".join(lines)
@@ -821,11 +923,11 @@ class DailyTrivia(commands.Cog):
         sorted_scores = sorted(scores.items(), key=lambda item: item[1], reverse=True)
         
         month_name = datetime.now(pytz.timezone(cfg.get("timezone", "UTC"))).strftime("%B")
-        embed = discord.Embed(title=f"\U0001F3C5 Monthly Firsts Board: {month_name}", description="Top players by fastest correct answers.", color=0xFFD700)
+        embed = discord.Embed(title=f"🏆 Monthly Firsts Board: {month_name}", description="Top players by fastest correct answers.", color=0xFFD700)
         
         lines = []
         for i, (user_id, score) in enumerate(sorted_scores[:LEADERBOARD_LIMIT]):
-            rank_emoji = {0: "\U0001F947", 1: "\U0001F948", 2: "\U0001F949"}.get(i, f"**#{i+1}**")
+            rank_emoji = {0: "🥇", 1: "🥈", 2: "🥉"}.get(i, f"**#{i+1}**")
             lines.append(f"{rank_emoji} <@{user_id}>: `{score}` point(s)")
         
         embed.description = "\n".join(lines)
@@ -845,7 +947,7 @@ class DailyTrivia(commands.Cog):
         
         winner_ids = last_question_data.get("winners", [])
         all_answers_dict = last_question_data.get("all_answers", {})
-        reconstructed_embed = discord.Embed(title="\U0001F3C6 Last Trivia Results", description=f"**Question:** {last_question_data['question']}", color=discord.Color.gold())
+        reconstructed_embed = discord.Embed(title="🏆 Last Trivia Results", description=f"**Question:** {last_question_data['question']}", color=discord.Color.gold())
         if winner_ids:
             try:
                 winner_user = await self.bot.fetch_user(winner_ids[0])
@@ -855,11 +957,11 @@ class DailyTrivia(commands.Cog):
         answer_counts = Counter(all_answers_dict.values())
         stats_value = ""
         for answer, count in answer_counts.items(): stats_value += f"`{answer}`: {count} vote(s)\n"
-        if stats_value: reconstructed_embed.add_field(name="\U0001F4CA Vote Distribution", value=stats_value, inline=False)
+        if stats_value: reconstructed_embed.add_field(name="📊 Vote Distribution", value=stats_value, inline=False)
         if not winner_ids:
-            reconstructed_embed.add_field(name="\U0001F389 Winners", value="No one got the correct answer this time!", inline=False)
+            reconstructed_embed.add_field(name="🎉 Winners", value="No one got the correct answer this time!", inline=False)
         else:
-            reconstructed_embed.add_field(name="\U0001F947 Fastest Correct Answer", value=f"<@{winner_ids[0]}>", inline=False)
+            reconstructed_embed.add_field(name="🥇 Fastest Correct Answer", value=f"<@{winner_ids[0]}>", inline=False)
             other_winners = winner_ids[1:]
             if other_winners:
                 mentions = ", ".join(f"<@{uid}>" for uid in other_winners)
@@ -872,9 +974,9 @@ class DailyTrivia(commands.Cog):
         
         await interaction.followup.send(embed=reconstructed_embed)
 
-    @trivia_stats.command(name="view", description="Shows your personal trivia statistics or those of another user.")
+    @trivia.command(name="stats", description="Shows your personal trivia statistics or those of another user.")
     @app_commands.describe(user="The user whose stats you want to see (optional).")
-    async def mystats_view(self, interaction: discord.Interaction, user: discord.Member = None):
+    async def trivia_stats(self, interaction: discord.Interaction, user: discord.Member = None):
         target_user = user or interaction.user
         await interaction.response.defer(ephemeral=True)
         
@@ -898,58 +1000,43 @@ class DailyTrivia(commands.Cog):
             embed = discord.Embed(description=f"{target_user.mention} has not answered any trivia questions correctly yet.", color=discord.Color.yellow())
             return await interaction.followup.send(embed=embed)
 
-        embed = discord.Embed(title=f"\U0001F4CA Trivia Stats for {target_user.display_name}", color=EMBED_COLOR_TRIVIA)
+        embed = discord.Embed(title=f"📊 Trivia Stats for {target_user.display_name}", color=EMBED_COLOR_TRIVIA)
         embed.set_thumbnail(url=target_user.display_avatar.url)
         embed.add_field(name="Correct Answers", value=f"`{correct_answers}`", inline=True)
         
         if nemesis_counter:
             nemesis_id, _ = nemesis_counter.most_common(1)[0]
-            embed.add_field(name="Nemesis \u2694\uFE0F", value=f"<@{nemesis_id}>", inline=True)
+            embed.add_field(name="Nemesis ⚔️", value=f"<@{nemesis_id}>", inline=True)
         else:
-            embed.add_field(name="Nemesis \u2694\uFE0F", value="None", inline=True)
+            embed.add_field(name="Nemesis ⚔️", value="None", inline=True)
             
         if ally_counter:
             ally_id, _ = ally_counter.most_common(1)[0]
-            embed.add_field(name="Ally \U0001F91D", value=f"<@{ally_id}>", inline=True)
+            embed.add_field(name="Ally 🤝", value=f"<@{ally_id}>", inline=True)
         else:
-            embed.add_field(name="Ally \U0001F91D", value="None", inline=True)
+            embed.add_field(name="Ally 🤝", value="None", inline=True)
         
         embed.set_footer(text=f"Stats based on the last {len(interactions)} questions.")
         await interaction.followup.send(embed=embed)
 
-    @trivia_stats.command(name="compare", description="Compares the trivia stats of two users.")
-    async def mystats_compare(self, interaction: discord.Interaction, user1: discord.Member, user2: discord.Member):
-        await interaction.response.defer(ephemeral=True)
-        
+    # --- NEW: Admin Command Group ---
+    @trivia_admin.command(name="panel", description="Opens the trivia admin control panel.")
+    @app_commands.check(is_trivia_admin)
+    async def admin_panel(self, interaction: discord.Interaction):
         cfg = self.get_guild_config(interaction.guild_id)
-        interactions = cfg.get("daily_interactions", [])
+        embed = discord.Embed(title="⚙️ Trivia Admin Panel", description="Manage the daily trivia game for this server.", color=EMBED_COLOR_TRIVIA)
         
-        stats = {user1.id: Counter(), user2.id: Counter()}
-        ally_counters = {user1.id: Counter(), user2.id: Counter()}
+        channel_mention = f"<#{cfg['channel_id']}>" if cfg.get('channel_id') else "Not Set"
+        admin_role_mention = f"<@&{cfg['admin_role_id']}>" if cfg.get('admin_role_id') else "Not Set"
 
-        for event in interactions:
-            all_winners = event.get("all_winners", [])
-            for user in [user1, user2]:
-                if user.id in all_winners:
-                    stats[user.id]["correct"] += 1
-                    for winner_id in all_winners:
-                        if winner_id != user.id:
-                            ally_counters[user.id][winner_id] += 1
-        
-        embed = discord.Embed(title=f"Stat Comparison: {user1.display_name} vs {user2.display_name}", color=EMBED_COLOR_TRIVIA)
-        embed.add_field(name="Stat", value="**Correct Answers**\n**Top Ally**", inline=True)
-        
-        for user in [user1, user2]:
-            correct = stats[user.id]['correct']
-            ally_text = "None"
-            if ally_counters[user.id]:
-                ally_id, _ = ally_counters[user.id].most_common(1)[0]
-                ally_text = f"<@{ally_id}>"
-            embed.add_field(name=user.display_name, value=f"`{correct}`\n{ally_text}", inline=True)
+        embed.add_field(name="Status", value="Enabled" if cfg.get('enabled') else "Disabled", inline=True)
+        embed.add_field(name="Channel", value=channel_mention, inline=True)
+        embed.add_field(name="Post Time", value=f"`{cfg.get('time', '12:00')}` (`{cfg.get('timezone', 'UTC')}`)", inline=True)
+        embed.add_field(name="Admin Role", value=admin_role_mention, inline=False)
 
-        await interaction.followup.send(embed=embed)
+        view = AdminPanelView(self, interaction.user)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-    # ... [All other admin commands (`/trivia settings`, `toggle`, `mute`, `resetserver`, etc.) would follow here] ...
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(DailyTrivia(bot))

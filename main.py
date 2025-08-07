@@ -34,7 +34,8 @@ class MyBot(commands.Bot):
                     print(f"❌ Failed to load cog {filename}: {e}")
         
         # This initial sync is a good default, but the manual command is faster for testing
-        await self.tree.sync()
+        # We will rely on the manual sync for now to debug.
+        # await self.tree.sync()
 
     async def on_ready(self):
         print(f'Logged in as {self.user} (ID: {self.user.id})')
@@ -48,11 +49,21 @@ class MyBot(commands.Bot):
         Manually syncs slash commands.
         Usage: !sync -> global sync
                !sync guild -> syncs to the current guild
+               !sync clear -> clears commands for the current guild
         """
         if guild and guild.lower() == 'guild':
+            # Sync to the current guild
             synced = await self.tree.sync(guild=ctx.guild)
             await ctx.send(f"✅ Synced {len(synced)} commands to this guild.")
+            
+        elif guild and guild.lower() == 'clear':
+            # Clear commands for the current guild and then sync
+            self.tree.clear_commands(guild=ctx.guild)
+            await self.tree.sync(guild=ctx.guild)
+            await ctx.send("🧹 Cleared all commands for this guild and re-synced.")
+            
         else:
+            # Global sync
             synced = await self.tree.sync()
             await ctx.send(f"✅ Synced {len(synced)} commands globally.")
 

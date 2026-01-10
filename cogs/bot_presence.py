@@ -1,30 +1,19 @@
 import discord
-from discord.ext import commands, tasks
-import random
+from discord.ext import commands
 
 class BotPresence(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.change_status.start()
 
-    def cog_unload(self):
-        self.change_status.cancel()
-
-    @tasks.loop(seconds=60)
-    async def change_status(self):
-        # This will only show a server count if the bot has the necessary intents
-        server_count = len(self.bot.guilds)
-        statuses = [
-            "Type /help for commands",
-            f"Watching over {server_count} server(s)",
-            "Playing Daily Trivia!",
-            "Picking the next map!"
-        ]
-        await self.bot.change_presence(activity=discord.Game(random.choice(statuses)))
-
-    @change_status.before_loop
-    async def before_change_status(self):
-        await self.bot.wait_until_ready()
+    @commands.Cog.listener()
+    async def on_ready(self):
+        """Sets the bot's presence once it has connected to Discord."""
+        # This event is triggered when the bot has finished logging in and is ready.
+        # It's the perfect place to set a static presence.
+        activity = discord.Activity(type=discord.ActivityType.watching, name="Better Vibes")
+        await self.bot.change_presence(status=discord.Status.online, activity=activity)
+        print("Bot presence has been set to 'Watching Better Vibes'")
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(BotPresence(bot))
+

@@ -1,8 +1,56 @@
+# Environment
 .env
-__pycache__/
-*.py[cod]
+.venv/
 venv/
 env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.save
+
+# IDE
 .DS_Store
 .vscode/
 .idea/
+
+# Logs
+*.log
+*.log.*
+bot.log*
+
+# Databases
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+
+# Runtime data files
+bot_data.json
+dm_messages.json
+fm_settings.json
+fm_users.json
+guild_settings.json
+invite_roles.json
+modtools_config.json
+nhie_history.json
+nhie_pending_suggestions.json
+nhie_questions.json
+nhie_settings.json
+nhie_votes.json
+reminders.json
+reminders_config.json
+suggestion_data.json
+vc_config.json
+vc_presets.json
+vc_state.json
+trivia_config_backup_*.json
+
+# Credentials (NEVER commit)
+service_account.json
+credentials.json
+
+# Cache and data directories
+image_cache/
+data/
+vc/

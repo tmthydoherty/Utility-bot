@@ -1,42 +1,973 @@
 {
-    "1378533495286268078": {
-        "games": {
-            "Siege": {
-                "unseen_maps": [
-                    "chalet",
-                    "kafe",
-                    "Oregon"
-                ],
-                "seen_maps": [
-                    "Nighthaven Labs",
-                    "Lair"
-                ],
-                "win_history": {
-                    "Lair": 1
+    "universal_games": {
+        "Valorant": {
+            "maps": {
+                "Abyss": {
+                    "url": "https://static.wikia.nocookie.net/valorant/images/6/61/Loading_Screen_Abyss.png/revision/latest?cb=20240730145619"
+                },
+                "Ascent": {
+                    "url": "https://static.wikia.nocookie.net/valorant/images/e/e7/Loading_Screen_Ascent.png/revision/latest?cb=20200607180020"
+                },
+                "Bind": {
+                    "url": "https://static.wikia.nocookie.net/valorant/images/2/23/Loading_Screen_Bind.png/revision/latest?cb=20200620202316"
+                },
+                "Corrode": {
+                    "url": "https://static.wikia.nocookie.net/valorant/images/6/6f/Loading_Screen_Corrode.png/revision/latest?cb=20250624201813"
+                },
+                "Haven": {
+                    "url": "https://static.wikia.nocookie.net/valorant/images/7/70/Loading_Screen_Haven.png/revision/latest?cb=20200620202335"
+                },
+                "Icebox": {
+                    "url": "https://static.wikia.nocookie.net/valorant/images/1/13/Loading_Screen_Icebox.png/revision/latest?cb=20250730171440"
+                },
+                "Pearl": {
+                    "url": null
+                },
+                "Sunset": {
+                    "url": "https://static.wikia.nocookie.net/valorant/images/5/5c/Loading_Screen_Sunset.png/revision/latest?cb=20230829125442"
+                },
+                "Lotus": {
+                    "url": "https://static.wikia.nocookie.net/valorant/images/d/d0/Loading_Screen_Lotus.png/revision/latest?cb=20230106163526"
+                },
+                "Split": {
+                    "url": "https://static.wikia.nocookie.net/valorant/images/d/d6/Loading_Screen_Split.png/revision/latest?cb=20230411161807"
+                },
+                "Fracture": {
+                    "url": "https://static.wikia.nocookie.net/valorant/images/f/fc/Loading_Screen_Fracture.png/revision/latest?cb=20210908143656"
+                },
+                "Breeze": {
+                    "url": "https://static.wikia.nocookie.net/valorant/images/1/10/Loading_Screen_Breeze.png/revision/latest?cb=20260106175937"
                 }
             },
-            "valorant": {
-                "unseen_maps": [],
-                "seen_maps": []
-            }
+            "unseen_maps": [
+                "Icebox",
+                "Abyss",
+                "Breeze"
+            ],
+            "seen_maps": [
+                "Sunset",
+                "Bind",
+                "Ascent",
+                "Pearl",
+                "Fracture",
+                "Corrode",
+                "Haven",
+                "Split",
+                "Lotus"
+            ],
+            "win_history": {
+                "Lotus": 5,
+                "Split": 2,
+                "Icebox": 2,
+                "Sunset": 4,
+                "Abyss": 4,
+                "Corrode": 6,
+                "Bind": 3,
+                "Pearl": 1,
+                "Fracture": 2,
+                "Haven": 2,
+                "Ascent": 2
+            },
+            "max_votes": 10
+        }
+    },
+    "guild_data": {
+        "1378533495286268078": {
+            "admin_roles": [],
+            "active_votes": {},
+            "user_stats": {
+                "356774449032331264": {
+                    "total_votes": 1,
+                    "wins": 1,
+                    "map_votes": {
+                        "Lair": 1
+                    }
+                },
+                "739592205265535007": {
+                    "total_votes": 1,
+                    "wins": 0,
+                    "map_votes": {
+                        "kafe": 1
+                    }
+                }
+            },
+            "vote_counter": 8
         },
-        "active_votes": {},
-        "vote_counter": 2,
-        "user_stats": {
-            "356774449032331264": {
-                "total_votes": 1,
-                "wins": 1,
-                "map_votes": {
-                    "Lair": 1
+        "888113243355226162": {
+            "admin_roles": [],
+            "active_votes": {},
+            "user_stats": {
+                "356774449032331264": {
+                    "total_votes": 6,
+                    "wins": 6,
+                    "map_votes": {
+                        "Corrode": 1,
+                        "Haven": 1,
+                        "Ascent": 1,
+                        "Bind": 1,
+                        "Split": 1,
+                        "Abyss": 1
+                    }
+                },
+                "752675036858417173": {
+                    "total_votes": 1,
+                    "wins": 0,
+                    "map_votes": {
+                        "Bind": 1
+                    }
+                },
+                "1249162247675056239": {
+                    "total_votes": 31,
+                    "wins": 16,
+                    "map_votes": {
+                        "Lotus": 5,
+                        "Sunset": 6,
+                        "Corrode": 8,
+                        "Icebox": 3,
+                        "Ascent": 3,
+                        "Split": 3,
+                        "Bind": 1,
+                        "Abyss": 1,
+                        "Pearl": 1
+                    }
+                },
+                "439633684136460291": {
+                    "total_votes": 7,
+                    "wins": 4,
+                    "map_votes": {
+                        "Lotus": 1,
+                        "Corrode": 1,
+                        "Split": 1,
+                        "Icebox": 1,
+                        "Haven": 1,
+                        "Ascent": 1,
+                        "Bind": 1
+                    }
+                },
+                "1136852950392774686": {
+                    "total_votes": 15,
+                    "wins": 5,
+                    "map_votes": {
+                        "Lotus": 1,
+                        "Ascent": 4,
+                        "Sunset": 4,
+                        "Pearl": 2,
+                        "Split": 3,
+                        "Fracture": 1
+                    }
+                },
+                "783356608100958248": {
+                    "total_votes": 1,
+                    "wins": 0,
+                    "map_votes": {
+                        "Haven": 1
+                    }
+                },
+                "325614501254791168": {
+                    "total_votes": 26,
+                    "wins": 13,
+                    "map_votes": {
+                        "Haven": 3,
+                        "Bind": 7,
+                        "Ascent": 5,
+                        "Corrode": 4,
+                        "Lotus": 4,
+                        "Pearl": 1,
+                        "Abyss": 1,
+                        "Fracture": 1
+                    }
+                },
+                "405132686852751380": {
+                    "total_votes": 6,
+                    "wins": 2,
+                    "map_votes": {
+                        "Haven": 3,
+                        "Sunset": 1,
+                        "Icebox": 1,
+                        "Ascent": 1
+                    }
+                },
+                "594620930320367617": {
+                    "total_votes": 6,
+                    "wins": 3,
+                    "map_votes": {
+                        "Haven": 1,
+                        "Corrode": 1,
+                        "Bind": 1,
+                        "Sunset": 1,
+                        "Icebox": 1,
+                        "Ascent": 1
+                    }
+                },
+                "1098345785109774397": {
+                    "total_votes": 32,
+                    "wins": 13,
+                    "map_votes": {
+                        "Haven": 6,
+                        "Ascent": 1,
+                        "Sunset": 3,
+                        "Abyss": 2,
+                        "Lotus": 4,
+                        "Corrode": 4,
+                        "Pearl": 5,
+                        "Bind": 3,
+                        "Fracture": 3,
+                        "Split": 1
+                    }
+                },
+                "756992075353948243": {
+                    "total_votes": 1,
+                    "wins": 0,
+                    "map_votes": {
+                        "Haven": 1
+                    }
+                },
+                "391313828237017088": {
+                    "total_votes": 18,
+                    "wins": 7,
+                    "map_votes": {
+                        "Fracture": 3,
+                        "Split": 3,
+                        "Sunset": 4,
+                        "Corrode": 4,
+                        "Icebox": 2,
+                        "Pearl": 1,
+                        "Haven": 1
+                    }
+                },
+                "1238098860669407343": {
+                    "total_votes": 1,
+                    "wins": 0,
+                    "map_votes": {
+                        "Split": 1
+                    }
+                },
+                "1160659578019655741": {
+                    "total_votes": 12,
+                    "wins": 7,
+                    "map_votes": {
+                        "Ascent": 5,
+                        "Haven": 1,
+                        "Sunset": 3,
+                        "Bind": 2,
+                        "Pearl": 1
+                    }
+                },
+                "432936959661572107": {
+                    "total_votes": 2,
+                    "wins": 1,
+                    "map_votes": {
+                        "Ascent": 1,
+                        "Fracture": 1
+                    }
+                },
+                "732384312200003605": {
+                    "total_votes": 20,
+                    "wins": 10,
+                    "map_votes": {
+                        "Sunset": 5,
+                        "Haven": 1,
+                        "Corrode": 3,
+                        "Bind": 5,
+                        "Split": 2,
+                        "Abyss": 2,
+                        "Lotus": 1,
+                        "Ascent": 1
+                    }
+                },
+                "562801560640552980": {
+                    "total_votes": 18,
+                    "wins": 12,
+                    "map_votes": {
+                        "Sunset": 4,
+                        "Haven": 2,
+                        "Ascent": 3,
+                        "Abyss": 3,
+                        "Split": 1,
+                        "Corrode": 3,
+                        "Bind": 1,
+                        "Lotus": 1
+                    }
+                },
+                "703693177529303101": {
+                    "total_votes": 1,
+                    "wins": 0,
+                    "map_votes": {
+                        "Sunset": 1
+                    }
+                },
+                "728536500198703135": {
+                    "total_votes": 8,
+                    "wins": 2,
+                    "map_votes": {
+                        "Ascent": 2,
+                        "Split": 2,
+                        "Icebox": 2,
+                        "Haven": 1,
+                        "Abyss": 1
+                    }
+                },
+                "837442012705062942": {
+                    "total_votes": 1,
+                    "wins": 1,
+                    "map_votes": {
+                        "Ascent": 1
+                    }
+                },
+                "445798193414930433": {
+                    "total_votes": 2,
+                    "wins": 0,
+                    "map_votes": {
+                        "Abyss": 1,
+                        "Lotus": 1
+                    }
+                },
+                "1053227743040503878": {
+                    "total_votes": 22,
+                    "wins": 6,
+                    "map_votes": {
+                        "Abyss": 1,
+                        "Icebox": 8,
+                        "Sunset": 2,
+                        "Pearl": 4,
+                        "Split": 3,
+                        "Lotus": 2,
+                        "Fracture": 2
+                    }
+                },
+                "881687925425864724": {
+                    "total_votes": 9,
+                    "wins": 5,
+                    "map_votes": {
+                        "Abyss": 1,
+                        "Sunset": 2,
+                        "Haven": 1,
+                        "Corrode": 3,
+                        "Fracture": 1,
+                        "Ascent": 1
+                    }
+                },
+                "385269753004032011": {
+                    "total_votes": 12,
+                    "wins": 10,
+                    "map_votes": {
+                        "Corrode": 1,
+                        "Sunset": 4,
+                        "Ascent": 2,
+                        "Split": 2,
+                        "Lotus": 1,
+                        "Haven": 1,
+                        "Icebox": 1
+                    }
+                },
+                "455376288086097920": {
+                    "total_votes": 4,
+                    "wins": 3,
+                    "map_votes": {
+                        "Icebox": 1,
+                        "Bind": 1,
+                        "Sunset": 1,
+                        "Fracture": 1
+                    }
+                },
+                "342775413556248576": {
+                    "total_votes": 2,
+                    "wins": 1,
+                    "map_votes": {
+                        "Icebox": 1,
+                        "Corrode": 1
+                    }
+                },
+                "758864470716973077": {
+                    "total_votes": 1,
+                    "wins": 0,
+                    "map_votes": {
+                        "Split": 1
+                    }
+                },
+                "815271561924706375": {
+                    "total_votes": 5,
+                    "wins": 4,
+                    "map_votes": {
+                        "Ascent": 1,
+                        "Abyss": 1,
+                        "Pearl": 1,
+                        "Haven": 1,
+                        "Sunset": 1
+                    }
+                },
+                "518224960007831552": {
+                    "total_votes": 5,
+                    "wins": 3,
+                    "map_votes": {
+                        "Ascent": 1,
+                        "Abyss": 2,
+                        "Sunset": 1,
+                        "Lotus": 1
+                    }
+                },
+                "701271803347075115": {
+                    "total_votes": 19,
+                    "wins": 10,
+                    "map_votes": {
+                        "Ascent": 2,
+                        "Abyss": 2,
+                        "Sunset": 2,
+                        "Icebox": 3,
+                        "Pearl": 2,
+                        "Lotus": 3,
+                        "Fracture": 1,
+                        "Haven": 1,
+                        "Split": 2,
+                        "Bind": 1
+                    }
+                },
+                "1374684483248197695": {
+                    "total_votes": 5,
+                    "wins": 2,
+                    "map_votes": {
+                        "Sunset": 1,
+                        "Bind": 2,
+                        "Ascent": 1,
+                        "Abyss": 1
+                    }
+                },
+                "588032525960478760": {
+                    "total_votes": 4,
+                    "wins": 3,
+                    "map_votes": {
+                        "Corrode": 1,
+                        "Bind": 1,
+                        "Haven": 1,
+                        "Lotus": 1
+                    }
+                },
+                "689694856829862150": {
+                    "total_votes": 9,
+                    "wins": 4,
+                    "map_votes": {
+                        "Icebox": 2,
+                        "Pearl": 1,
+                        "Lotus": 1,
+                        "Ascent": 2,
+                        "Bind": 2,
+                        "Haven": 1
+                    }
+                },
+                "682371783785054234": {
+                    "total_votes": 4,
+                    "wins": 2,
+                    "map_votes": {
+                        "Icebox": 2,
+                        "Sunset": 1,
+                        "Pearl": 1
+                    }
+                },
+                "445718272290062336": {
+                    "total_votes": 6,
+                    "wins": 4,
+                    "map_votes": {
+                        "Icebox": 1,
+                        "Haven": 2,
+                        "Bind": 1,
+                        "Lotus": 2
+                    }
+                },
+                "323202681931825152": {
+                    "total_votes": 1,
+                    "wins": 0,
+                    "map_votes": {
+                        "Icebox": 1
+                    }
+                },
+                "290533994838360064": {
+                    "total_votes": 3,
+                    "wins": 0,
+                    "map_votes": {
+                        "Split": 1,
+                        "Bind": 1,
+                        "Pearl": 1
+                    }
+                },
+                "1300354187569135629": {
+                    "total_votes": 1,
+                    "wins": 1,
+                    "map_votes": {
+                        "Haven": 1
+                    }
+                },
+                "1304661496105668629": {
+                    "total_votes": 2,
+                    "wins": 2,
+                    "map_votes": {
+                        "Haven": 1,
+                        "Pearl": 1
+                    }
+                },
+                "641796615400587265": {
+                    "total_votes": 2,
+                    "wins": 0,
+                    "map_votes": {
+                        "Lotus": 1,
+                        "Ascent": 1
+                    }
+                },
+                "305345341979623424": {
+                    "total_votes": 2,
+                    "wins": 2,
+                    "map_votes": {
+                        "Ascent": 1,
+                        "Haven": 1
+                    }
+                },
+                "932125223644454923": {
+                    "total_votes": 1,
+                    "wins": 1,
+                    "map_votes": {
+                        "Pearl": 1
+                    }
+                },
+                "821120668364046347": {
+                    "total_votes": 1,
+                    "wins": 1,
+                    "map_votes": {
+                        "Bind": 1
+                    }
+                },
+                "1049723002721419264": {
+                    "total_votes": 5,
+                    "wins": 4,
+                    "map_votes": {
+                        "Abyss": 1,
+                        "Split": 1,
+                        "Corrode": 1,
+                        "Sunset": 2
+                    }
+                },
+                "223215700024623105": {
+                    "total_votes": 3,
+                    "wins": 1,
+                    "map_votes": {
+                        "Ascent": 1,
+                        "Bind": 1,
+                        "Sunset": 1
+                    }
+                },
+                "1394069397135691948": {
+                    "total_votes": 1,
+                    "wins": 0,
+                    "map_votes": {
+                        "Icebox": 1
+                    }
+                },
+                "462681318577405952": {
+                    "total_votes": 3,
+                    "wins": 1,
+                    "map_votes": {
+                        "Bind": 1,
+                        "Sunset": 1,
+                        "Haven": 1
+                    }
+                },
+                "442055852074205185": {
+                    "total_votes": 1,
+                    "wins": 0,
+                    "map_votes": {
+                        "Lotus": 1
+                    }
+                },
+                "875451157198291046": {
+                    "total_votes": 1,
+                    "wins": 1,
+                    "map_votes": {
+                        "Bind": 1
+                    }
+                },
+                "1006374083451170916": {
+                    "total_votes": 5,
+                    "wins": 2,
+                    "map_votes": {
+                        "Sunset": 1,
+                        "Icebox": 2,
+                        "Bind": 1,
+                        "Lotus": 1
+                    }
+                },
+                "739592205265535007": {
+                    "total_votes": 1,
+                    "wins": 1,
+                    "map_votes": {
+                        "Ascent": 1
+                    }
                 }
             },
-            "739592205265535007": {
-                "total_votes": 1,
-                "wins": 0,
-                "map_votes": {
-                    "kafe": 1
+            "vote_counter": 106
+        },
+        "1431565435010289778": {
+            "admin_roles": [],
+            "active_votes": {},
+            "user_stats": {
+                "1249162247675056239": {
+                    "total_votes": 19,
+                    "wins": 14,
+                    "map_votes": {
+                        "Lotus": 5,
+                        "Split": 2,
+                        "Icebox": 1,
+                        "Corrode": 4,
+                        "Haven": 1,
+                        "Bind": 2,
+                        "Abyss": 1,
+                        "Sunset": 3
+                    }
+                },
+                "1049723002721419264": {
+                    "total_votes": 7,
+                    "wins": 4,
+                    "map_votes": {
+                        "Lotus": 1,
+                        "Bind": 1,
+                        "Ascent": 1,
+                        "Abyss": 2,
+                        "Sunset": 2
+                    }
+                },
+                "732384312200003605": {
+                    "total_votes": 19,
+                    "wins": 12,
+                    "map_votes": {
+                        "Lotus": 2,
+                        "Corrode": 6,
+                        "Abyss": 2,
+                        "Bind": 5,
+                        "Haven": 1,
+                        "Sunset": 2,
+                        "Split": 1
+                    }
+                },
+                "391313828237017088": {
+                    "total_votes": 16,
+                    "wins": 9,
+                    "map_votes": {
+                        "Lotus": 3,
+                        "Fracture": 3,
+                        "Corrode": 3,
+                        "Ascent": 3,
+                        "Icebox": 1,
+                        "Pearl": 2,
+                        "Sunset": 1
+                    }
+                },
+                "1136852950392774686": {
+                    "total_votes": 11,
+                    "wins": 6,
+                    "map_votes": {
+                        "Lotus": 2,
+                        "Split": 2,
+                        "Icebox": 1,
+                        "Ascent": 2,
+                        "Corrode": 1,
+                        "Fracture": 1,
+                        "Abyss": 2
+                    }
+                },
+                "739592205265535007": {
+                    "total_votes": 2,
+                    "wins": 2,
+                    "map_votes": {
+                        "Lotus": 2
+                    }
+                },
+                "881687925425864724": {
+                    "total_votes": 11,
+                    "wins": 4,
+                    "map_votes": {
+                        "Bind": 3,
+                        "Haven": 3,
+                        "Abyss": 1,
+                        "Lotus": 2,
+                        "Sunset": 2
+                    }
+                },
+                "343220200432467970": {
+                    "total_votes": 1,
+                    "wins": 0,
+                    "map_votes": {
+                        "Bind": 1
+                    }
+                },
+                "562801560640552980": {
+                    "total_votes": 24,
+                    "wins": 15,
+                    "map_votes": {
+                        "Bind": 4,
+                        "Corrode": 3,
+                        "Lotus": 3,
+                        "Abyss": 6,
+                        "Sunset": 3,
+                        "Haven": 3,
+                        "Fracture": 1,
+                        "Ascent": 1
+                    }
+                },
+                "1053227743040503878": {
+                    "total_votes": 12,
+                    "wins": 9,
+                    "map_votes": {
+                        "Fracture": 2,
+                        "Icebox": 2,
+                        "Sunset": 1,
+                        "Corrode": 3,
+                        "Split": 1,
+                        "Lotus": 2,
+                        "Ascent": 1
+                    }
+                },
+                "1006374083451170916": {
+                    "total_votes": 12,
+                    "wins": 8,
+                    "map_votes": {
+                        "Split": 2,
+                        "Icebox": 1,
+                        "Abyss": 1,
+                        "Haven": 2,
+                        "Lotus": 2,
+                        "Fracture": 1,
+                        "Corrode": 1,
+                        "Bind": 1,
+                        "Sunset": 1
+                    }
+                },
+                "815271561924706375": {
+                    "total_votes": 7,
+                    "wins": 5,
+                    "map_votes": {
+                        "Corrode": 3,
+                        "Abyss": 1,
+                        "Lotus": 2,
+                        "Bind": 1
+                    }
+                },
+                "1098345785109774397": {
+                    "total_votes": 18,
+                    "wins": 9,
+                    "map_votes": {
+                        "Ascent": 2,
+                        "Sunset": 3,
+                        "Abyss": 1,
+                        "Lotus": 5,
+                        "Split": 2,
+                        "Icebox": 1,
+                        "Corrode": 3,
+                        "Haven": 1
+                    }
+                },
+                "1160659578019655741": {
+                    "total_votes": 11,
+                    "wins": 8,
+                    "map_votes": {
+                        "Sunset": 2,
+                        "Split": 1,
+                        "Ascent": 2,
+                        "Bind": 1,
+                        "Corrode": 3,
+                        "Haven": 1,
+                        "Lotus": 1
+                    }
+                },
+                "462681318577405952": {
+                    "total_votes": 4,
+                    "wins": 2,
+                    "map_votes": {
+                        "Pearl": 1,
+                        "Abyss": 1,
+                        "Corrode": 2
+                    }
+                },
+                "439633684136460291": {
+                    "total_votes": 5,
+                    "wins": 1,
+                    "map_votes": {
+                        "Haven": 1,
+                        "Abyss": 1,
+                        "Corrode": 2,
+                        "Lotus": 1
+                    }
+                },
+                "848050994553028608": {
+                    "total_votes": 6,
+                    "wins": 5,
+                    "map_votes": {
+                        "Haven": 2,
+                        "Lotus": 2,
+                        "Corrode": 2
+                    }
+                },
+                "588032525960478760": {
+                    "total_votes": 5,
+                    "wins": 3,
+                    "map_votes": {
+                        "Corrode": 1,
+                        "Lotus": 2,
+                        "Bind": 1,
+                        "Abyss": 1
+                    }
+                },
+                "405132686852751380": {
+                    "total_votes": 3,
+                    "wins": 2,
+                    "map_votes": {
+                        "Corrode": 2,
+                        "Bind": 1
+                    }
+                },
+                "728536500198703135": {
+                    "total_votes": 5,
+                    "wins": 3,
+                    "map_votes": {
+                        "Bind": 1,
+                        "Lotus": 1,
+                        "Haven": 2,
+                        "Abyss": 1
+                    }
+                },
+                "641796615400587265": {
+                    "total_votes": 1,
+                    "wins": 0,
+                    "map_votes": {
+                        "Ascent": 1
+                    }
+                },
+                "325614501254791168": {
+                    "total_votes": 17,
+                    "wins": 7,
+                    "map_votes": {
+                        "Abyss": 3,
+                        "Pearl": 1,
+                        "Ascent": 3,
+                        "Bind": 5,
+                        "Haven": 4,
+                        "Lotus": 1
+                    }
+                },
+                "442055852074205185": {
+                    "total_votes": 7,
+                    "wins": 4,
+                    "map_votes": {
+                        "Pearl": 2,
+                        "Abyss": 2,
+                        "Corrode": 1,
+                        "Bind": 1,
+                        "Sunset": 1
+                    }
+                },
+                "223215700024623105": {
+                    "total_votes": 3,
+                    "wins": 1,
+                    "map_votes": {
+                        "Pearl": 1,
+                        "Split": 1,
+                        "Fracture": 1
+                    }
+                },
+                "1104277603512225792": {
+                    "total_votes": 4,
+                    "wins": 3,
+                    "map_votes": {
+                        "Abyss": 1,
+                        "Sunset": 2,
+                        "Icebox": 1
+                    }
+                },
+                "728028503638933505": {
+                    "total_votes": 1,
+                    "wins": 0,
+                    "map_votes": {
+                        "Split": 1
+                    }
+                },
+                "280095356195438592": {
+                    "total_votes": 1,
+                    "wins": 0,
+                    "map_votes": {
+                        "Ascent": 1
+                    }
+                },
+                "385269753004032011": {
+                    "total_votes": 5,
+                    "wins": 2,
+                    "map_votes": {
+                        "Sunset": 2,
+                        "Ascent": 2,
+                        "Corrode": 1
+                    }
+                },
+                "560303182975205377": {
+                    "total_votes": 4,
+                    "wins": 4,
+                    "map_votes": {
+                        "Abyss": 1,
+                        "Corrode": 1,
+                        "Sunset": 1,
+                        "Haven": 1
+                    }
+                },
+                "518224960007831552": {
+                    "total_votes": 3,
+                    "wins": 1,
+                    "map_votes": {
+                        "Pearl": 1,
+                        "Abyss": 1,
+                        "Ascent": 1
+                    }
+                },
+                "689694856829862150": {
+                    "total_votes": 5,
+                    "wins": 2,
+                    "map_votes": {
+                        "Bind": 2,
+                        "Icebox": 1,
+                        "Pearl": 1,
+                        "Lotus": 1
+                    }
+                },
+                "473993024909869057": {
+                    "total_votes": 1,
+                    "wins": 1,
+                    "map_votes": {
+                        "Corrode": 1
+                    }
+                },
+                "682371783785054234": {
+                    "total_votes": 1,
+                    "wins": 0,
+                    "map_votes": {
+                        "Ascent": 1
+                    }
+                },
+                "714261867442208908": {
+                    "total_votes": 1,
+                    "wins": 0,
+                    "map_votes": {
+                        "Pearl": 1
+                    }
+                },
+                "1215887311305310219": {
+                    "total_votes": 1,
+                    "wins": 1,
+                    "map_votes": {
+                        "Corrode": 1
+                    }
+                },
+                "1101675923192958976": {
+                    "total_votes": 1,
+                    "wins": 1,
+                    "map_votes": {
+                        "Corrode": 1
+                    }
                 }
-            }
+            },
+            "vote_counter": 40
         }
     }
 }

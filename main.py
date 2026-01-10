@@ -2,78 +2,109 @@ import discord
 from discord.ext import commands
 import os
 import asyncio
-import logging
 from dotenv import load_dotenv
+from pathlib import Path
+import logging
 
-# Set up basic logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s:%(levelname)s:%(name)s: %(message)s')
+# --- LOGGING SETUP ---
+logger = logging.getLogger('bot_main')
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
 
-# Load environment variables from .env file
-load_dotenv()
-BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-
-class MyBot(commands.Bot):
+# --- BOT SETUP ---
+class Vibey(commands.Bot):
     def __init__(self):
-        # Define the intents your bot needs
         intents = discord.Intents.default()
-        intents.message_content = True 
         intents.members = True
-        intents.presences = True
+        intents.message_content = True
+        intents.invites = True
+        intents.voice_states = True  # <--- CRITICAL: Needed to track voice activity
 
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
-        # This function is called when the bot logs in
-        # It finds and loads all .py files in the 'cogs' directory
-        for filename in os.listdir('./cogs'):
-            if filename.endswith('.py') and not filename.startswith('__'):
+        """This is called when the bot is starting up (before on_ready)."""
+        logger.info("Setting up the bot...")
+
+        cogs_folder = "cogs"
+        if not os.path.exists(cogs_folder):
+            os.makedirs(cogs_folder)
+            logger.warning(f"Created '{cogs_folder}' directory. Please add your cogs there.")
+            return
+
+        for filename in os.listdir(cogs_folder):
+            # Skip non-cog files: __init__, _shared modules, etc.
+            if filename.endswith(".py") and not filename.startswith("__") and not filename.endswith("_shared.py"):
+                cog_name = f"{cogs_folder}.{filename[:-3]}"
                 try:
-                    await self.load_extension(f'cogs.{filename[:-3]}')
-                    print(f"✅ Loaded Cog: {filename}")
+                    await self.load_extension(cog_name)
+                    logger.info(f"✅ Successfully loaded cog: {cog_name}")
                 except Exception as e:
-                    print(f"❌ Failed to load cog {filename}: {e}")
-        
-        # This initial sync is a good default, but the manual command is faster for testing
-        # We will rely on the manual sync for now to debug.
-        # await self.tree.sync()
+                    logger.error(f"❌ Failed to load cog {cog_name}. Error: {e}", exc_info=True)
 
     async def on_ready(self):
-        print(f'Logged in as {self.user} (ID: {self.user.id})')
-        print('------')
-    
-    # MODIFIED - More powerful manual sync command
-    @commands.command()
-    @commands.is_owner()
-    async def sync(self, ctx: commands.Context, guild: str = None):
-        """
-        Manually syncs slash commands.
-        Usage: !sync -> global sync
-               !sync guild -> syncs to the current guild
-               !sync clear -> clears commands for the current guild
-        """
-        if guild and guild.lower() == 'guild':
-            # Sync to the current guild
-            synced = await self.tree.sync(guild=ctx.guild)
-            await ctx.send(f"✅ Synced {len(synced)} commands to this guild.")
-            
-        elif guild and guild.lower() == 'clear':
-            # Clear commands for the current guild and then sync
-            self.tree.clear_commands(guild=ctx.guild)
-            await self.tree.sync(guild=ctx.guild)
-            await ctx.send("🧹 Cleared all commands for this guild and re-synced.")
-            
-        else:
-            # Global sync
-            synced = await self.tree.sync()
-            await ctx.send(f"✅ Synced {len(synced)} commands globally.")
+        """This is called when the bot has successfully connected to Discord."""
+        logger.info("=" * 50)
+        logger.info(f'Logged in as {self.user} (ID: {self.user.id})')
+        logger.info("Bot is ready. Syncing slash commands globally...")
 
+        # --- CHANGE: Switched to Global Sync ---
+        # This will sync all commands to all servers the bot is in.
+        # Note: Global commands can take up to an hour to propagate.
+        try:
+            synced = await self.tree.sync()
+            logger.info(f"✅ Synced {len(synced)} commands globally.")
+            # Log each command for debugging
+            for cmd in synced:
+                logger.info(f"   - /{cmd.name}: {cmd.description}")
+        except Exception as e:
+            logger.error(f"❌ Failed to sync commands globally: {e}", exc_info=True)
+
+        logger.info("=" * 50)
+
+# --- COMMAND TOOLKIT ---
+# Note: sync command moved to cogs/core.py
+
+@commands.command(name="debug")
+@commands.guild_only()
+@commands.is_owner()
+async def debug(ctx: commands.Context):
+    """Shows diagnostic information about loaded cogs and commands."""
+    loaded_cogs = list(ctx.bot.cogs.keys())
+    cogs_text = "\n".join(f"- `{cog}`" for cog in loaded_cogs) if loaded_cogs else "None"
+    global_commands = await ctx.bot.tree.fetch_commands()
+    global_text = "\n".join(f"- `/{cmd.name}`" for cmd in global_commands) if global_commands else "None"
+    guild_commands = await ctx.bot.tree.fetch_commands(guild=ctx.guild)
+    guild_text = "\n".join(f"- `/{cmd.name}`" for cmd in guild_commands) if guild_commands else "None"
+    
+    embed = discord.Embed(title="Bot Diagnostics", color=discord.Color.orange())
+    embed.add_field(name="✅ Loaded Cogs", value=cogs_text, inline=False)
+    embed.add_field(name="🌍 Global Slash Commands", value=global_text, inline=False)
+    embed.add_field(name="🏠 This Server's Slash Commands", value=guild_text, inline=False)
+    await ctx.send(embed=embed)
+
+# --- MAIN ENTRY ---
 async def main():
-    if not BOT_TOKEN:
-        print("Error: DISCORD_BOT_TOKEN not found in .env file.")
+    env_path = Path('.') / '.env'
+    load_dotenv(dotenv_path=env_path)
+    TOKEN = os.getenv('DISCORD_TOKEN')
+    if TOKEN is None:
+        logger.error("❌ Error: Bot token not found in .env file.")
         return
-        
-    bot = MyBot()
-    await bot.start(BOT_TOKEN)
+
+    bot = Vibey()
+    bot.add_command(debug)
+
+    try:
+        await bot.start(TOKEN)
+    except Exception as e:
+        logger.error(f"❌ Fatal error starting bot: {e}", exc_info=True)
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+

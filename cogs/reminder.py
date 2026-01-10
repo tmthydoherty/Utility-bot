@@ -167,6 +167,37 @@ class Reminders(commands.Cog):
                 logger.info("Migrated to timezone-aware format")
                 self.save_reminders_internal(data)
 
+            # Fix corrupted string-encoded lists (from old sanitize_data bug)
+            migrated_lists = False
+            for rid, rdata in data.items():
+                # Fix schedule_data.days_of_week if it's a string like "[0, 1]"
+                schedule_data = rdata.get('schedule_data', {})
+                if isinstance(schedule_data, dict):
+                    dow = schedule_data.get('days_of_week')
+                    if isinstance(dow, str) and dow.startswith('['):
+                        try:
+                            schedule_data['days_of_week'] = json.loads(dow)
+                            migrated_lists = True
+                            logger.info(f"Fixed days_of_week for {rid}")
+                        except json.JSONDecodeError:
+                            pass
+
+                # Fix event_schedule.days_of_week if it's a string
+                event_schedule = rdata.get('event_schedule', {})
+                if isinstance(event_schedule, dict):
+                    dow = event_schedule.get('days_of_week')
+                    if isinstance(dow, str) and dow.startswith('['):
+                        try:
+                            event_schedule['days_of_week'] = json.loads(dow)
+                            migrated_lists = True
+                            logger.info(f"Fixed event days_of_week for {rid}")
+                        except json.JSONDecodeError:
+                            pass
+
+            if migrated_lists:
+                logger.info("Fixed corrupted list data")
+                self.save_reminders_internal(data)
+
             logger.info(f"Loaded {len(data)} reminders.")
             return data
         except (json.JSONDecodeError, IOError) as e:
@@ -194,29 +225,22 @@ class Reminders(commands.Cog):
 
     @staticmethod
     def sanitize_data(data):
-        """Recursively ensures data is primitive types only."""
-        if not isinstance(data, dict):
-            return {}
-
-        clean = {}
-        for k, v in data.items():
-            if hasattr(v, 'to_component_dict') or 'discord.ui' in str(type(v)):
-                clean[k] = str(v)
-            elif isinstance(v, (str, int, float, bool, type(None))):
-                clean[k] = v
-            elif isinstance(v, list):
-                clean[k] = [str(x) if hasattr(x, 'to_component_dict') else x for x in v]
-            elif isinstance(v, dict):
-                sub_clean = {}
-                for sk, sv in v.items():
-                    if isinstance(sv, (str, int, float, bool, type(None))):
-                        sub_clean[str(sk)] = sv
-                    else:
-                        sub_clean[str(sk)] = str(sv)
-                clean[k] = sub_clean
-            else:
-                clean[k] = str(v)
-        return clean
+        """Recursively ensures data is primitive types only (JSON-serializable)."""
+        if data is None:
+            return None
+        if isinstance(data, (str, int, float, bool)):
+            return data
+        if hasattr(data, 'to_component_dict') or 'discord.ui' in str(type(data)):
+            return str(data)
+        if isinstance(data, list):
+            return [Reminders.sanitize_data(item) for item in data]
+        if isinstance(data, dict):
+            clean = {}
+            for k, v in data.items():
+                clean[str(k)] = Reminders.sanitize_data(v)
+            return clean
+        # Fallback for unknown types
+        return str(data)
 
     def initialize_skip_data(self, data):
         if 'skipped_dates' not in data:
@@ -352,7 +376,10 @@ class Reminders(commands.Cog):
                 next_fire += timedelta(days=1)
 
         elif frequency == 'monthly':
-            dom = schedule_data.get('day_of_month', 1)
+            try:
+                dom = int(schedule_data.get('day_of_month', 1))
+            except (ValueError, TypeError):
+                return "Invalid day of month"
             # Try current month first
             try:
                 next_fire = now_utc.replace(day=dom, hour=hour, minute=minute, second=0, microsecond=0)
@@ -378,6 +405,12 @@ class Reminders(commands.Cog):
             days_of_week = schedule_data.get('days_of_week', [])
             if not days_of_week:
                 return "No days configured"
+
+            # Ensure days are integers (could be strings from corrupted data)
+            try:
+                days_of_week = [int(d) for d in days_of_week]
+            except (ValueError, TypeError):
+                return "Invalid days configuration"
 
             # Find next matching day
             candidates = []
@@ -437,7 +470,11 @@ class Reminders(commands.Cog):
         if frequency == 'daily':
             return True
         elif frequency == 'monthly':
-            return now_utc.day == schedule_data.get('day_of_month')
+            try:
+                dom = int(schedule_data.get('day_of_month', 0))
+                return now_utc.day == dom
+            except (ValueError, TypeError):
+                return False
         elif frequency in ['weekly', 'biweekly']:
             days_of_week = schedule_data.get('days_of_week', [])
             # Ensure days are integers for comparison
@@ -549,7 +586,10 @@ class Reminders(commands.Cog):
             return None
 
         if frequency == 'monthly':
-            dom = event_schedule.get('day_of_month', 1)
+            try:
+                dom = int(event_schedule.get('day_of_month', 1))
+            except (ValueError, TypeError):
+                return None
             try:
                 next_event = now_utc.replace(day=dom, hour=hour, minute=minute, second=0, microsecond=0)
                 if next_event <= now_utc:
@@ -572,6 +612,12 @@ class Reminders(commands.Cog):
         elif frequency in ['weekly', 'biweekly']:
             days_of_week = event_schedule.get('days_of_week', [])
             if not days_of_week:
+                return None
+
+            # Ensure days are integers (could be strings from corrupted data)
+            try:
+                days_of_week = [int(d) for d in days_of_week]
+            except (ValueError, TypeError):
                 return None
 
             candidates = []
@@ -609,23 +655,26 @@ class Reminders(commands.Cog):
         desc = data.get('message', "")
 
         # Add recurring event schedule if present (new format)
-        if data.get('event_schedule'):
-            event_schedule = data['event_schedule']
-            event_name = event_schedule.get('event_name', '').strip()
-            next_event_ts = self.get_next_event_time(event_schedule)
-            if next_event_ts:
+        try:
+            if data.get('event_schedule'):
+                event_schedule = data['event_schedule']
+                event_name = (event_schedule.get('event_name') or '').strip()
+                next_event_ts = self.get_next_event_time(event_schedule)
+                if next_event_ts:
+                    if event_name:
+                        desc += f"\n\n**{event_name}:** <t:{next_event_ts}:F> (<t:{next_event_ts}:R>)"
+                    else:
+                        desc += f"\n\n<t:{next_event_ts}:F> (<t:{next_event_ts}:R>)"
+            # Legacy: single event timestamp (backwards compatibility)
+            elif data.get('event_timestamp_utc'):
+                event_ts = data['event_timestamp_utc']
+                event_name = (data.get('event_name') or '').strip()
                 if event_name:
-                    desc += f"\n\n**{event_name}:** <t:{next_event_ts}:F> (<t:{next_event_ts}:R>)"
+                    desc += f"\n\n**{event_name}:** <t:{event_ts}:F> (<t:{event_ts}:R>)"
                 else:
-                    desc += f"\n\n<t:{next_event_ts}:F> (<t:{next_event_ts}:R>)"
-        # Legacy: single event timestamp (backwards compatibility)
-        elif data.get('event_timestamp_utc'):
-            event_ts = data['event_timestamp_utc']
-            event_name = data.get('event_name', '').strip()
-            if event_name:
-                desc += f"\n\n**{event_name}:** <t:{event_ts}:F> (<t:{event_ts}:R>)"
-            else:
-                desc += f"\n\n<t:{event_ts}:F> (<t:{event_ts}:R>)"
+                    desc += f"\n\n<t:{event_ts}:F> (<t:{event_ts}:R>)"
+        except Exception as e:
+            logger.warning(f"Error building event timestamp: {e}")
 
         # Add current timestamp if enabled
         if data.get('use_timestamp'):
@@ -958,23 +1007,32 @@ class EditActionsView(BaseView):
         if action == "preview":
             if not d:
                 return await interaction.response.edit_message(content="Reminder no longer exists.", view=None)
-            info = ""
-            if d['type'] == 'scheduled':
-                info += f"\n**Next:** {self.cog.get_next_fire_time(d)}"
-                if d.get('skip_next'):
-                    info += f"\n**Skip Next:** {d['skip_next']} occurrence(s)"
-                if d.get('skipped_dates'):
-                    dates_preview = ", ".join(d['skipped_dates'][:3])
-                    if len(d['skipped_dates']) > 3:
-                        dates_preview += f"... (+{len(d['skipped_dates']) - 3} more)"
-                    info += f"\n**Skipped Dates:** {dates_preview}"
-            info += f"\n**Status:** {'Enabled' if d.get('enabled', True) else 'Disabled'}"
-            # Edit the message to show preview
-            await interaction.response.edit_message(
-                content=f"{self.cog.build_content(d)}\n{info}",
-                embed=self.cog.build_embed(d),
-                view=PreviewBackView(self.cog, self.rid, d)
-            )
+            try:
+                info = ""
+                if d['type'] == 'scheduled':
+                    info += f"\n**Next:** {self.cog.get_next_fire_time(d)}"
+                    skip_next = d.get('skip_next', 0)
+                    if skip_next:
+                        info += f"\n**Skip Next:** {skip_next} occurrence(s)"
+                    skipped_dates = d.get('skipped_dates', [])
+                    if isinstance(skipped_dates, list) and skipped_dates:
+                        dates_preview = ", ".join(skipped_dates[:3])
+                        if len(skipped_dates) > 3:
+                            dates_preview += f"... (+{len(skipped_dates) - 3} more)"
+                        info += f"\n**Skipped Dates:** {dates_preview}"
+                info += f"\n**Status:** {'Enabled' if d.get('enabled', True) else 'Disabled'}"
+                # Edit the message to show preview
+                await interaction.response.edit_message(
+                    content=f"{self.cog.build_content(d)}\n{info}",
+                    embed=self.cog.build_embed(d),
+                    view=PreviewBackView(self.cog, self.rid, d)
+                )
+            except Exception as e:
+                logger.error(f"Preview error: {e}")
+                await interaction.response.edit_message(
+                    content=f"Error generating preview: {e}",
+                    view=BackToActionsView(self.cog, self.rid)
+                )
 
         elif action == "test":
             # Edit message to show test confirmation
@@ -1112,15 +1170,22 @@ class TestConfirmView(BaseView):
             return await interaction.response.edit_message(content="No channels configured for this reminder.", view=None)
 
         await interaction.response.edit_message(content="Sending test...", view=None)
-        success = await self.cog.send_reminder(d)
-        if success:
+        try:
+            success = await self.cog.send_reminder(d)
+            if success:
+                await interaction.edit_original_response(
+                    content=f"✓ Test sent to {len(channel_ids)} channel(s)!",
+                    view=BackToActionsView(self.cog, self.rid)
+                )
+            else:
+                await interaction.edit_original_response(
+                    content="✗ Failed to send test. Check bot permissions in the target channel(s).",
+                    view=BackToActionsView(self.cog, self.rid)
+                )
+        except Exception as e:
+            logger.error(f"Test send error: {e}")
             await interaction.edit_original_response(
-                content=f"✓ Test sent to {len(channel_ids)} channel(s)!",
-                view=BackToActionsView(self.cog, self.rid)
-            )
-        else:
-            await interaction.edit_original_response(
-                content="✗ Failed to send test. Check bot permissions in the target channel(s).",
+                content=f"✗ Error sending test: {e}",
                 view=BackToActionsView(self.cog, self.rid)
             )
 

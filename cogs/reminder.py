@@ -658,21 +658,13 @@ class Reminders(commands.Cog):
         try:
             if data.get('event_schedule'):
                 event_schedule = data['event_schedule']
-                event_name = (event_schedule.get('event_name') or '').strip()
                 next_event_ts = self.get_next_event_time(event_schedule)
                 if next_event_ts:
-                    if event_name:
-                        desc += f"\n\n**{event_name}:** <t:{next_event_ts}:F> (<t:{next_event_ts}:R>)"
-                    else:
-                        desc += f"\n\n<t:{next_event_ts}:F> (<t:{next_event_ts}:R>)"
+                    desc += f"\n\n<t:{next_event_ts}:F>\n(<t:{next_event_ts}:R>)"
             # Legacy: single event timestamp (backwards compatibility)
             elif data.get('event_timestamp_utc'):
                 event_ts = data['event_timestamp_utc']
-                event_name = (data.get('event_name') or '').strip()
-                if event_name:
-                    desc += f"\n\n**{event_name}:** <t:{event_ts}:F> (<t:{event_ts}:R>)"
-                else:
-                    desc += f"\n\n<t:{event_ts}:F> (<t:{event_ts}:R>)"
+                desc += f"\n\n<t:{event_ts}:F>\n(<t:{event_ts}:R>)"
         except Exception as e:
             logger.warning(f"Error building event timestamp: {e}")
 
@@ -824,6 +816,16 @@ class Reminders(commands.Cog):
                     role = interaction.guild.get_role(role_id)
                     if not role:
                         return await interaction.response.send_message("Role not found.", ephemeral=True)
+
+                    # Check role hierarchy before attempting
+                    bot_top_role = interaction.guild.me.top_role
+                    if role >= bot_top_role:
+                        return await interaction.response.send_message(
+                            f"I can't manage {role.mention} because it's at or above my highest role ({bot_top_role.mention}). "
+                            f"Move my role higher in Server Settings → Roles.",
+                            ephemeral=True
+                        )
+
                     if role in interaction.user.roles:
                         await interaction.user.remove_roles(role)
                         await interaction.response.send_message(f"Removed {role.mention}", ephemeral=True)
@@ -831,7 +833,10 @@ class Reminders(commands.Cog):
                         await interaction.user.add_roles(role)
                         await interaction.response.send_message(f"Added {role.mention}", ephemeral=True)
                 except discord.Forbidden:
-                    await interaction.response.send_message("I don't have permission to manage that role.", ephemeral=True)
+                    await interaction.response.send_message(
+                        "I don't have permission to manage roles. Make sure I have the 'Manage Roles' permission.",
+                        ephemeral=True
+                    )
                 except ValueError:
                     await interaction.response.send_message("Invalid role ID.", ephemeral=True)
                 except Exception as e:

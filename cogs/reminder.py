@@ -817,7 +817,22 @@ class Reminders(commands.Cog):
                     if not role:
                         return await interaction.response.send_message("Role not found.", ephemeral=True)
 
-                    # Check role hierarchy before attempting
+                    # Check if role is managed (bot role, integration, etc.)
+                    if role.managed:
+                        return await interaction.response.send_message(
+                            f"{role.mention} is managed by an integration and cannot be manually assigned.",
+                            ephemeral=True
+                        )
+
+                    # Check bot permissions
+                    bot_perms = interaction.guild.me.guild_permissions
+                    if not bot_perms.manage_roles:
+                        return await interaction.response.send_message(
+                            "I don't have the 'Manage Roles' permission in this server.",
+                            ephemeral=True
+                        )
+
+                    # Check role hierarchy
                     bot_top_role = interaction.guild.me.top_role
                     if role >= bot_top_role:
                         return await interaction.response.send_message(
@@ -832,9 +847,10 @@ class Reminders(commands.Cog):
                     else:
                         await interaction.user.add_roles(role)
                         await interaction.response.send_message(f"Added {role.mention}", ephemeral=True)
-                except discord.Forbidden:
+                except discord.Forbidden as e:
+                    logger.error(f"Forbidden error managing role: {e}")
                     await interaction.response.send_message(
-                        "I don't have permission to manage roles. Make sure I have the 'Manage Roles' permission.",
+                        f"Permission denied. Error: {e}",
                         ephemeral=True
                     )
                 except ValueError:

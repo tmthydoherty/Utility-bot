@@ -16,6 +16,8 @@ if not logger.handlers:
     logger.setLevel(logging.INFO)
 
 # --- BOT SETUP ---
+ADMIN_ROLE_ID = 1431565435819528302  # Role treated as admin by the bot
+
 class Vibey(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
@@ -25,6 +27,12 @@ class Vibey(commands.Bot):
         intents.voice_states = True  # <--- CRITICAL: Needed to track voice activity
 
         super().__init__(command_prefix="!", intents=intents)
+
+    def is_bot_admin(self, member: discord.Member) -> bool:
+        """Check if a member is considered a bot admin (has admin perms OR the admin role)."""
+        if member.guild_permissions.administrator:
+            return True
+        return any(role.id == ADMIN_ROLE_ID for role in member.roles)
 
     async def setup_hook(self):
         """This is called when the bot is starting up (before on_ready)."""

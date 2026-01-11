@@ -328,7 +328,7 @@ class InactivityAlertView(ui.View):
         self.user_id = user_id
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if not interaction.user.guild_permissions.administrator:
+        if not self.cog.bot.is_bot_admin(interaction.user):
             await interaction.response.send_message("❌ Only administrators can use these controls.", ephemeral=True)
             return False
         return True
@@ -425,7 +425,7 @@ class DashboardView(ui.View):
         
         # HANDLE CONFIG MODE
         if self.mode == "config":
-            if not interaction.user.guild_permissions.administrator:
+            if not self.cog.bot.is_bot_admin(interaction.user):
                 self.mode = "server" # Revert
                 await interaction.followup.send("❌ You need Administrator permissions.", ephemeral=True)
                 await self.refresh_embed(interaction)
@@ -807,8 +807,9 @@ class UserTracker(commands.Cog):
         return discord.File(buf, filename="emojis.png")
 
     @app_commands.command(name="tracker", description="Open the Analytics Dashboard.")
-    @app_commands.checks.has_permissions(administrator=True)
     async def tracker_cmd(self, interaction: discord.Interaction):
+        if not self.bot.is_bot_admin(interaction.user):
+            return await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True)
         await interaction.response.defer()
         img = await self.gen_server_overview(interaction.guild, 7)
         view = DashboardView(self, interaction.guild, interaction.user.id)

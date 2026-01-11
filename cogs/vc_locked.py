@@ -1527,8 +1527,9 @@ class VC(commands.Cog):
     # --- COMMANDS ---
 
     @app_commands.command(name="vc_panel", description="[Admin] Configure locked VC system")
-    @app_commands.checks.has_permissions(administrator=True)
     async def vc_panel_slash(self, interaction: discord.Interaction):
+        if not self.bot.is_bot_admin(interaction.user):
+            return await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True)
         embed = discord.Embed(title="🎤 Locked VC Configuration", description="Use the buttons below to configure the system.", color=discord.Color.blue())
         await interaction.response.send_message(embed=embed, view=shared.AdminPanelView(self.bot), ephemeral=True)
 

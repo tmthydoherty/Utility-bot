@@ -921,7 +921,7 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
             log_trivia.debug("Trivia config saved to disk.")
 
     async def is_user_admin(self, interaction: discord.Interaction) -> bool:
-        if await self.bot.is_owner(interaction.user) or interaction.user.guild_permissions.administrator: return True
+        if await self.bot.is_owner(interaction.user) or self.bot.is_bot_admin(interaction.user): return True
         cfg_settings = self.get_guild_settings(interaction.guild.id)
         admin_role_id = cfg_settings.get("admin_role_id")
         return admin_role_id and any(role.id == admin_role_id for role in interaction.user.roles)

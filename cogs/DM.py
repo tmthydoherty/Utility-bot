@@ -906,23 +906,13 @@ class DM(commands.Cog):
             self.dm_sender_task.cancel()
 
     @app_commands.command(name="dm_admin_panel", description="Access the DM admin panel")
-    @app_commands.checks.has_permissions(administrator=True)
     async def dm_admin_panel(self, interaction: Interaction):
+        if not self.bot.is_bot_admin(interaction.user):
+            return await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True)
         view = DMAdminView(interaction.user, interaction.guild_id, self, self.http_session)
         embed = view.create_panel_embed()
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
         view.message = await interaction.original_response()
-
-    @dm_admin_panel.error
-    async def on_dm_command_error(self, interaction: Interaction, error: app_commands.AppCommandError):
-        if isinstance(error, app_commands.MissingPermissions):
-            await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True)
-        else:
-            log.error(f"Error in dm_admin_panel: {error}", exc_info=True)
-            if not interaction.response.is_done():
-                await interaction.response.send_message("An unexpected error occurred. Check logs.", ephemeral=True)
-            else:
-                await interaction.followup.send("An unexpected error occurred. Check logs.", ephemeral=True)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(DM(bot))

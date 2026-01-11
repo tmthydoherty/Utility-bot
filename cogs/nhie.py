@@ -98,7 +98,7 @@ class SuggestionModal(discord.ui.Modal, title='Suggest a Question'):
     """Modal for a user to suggest a new NHIE question."""
     # --- (MODIFIED: Clarify suggestion text) ---
     question = discord.ui.TextInput(
-        label="Your suggestion (after 'Never have I ever...')",
+        label="Your suggestion (after 'Never have I ever')",
         style=discord.TextStyle.paragraph,
         placeholder='...eaten a whole pizza by myself.',
         required=True,
@@ -148,7 +148,7 @@ class SuggestionModal(discord.ui.Modal, title='Suggest a Question'):
             description=f"**Never have I ever...**\n{self.question.value}",
             color=discord.Color.blue()
         )
-        embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.avatar.url if interaction.user.avatar else discord.Embed.Empty)
+        embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
         embed.set_footer(text=f"Suggested by: {interaction.user} (ID: {interaction.user.id})")
 
         # Add approval buttons (now referencing the suggestion_id)
@@ -436,7 +436,14 @@ class MainQuestionView(discord.ui.View):
     @discord.ui.button(label='Suggest', style=discord.ButtonStyle.secondary, custom_id='nhie_suggest', row=0)
     async def suggest_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Opens the suggestion modal."""
-        await interaction.response.send_modal(SuggestionModal(self.cog))
+        try:
+            await interaction.response.send_modal(SuggestionModal(self.cog))
+        except Exception as e:
+            print(f"NHIE Suggest Button Error: {e}")
+            try:
+                await interaction.response.send_message(f"An error occurred: {e}", ephemeral=True)
+            except:
+                pass
 
     # --- (MODIFIED: Label and logic) ---
     @discord.ui.button(label='Recap', style=discord.ButtonStyle.secondary, custom_id='nhie_recap', row=0)
@@ -991,14 +998,12 @@ class NeverHaveIEver(commands.Cog):
         self.delay_tasks_pending: Dict[str, bool] = {}
         # --- (END OF FIX) ---
         
-        # We need to register persistent views on setup
-        bot.add_view(self.main_view)
-        bot.add_view(self.admin_view)
-        
-        # (Fix #1): DO NOT register the approval view, it is not persistent
-
     async def cog_load(self):
         """Called when the cog is loaded."""
+        # Register persistent views here, not in __init__
+        self.bot.add_view(self.main_view)
+        self.bot.add_view(self.admin_view)
+
         # Ensure data files exist
         await load_json(SETTINGS_FILE, settings_lock)
         await load_json(QUESTIONS_FILE, questions_lock)
@@ -1079,9 +1084,10 @@ class NeverHaveIEver(commands.Cog):
     )
 
     @nhie_group.command(name="admin_panel")
-    @app_commands.checks.has_permissions(administrator=True)
     async def admin_panel(self, interaction: discord.Interaction):
         """Sends the persistent admin panel."""
+        if not self.bot.is_bot_admin(interaction.user):
+            return await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True)
         embed = await self.admin_view.get_panel_embed(interaction.guild)
         await interaction.response.send_message(
             "Here is the admin panel. This message will stay active.",

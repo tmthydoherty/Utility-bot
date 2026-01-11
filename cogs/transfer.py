@@ -134,8 +134,9 @@ class AdminPanelCog(commands.Cog):
             print("AdminPanelCog unloaded and session closed.")
 
     @app_commands.command(name="transfer_panel", description="Access the admin transfer panel.")
-    @app_commands.checks.has_permissions(administrator=True)
     async def transfer_panel(self, interaction: discord.Interaction):
+        if not self.bot.is_bot_admin(interaction.user):
+            return await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True)
         embed = discord.Embed(
             title="Admin Transfer Panel",
             description="Select a transfer task to begin.\nEach button will open a form to ask for the required IDs.",

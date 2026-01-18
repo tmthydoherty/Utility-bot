@@ -262,10 +262,10 @@ class StrafeClient:
                     idx = item_data.get('index', len(maps))
                     map_name = f"{GAME_MAP_FALLBACK.get(game_slug, 'Game')} {idx + 1}"
 
-                # Get scores from game.final or directly from item_data
+                # Get scores from game.final, game.score, or directly from item_data
                 final_scores = {}
                 if isinstance(game_info, dict):
-                    final_scores = game_info.get('final', {})
+                    final_scores = game_info.get('final', {}) or game_info.get('score', {})
                 # Also try score directly in item_data
                 if not final_scores:
                     final_scores = item_data.get('score', {}) or item_data.get('final', {})

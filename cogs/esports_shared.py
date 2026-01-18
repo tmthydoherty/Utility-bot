@@ -16,41 +16,69 @@ from collections import OrderedDict
 GAMES = {
     "valorant": "Valorant",
     "rl": "Rocket League",
-    "r6siege": "Rainbow 6 Siege"
+    "r6siege": "Rainbow 6 Siege",
+    "ow": "Overwatch"
+    # Note: Apex Legends removed - PandaScore API does not support it
 }
 
 GAME_SHORT_NAMES = {
     "valorant": "Val",
     "rl": "RL",
-    "r6siege": "R6"
+    "r6siege": "R6",
+    "ow": "OW"
 }
 
 # UPDATED: Valorant logo changed to user specified PNG
 GAME_LOGOS = {
     "valorant": "https://i.postimg.cc/HsxQFd58/valorant.png",
     "rl": "https://i.postimg.cc/nrSL2j13/Rocket-League-Emblem-(2).png",
-    "r6siege": "https://i.postimg.cc/52h6DzMM/rainbow-six-siege-logo-logo2.png"
+    "r6siege": "https://i.postimg.cc/52h6DzMM/rainbow-six-siege-logo-logo2.png",
+    "ow": "https://upload.wikimedia.org/wikipedia/commons/thumb/5/55/Overwatch_circle_logo.svg/600px-Overwatch_circle_logo.svg.png"
 }
 
 GAME_TWITCH_CHANNELS = {
     "valorant": "https://www.twitch.tv/valorant",
     "rl": "https://www.twitch.tv/rocketleague",
-    "r6siege": "https://www.twitch.tv/rainbow6"
+    "r6siege": "https://www.twitch.tv/rainbow6",
+    "ow": "https://www.twitch.tv/overwatchleague"
 }
 
 GAME_PLACEHOLDERS = {
     "valorant": "https://i.postimg.cc/Fs3qHYjH/VS-20251127-025309-0000.png",
     "rl": "https://liquipedia.net/commons/images/9/90/RL_TeamImageMissing_darkmode.png",
-    "r6siege": "https://liquipedia.net/commons/images/5/51/Rainbow_Six_Siege_default_darkmode.png"
+    "r6siege": "https://liquipedia.net/commons/images/5/51/Rainbow_Six_Siege_default_darkmode.png",
+    "ow": "https://liquipedia.net/commons/images/thumb/a/ae/Overwatch_ligaicon.png/100px-Overwatch_ligaicon.png"
 }
 
 DEFAULT_GAME_ICON_FALLBACK = "https://upload.wikimedia.org/wikipedia/commons/thumb/3/3f/Trophy_icon.png/512px-Trophy_icon.png"
 
 ALLOWED_TIERS = ["s", "a"]
 TIER_BYPASS_KEYWORDS = [
-    "championship", "champions", "major", "masters", "invitational", 
-    "world", "gamers8", "iem", "blast premier"
+    "championship", "champions", "major", "masters", "invitational",
+    "world", "gamers8", "iem", "blast premier", "algs", "owl", "owcs"
 ]
+
+STRAFE_GAME_SLUGS = {
+    "valorant": "valorant",
+    "rl": "rocketleague",
+    "r6siege": "r6s",
+    "ow": "overwatch"
+}
+
+# Strafe calendar/match URL paths (used for HTML scraping)
+STRAFE_GAME_PATHS = {
+    "valorant": "valorant",
+    "rl": "rocket-league",
+    "r6siege": "rainbow-six-siege",
+    "ow": "overwatch"
+}
+
+GAME_MAP_FALLBACK = {
+    "valorant": "Map",
+    "rl": "Game",
+    "r6siege": "Map",
+    "ow": "Map"
+}
 
 DATA_FILE = "data/esports_data.json"
 BACKUP_FILE = "data/esports_data.json.bak"
@@ -199,6 +227,10 @@ class LeaderboardView(discord.ui.View):
     async def r6_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.update_embed(interaction, "r6siege")
 
+    @discord.ui.button(label="OW", style=discord.ButtonStyle.secondary, custom_id="lb_btn_ow")
+    async def ow_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.update_embed(interaction, "ow")
+
 class PredictionView(discord.ui.View):
     def __init__(self, match_id: str, team_a: dict, team_b: dict):
         super().__init__(timeout=None) 
@@ -278,8 +310,8 @@ class EmojiGuildSelect(discord.ui.Select):
         for guild in bot.guilds[:25]:
             is_default = str(guild.id) in current_selected
             options.append(discord.SelectOption(
-                label=guild.name[:100], value=str(guild.id), 
-                description=f"ID: {guild.id}", default=is_default, emoji="📁"
+                label=guild.name[:100], value=str(guild.id),
+                description=f"ID: {guild.id}", default=is_default
             ))
         super().__init__(placeholder="Select Storage Servers", min_values=0, max_values=len(options), options=options, row=1)
 
@@ -290,7 +322,7 @@ class EmojiGuildSelect(discord.ui.Select):
             data = load_data_sync()
             data["emoji_storage_guilds"] = selected_ids
             save_data_sync(data)
-        await interaction.response.send_message(f"✅ **Storage Updated!** Saving to {len(selected_ids)} servers.", ephemeral=True)
+        await interaction.response.send_message(f"Storage Updated! Saving to {len(selected_ids)} servers.", ephemeral=True)
 
 class EsportsAdminView(discord.ui.View):
     def __init__(self, cog):
@@ -306,24 +338,32 @@ class EsportsAdminView(discord.ui.View):
             data = load_data_sync()
             data["channel_id"] = channel.id
             save_data_sync(data)
-        await interaction.response.send_message(f"✅ Updates will appear in {channel.mention}.", ephemeral=True)
+        await interaction.response.send_message(f"Updates will appear in {channel.mention}.", ephemeral=True)
 
-    @discord.ui.button(label="Cycle Test Post", style=discord.ButtonStyle.green, emoji="🔄", row=2)
+    @discord.ui.button(label="Cycle Test Post", style=discord.ButtonStyle.green, row=2)
     async def test_post(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.run_test(interaction, is_result=False)
 
-    @discord.ui.button(label="Cycle Result Test", style=discord.ButtonStyle.blurple, emoji="🏁", row=2)
+    @discord.ui.button(label="Cycle Result Test", style=discord.ButtonStyle.blurple, row=2)
     async def test_result(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.run_test(interaction, is_result=True)
-    
-    @discord.ui.button(label="Sync Team Emojis", style=discord.ButtonStyle.primary, emoji="🤩", row=3)
-    async def sync_emojis(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("⏳ **Sync Started...**", ephemeral=True)
-        count = await self.cog.manage_team_emojis(interaction)
-        self.cog._update_emoji_cache()  # FIX: Update cache after sync
-        await interaction.followup.send(f"✅ **Sync Complete!** Added {count} new emojis.")
 
-    @discord.ui.button(label="Wipe Leaderboards", style=discord.ButtonStyle.danger, emoji="🗑️", row=3)
+    @discord.ui.button(label="Sync Team Emojis", style=discord.ButtonStyle.primary, row=3)
+    async def sync_emojis(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("Sync Started...", ephemeral=True)
+        count = await self.cog.manage_team_emojis(interaction)
+        self.cog._update_emoji_cache()
+        await interaction.followup.send(f"Sync Complete! Added {count} new emojis.")
+
+    @discord.ui.button(label="Debug Strafe", style=discord.ButtonStyle.secondary, row=3)
+    async def debug_strafe(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.debug_strafe(interaction)
+
+    @discord.ui.button(label="Test Strafe Direct", style=discord.ButtonStyle.success, row=4)
+    async def test_strafe_direct(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.test_strafe_direct(interaction)
+
+    @discord.ui.button(label="Wipe Leaderboards", style=discord.ButtonStyle.danger, row=4)
     async def wipe_leaderboards(self, interaction: discord.Interaction, button: discord.ui.Button):
         confirm_view = discord.ui.View(timeout=30)
         async def confirm_cb(i: discord.Interaction):
@@ -331,11 +371,11 @@ class EsportsAdminView(discord.ui.View):
                 data = load_data_sync()
                 data["leaderboards"] = {k: {} for k in GAMES.keys()}
                 save_data_sync(data)
-            await i.response.edit_message(content="✅ **Wiped.**", view=None)
-        
+            await i.response.edit_message(content="Wiped.", view=None)
+
         btn = discord.ui.Button(label="Confirm", style=discord.ButtonStyle.danger)
         btn.callback = confirm_cb
         confirm_view.add_item(btn)
-        await interaction.response.send_message("⚠️ **Wipe all leaderboards?**", view=confirm_view, ephemeral=True)
+        await interaction.response.send_message("Wipe all leaderboards?", view=confirm_view, ephemeral=True)
 
 

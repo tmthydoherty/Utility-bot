@@ -139,8 +139,11 @@ class StrafeClient:
             for comp in competitors:
                 side = comp.get('side_enum', '').upper()
                 name = comp.get('name', '')
-                if not name and 'competitor' in comp:
-                    name = comp.get('competitor', {}).get('name', '')
+                if not name:
+                    # competitor can be None, so handle that case
+                    competitor_data = comp.get('competitor')
+                    if competitor_data and isinstance(competitor_data, dict):
+                        name = competitor_data.get('name', '')
 
                 if side == 'HOME':
                     home_name = name
@@ -148,8 +151,11 @@ class StrafeClient:
                     away_name = name
 
             if not home_name and not away_name:
-                home_name = competitors[0].get('name', '') or competitors[0].get('competitor', {}).get('name', '')
-                away_name = competitors[1].get('name', '') or competitors[1].get('competitor', {}).get('name', '')
+                # Fallback: try to get names from first two competitors
+                c0 = competitors[0].get('competitor')
+                c1 = competitors[1].get('competitor')
+                home_name = competitors[0].get('name', '') or (c0.get('name', '') if c0 and isinstance(c0, dict) else '')
+                away_name = competitors[1].get('name', '') or (c1.get('name', '') if c1 and isinstance(c1, dict) else '')
 
             if not home_name or not away_name:
                 continue

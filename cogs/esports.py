@@ -236,6 +236,9 @@ class StrafeClient:
             live_data = legacy_match.get('live', [])
             logger.debug(f"Strafe live_data has {len(live_data)} items")
 
+            # Collect all map entries with their index for sorting
+            map_entries = []
+
             for item in live_data:
                 key = item.get('key', '')
                 item_data = item.get('data', {})
@@ -249,13 +252,16 @@ class StrafeClient:
                 game_info = item_data.get('game', {})
                 winner_key = item_data.get('winner')  # 'home', 'away', or None
 
-                # Accept if: key starts with 'game-', or has 'index' field (indicates a game), or has winner
+                # Accept if: key starts with 'game-', or has 'index' field, or has map/game info, or has winner
                 has_index = 'index' in item_data
-                is_game_item = key.startswith('game-') or map_info or game_info or (has_index and winner_key)
+                is_game_item = key.startswith('game-') or map_info or game_info or has_index or winner_key
                 if not is_game_item:
                     continue
 
-                logger.debug(f"Processing item: key='{key}', index={item_data.get('index')}, winner={winner_key}")
+                # Get the index for sorting (default to a high number if missing)
+                map_index = item_data.get('index', 999)
+
+                logger.debug(f"Processing item: key='{key}', index={map_index}, winner={winner_key}")
 
                 # Get map name
                 map_name = None
@@ -265,8 +271,7 @@ class StrafeClient:
                     map_name = map_info
 
                 if not map_name:
-                    idx = item_data.get('index', len(maps))
-                    map_name = f"{GAME_MAP_FALLBACK.get(game_slug, 'Game')} {idx + 1}"
+                    map_name = f"{GAME_MAP_FALLBACK.get(game_slug, 'Game')} {map_index + 1}"
 
                 # Get scores from game.final, game.score, or directly from item_data
                 final_scores = {}
@@ -301,14 +306,29 @@ class StrafeClient:
                 if winner_key:
                     status = 'finished'
 
-                maps.append({
+                map_entries.append({
+                    "index": map_index,
                     "name": map_name[:18],
                     "score_a": score_a,
                     "score_b": score_b,
                     "winner": winner,
                     "status": status
                 })
-                logger.debug(f"Map {len(maps)}: {map_name} - {score_a}:{score_b}, winner: {winner}")
+                logger.debug(f"Found map: index={map_index}, {map_name} - {score_a}:{score_b}, winner: {winner}")
+
+            # Sort by index to ensure correct map order
+            map_entries.sort(key=lambda x: x['index'])
+
+            # Build the final maps list (remove the index field)
+            for entry in map_entries:
+                maps.append({
+                    "name": entry["name"],
+                    "score_a": entry["score_a"],
+                    "score_b": entry["score_b"],
+                    "winner": entry["winner"],
+                    "status": entry["status"]
+                })
+                logger.debug(f"Map {len(maps)}: {entry['name']} - {entry['score_a']}:{entry['score_b']}, winner: {entry['winner']}")
 
             # If no maps found via 'live', try alternate data paths
             if not maps:
@@ -643,58 +663,84 @@ class Esports(commands.Cog):
             # Determine mapping: Is Team A == Home?
             sim_a_home = self._calculate_similarity(team_a_name, home_team_name)
             is_team_a_home = sim_a_home > 0.5 # Lowered threshold
-            
+
             maps = []
-            
+            map_entries = []  # Collect with index for sorting
+
             for item in live_data:
                 # We need items that represent games/maps
-                # Key usually starts with 'game-' like 'game-valorant' or 'game-rocketleague'
                 key = item.get('key', '')
-                if key.startswith('game-') and 'data' in item:
-                    data = item['data']
-                    
-                    # Some games might not be finished, but we still want the name if available
-                    status = data.get('status')
-                    
-                    map_info = data.get('map', {})
-                    game_info = data.get('game', {})
-                    
-                    # Map Name
-                    map_name = map_info.get('name')
-                    if not map_name:
-                        # Fallback for games without "map" (like RL matches sometimes just indexed)
-                        index = data.get('index', 0)
-                        map_name = f"Game {index + 1}"
+                if 'data' not in item:
+                    continue
 
-                    # Scores
-                    final_score = game_info.get('final', {})
-                    score_home = final_score.get('home', 0)
-                    score_away = final_score.get('away', 0)
-                    
-                    # Winner
-                    winner_key = data.get('winner') # 'home', 'away', or None
-                    
-                    if is_team_a_home:
-                        # A = Home, B = Away
-                        s_a, s_b = score_home, score_away
-                        if winner_key == 'home': winner_idx = 0
-                        elif winner_key == 'away': winner_idx = 1
-                        else: winner_idx = -1
-                    else:
-                        # A = Away, B = Home
-                        s_a, s_b = score_away, score_home
-                        if winner_key == 'home': winner_idx = 1
-                        elif winner_key == 'away': winner_idx = 0
-                        else: winner_idx = -1
-                        
-                    maps.append({
-                        "name": map_name[:MAX_MAP_NAME_LENGTH],
-                        "score_a": s_a,
-                        "score_b": s_b,
-                        "winner": winner_idx,
-                        "status": status
-                    })
-            
+                data = item['data']
+                if not isinstance(data, dict):
+                    continue
+
+                # More permissive detection - accept game- prefix, or has index, or has winner
+                has_index = 'index' in data
+                winner_key = data.get('winner')
+                is_game_item = key.startswith('game-') or has_index or winner_key
+                if not is_game_item:
+                    continue
+
+                # Get index for sorting
+                map_index = data.get('index', 999)
+
+                # Some games might not be finished, but we still want the name if available
+                status = data.get('status')
+
+                map_info = data.get('map', {})
+                game_info = data.get('game', {})
+
+                # Map Name
+                map_name = map_info.get('name') if isinstance(map_info, dict) else map_info
+                if not map_name:
+                    # Fallback for games without "map" (like RL matches sometimes just indexed)
+                    map_name = f"Game {map_index + 1}"
+
+                # Scores
+                final_score = game_info.get('final', {}) if isinstance(game_info, dict) else {}
+                if not final_score:
+                    final_score = data.get('score', {}) or data.get('final', {})
+                score_home = final_score.get('home', 0) or 0
+                score_away = final_score.get('away', 0) or 0
+
+                if is_team_a_home:
+                    # A = Home, B = Away
+                    s_a, s_b = score_home, score_away
+                    if winner_key == 'home': winner_idx = 0
+                    elif winner_key == 'away': winner_idx = 1
+                    else: winner_idx = -1
+                else:
+                    # A = Away, B = Home
+                    s_a, s_b = score_away, score_home
+                    if winner_key == 'home': winner_idx = 1
+                    elif winner_key == 'away': winner_idx = 0
+                    else: winner_idx = -1
+
+                map_entries.append({
+                    "index": map_index,
+                    "name": map_name[:MAX_MAP_NAME_LENGTH],
+                    "score_a": s_a,
+                    "score_b": s_b,
+                    "winner": winner_idx,
+                    "status": status
+                })
+
+            # Sort by index to ensure correct map order
+            map_entries.sort(key=lambda x: x['index'])
+
+            # Build final maps list without index field
+            for entry in map_entries:
+                maps.append({
+                    "name": entry["name"],
+                    "score_a": entry["score_a"],
+                    "score_b": entry["score_b"],
+                    "winner": entry["winner"],
+                    "status": entry["status"]
+                })
+
             # If no maps found in 'live', try checking 'scores' object in header?
             # (Usually 'live' array is the source of truth for detailed maps)
             
@@ -885,19 +931,33 @@ class Esports(commands.Cog):
         game_slug = game_slug if game_slug in GAMES else "valorant"
         data = load_data_sync()
         stats = data["leaderboards"].get(game_slug, {})
-        
+
         if not stats:
             desc = "No data yet for this month."
         else:
-            sorted_stats = sorted(stats.items(), key=lambda x: (x[1]['wins'], -x[1]['losses']), reverse=True)[:10]
-            lines = []
-            for i, (uid, s) in enumerate(sorted_stats, 1):
-                member = guild.get_member(int(uid))
-                name = member.display_name if member else f"User {uid}"
-                if len(name) > MAX_LEADERBOARD_NAME_LENGTH: name = name[:MAX_LEADERBOARD_NAME_LENGTH] + ".."
-                streak = f" 🔥x{s.get('streak',0)}" if s.get('streak', 0) >= 3 else ""
-                lines.append(f"**{i}.** {name} - **{s['wins']}**W {s['losses']}L{streak}")
-            desc = "\n".join(lines)
+            # Filter out corrupted entries and sort safely
+            valid_stats = []
+            for uid, s in stats.items():
+                if isinstance(s, dict) and 'wins' in s and 'losses' in s:
+                    valid_stats.append((uid, s))
+
+            if not valid_stats:
+                desc = "No data yet for this month."
+            else:
+                sorted_stats = sorted(valid_stats, key=lambda x: (x[1].get('wins', 0), -x[1].get('losses', 0)), reverse=True)[:10]
+                lines = []
+                for i, (uid, s) in enumerate(sorted_stats, 1):
+                    try:
+                        member = guild.get_member(int(uid))
+                    except (ValueError, TypeError):
+                        member = None
+                    name = member.display_name if member else f"User {uid}"
+                    if len(name) > MAX_LEADERBOARD_NAME_LENGTH: name = name[:MAX_LEADERBOARD_NAME_LENGTH] + ".."
+                    wins = s.get('wins', 0)
+                    losses = s.get('losses', 0)
+                    streak = f" 🔥x{s.get('streak', 0)}" if s.get('streak', 0) >= 3 else ""
+                    lines.append(f"**{i}.** {name} - **{wins}**W {losses}L{streak}")
+                desc = "\n".join(lines)
 
         embed = discord.Embed(title=f"🏆 {GAMES.get(game_slug)} Monthly Leaderboard", color=discord.Color.gold(), description=desc)
         embed.set_footer(text="Resets monthly | Showing Top 10")
@@ -1025,12 +1085,18 @@ class Esports(commands.Cog):
         if not lb_top_5 and not is_test:
             data = load_data_sync()
             stats = data["leaderboards"].get(game_slug, {})
-            sorted_s = sorted(stats.items(), key=lambda x: (x[1]['wins'], -x[1]['losses']), reverse=True)[:5]
+            # Filter and sort safely - only include valid entries
+            valid_stats = [(uid, s) for uid, s in stats.items()
+                          if isinstance(s, dict) and 'wins' in s and 'losses' in s]
+            sorted_s = sorted(valid_stats, key=lambda x: (x[1].get('wins', 0), -x[1].get('losses', 0)), reverse=True)[:5]
             lines = []
             for i, (u, s) in enumerate(sorted_s, 1):
-                m = channel.guild.get_member(int(u))
+                try:
+                    m = channel.guild.get_member(int(u))
+                except (ValueError, TypeError):
+                    m = None
                 n = m.display_name if m else f"User {u}"
-                lines.append(f"**{i}. {n[:12]}**: {s['wins']}W {s['losses']}L")
+                lines.append(f"**{i}. {n[:12]}**: {s.get('wins', 0)}W {s.get('losses', 0)}L")
             lb_top_5 = "\n".join(lines)
         
         if lb_top_5: embed.add_field(name=f"Monthly Top 5 ({GAME_SHORT_NAMES.get(game_slug)})", value=lb_top_5, inline=False)
@@ -1040,17 +1106,28 @@ class Esports(commands.Cog):
         match_id = str(details['id'])
         game_slug = info['game_slug']
         votes = info['votes']
-        
+
+        # Validate game_slug is a known game
+        if game_slug not in GAMES:
+            logger.error(f"Unknown game_slug '{game_slug}' in process_result for match {match_id}")
+            return
+
         async with self.data_lock:
             data = load_data_sync()
             if match_id in data.get("processed_matches", []): return
             data["processed_matches"].append(match_id)
             if len(data["processed_matches"]) > MAX_PROCESSED_HISTORY: data["processed_matches"] = data["processed_matches"][-MAX_PROCESSED_HISTORY:]
-            
+
+            # Ensure the game's leaderboard exists (defensive check)
+            if game_slug not in data["leaderboards"]:
+                data["leaderboards"][game_slug] = {}
+
             for uid, vote in votes.items():
-                if uid not in data["leaderboards"][game_slug]:
-                    data["leaderboards"][game_slug][uid] = {"wins": 0, "losses": 0, "streak": 0}
-                s = data["leaderboards"][game_slug][uid]
+                # Ensure user ID is a string for consistency
+                uid_str = str(uid)
+                if uid_str not in data["leaderboards"][game_slug]:
+                    data["leaderboards"][game_slug][uid_str] = {"wins": 0, "losses": 0, "streak": 0}
+                s = data["leaderboards"][game_slug][uid_str]
                 if vote == winner_idx:
                     s["wins"] += 1
                     s["streak"] = s.get("streak", 0) + 1

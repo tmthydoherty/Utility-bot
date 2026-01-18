@@ -129,6 +129,19 @@ def load_data_sync():
     if "last_reset_month" not in data: data["last_reset_month"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m")
     if "emoji_map" not in data: data["emoji_map"] = {}
     if "emoji_storage_guilds" not in data: data["emoji_storage_guilds"] = []
+
+    # Ensure leaderboards exists and has all game keys
+    if "leaderboards" not in data:
+        data["leaderboards"] = {k: {} for k in GAMES.keys()}
+    else:
+        # Ensure each game has its own leaderboard dict
+        for game_key in GAMES.keys():
+            if game_key not in data["leaderboards"]:
+                data["leaderboards"][game_key] = {}
+            # Ensure it's a dict, not some other type
+            elif not isinstance(data["leaderboards"][game_key], dict):
+                data["leaderboards"][game_key] = {}
+
     return data
 
 def save_data_sync(data):

@@ -18,11 +18,11 @@ FONT_PATH_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 if not os.path.exists(FONT_PATH_BOLD):
     FONT_PATH_BOLD = "arialbd.ttf"
 
-# Soft pastel accent colors for intro images (rotates per user)
+# Soft pastel accent colors for intro images (rotates sequentially)
 ACCENT_COLORS = [
-    (206, 236, 192),  # #CEECC0 - Soft lime
-    (192, 236, 216),  # #C0ECD8 - Mint
-    (192, 219, 236),  # #C0DBEC - Soft blue
+    (180, 230, 150),  # #B4E696 - Lime green (warmer, more yellow-green)
+    (150, 220, 220),  # #96DCDC - Teal/Cyan (cooler, more distinct from green)
+    (150, 190, 240),  # #96BEF0 - Sky blue (more saturated blue)
     (203, 192, 236),  # #CBC0EC - Soft purple
     (236, 192, 231),  # #ECC0E7 - Soft pink
     (236, 192, 193),  # #ECC0C1 - Soft coral
@@ -94,9 +94,20 @@ class IntroCog(commands.Cog):
                     thread_id INTEGER PRIMARY KEY,
                     user_id INTEGER,
                     lore_msg_id INTEGER,
-                    parent_channel_id INTEGER
+                    parent_channel_id INTEGER,
+                    qa_msg_id INTEGER,
+                    intro_channel_id INTEGER
                 )
             ''')
+            # Migration for existing DBs - add qa_msg_id column
+            try:
+                await db.execute("ALTER TABLE intro_metadata ADD COLUMN qa_msg_id INTEGER")
+            except Exception:
+                pass
+            try:
+                await db.execute("ALTER TABLE intro_metadata ADD COLUMN intro_channel_id INTEGER")
+            except Exception:
+                pass
 
             # Hourly point tracking for rate limiting
             await db.execute('''
@@ -111,13 +122,13 @@ class IntroCog(commands.Cog):
             await db.commit()
 
     # --- IMAGE GENERATION ---
-    def generate_lore_banner(self, username, user_id=0):
+    def generate_lore_banner(self, username, color_index=0):
         """Generates the RPG Style Banner - high resolution for sharp text"""
         # Render at 4x scale for crisp text
         SCALE = 4
         W, H = 400 * SCALE, 70 * SCALE  # 1600x280
         bg_color = (43, 45, 49)
-        accent_color = ACCENT_COLORS[user_id % len(ACCENT_COLORS)]
+        accent_color = ACCENT_COLORS[color_index % len(ACCENT_COLORS)]
 
         img = Image.new('RGB', (W, H), color=bg_color)
         draw = ImageDraw.Draw(img)
@@ -136,7 +147,7 @@ class IntroCog(commands.Cog):
 
         return img
 
-    def generate_qa_image(self, qa_list, avatar_bytes=None, username="User", user_id=0):
+    def generate_qa_image(self, qa_list, avatar_bytes=None, username="User", color_index=0):
         """Generates High Quality Infographic List with user header - rendered at 3x for sharp text"""
         # qa_list = [(Question, Answer), ...]
         SCALE = 3  # Render at 3x for crisp text
@@ -144,8 +155,8 @@ class IntroCog(commands.Cog):
         padding = 20 * SCALE
         row_padding = 15 * SCALE
 
-        # Get accent color based on user_id
-        accent_color = ACCENT_COLORS[user_id % len(ACCENT_COLORS)]
+        # Get accent color based on rotating index
+        accent_color = ACCENT_COLORS[color_index % len(ACCENT_COLORS)]
 
         # Header dimensions for avatar + username
         avatar_size = 40 * SCALE
@@ -422,13 +433,13 @@ class IntroCog(commands.Cog):
         async with aiosqlite.connect(self.db_path) as db:
             # Get intro metadata for this user
             cursor = await db.execute(
-                "SELECT thread_id, lore_msg_id, parent_channel_id FROM intro_metadata WHERE user_id = ?",
+                "SELECT thread_id, lore_msg_id, parent_channel_id, qa_msg_id, intro_channel_id FROM intro_metadata WHERE user_id = ?",
                 (member.id,)
             )
             row = await cursor.fetchone()
 
             if row:
-                thread_id, lore_msg_id, parent_channel_id = row
+                thread_id, lore_msg_id, parent_channel_id, qa_msg_id, intro_channel_id = row
 
                 # Delete the lore banner message from parent channel
                 if parent_channel_id and lore_msg_id:
@@ -440,6 +451,17 @@ class IntroCog(commands.Cog):
                         await msg.delete()
                     except Exception as e:
                         logger.warning(f"Could not delete lore message for {member.id}: {e}")
+
+                # Delete the Q&A image from intro channel
+                if intro_channel_id and qa_msg_id:
+                    try:
+                        intro_ch = member.guild.get_channel(intro_channel_id)
+                        if not intro_ch:
+                            intro_ch = await member.guild.fetch_channel(intro_channel_id)
+                        qa_msg = await intro_ch.fetch_message(qa_msg_id)
+                        await qa_msg.delete()
+                    except Exception as e:
+                        logger.warning(f"Could not delete Q&A message for {member.id}: {e}")
 
                 # Delete the thread
                 if thread_id:
@@ -629,11 +651,20 @@ class DynamicIntroModal(ui.Modal):
                 pass  # Will use placeholder if avatar fetch fails
 
             username = interaction.user.display_name
-            user_id = interaction.user.id
 
-            lore_img = await self.cog.bot.loop.run_in_executor(None, self.cog.generate_lore_banner, ign, user_id)
+            # Get and increment the rotating color index
+            async with aiosqlite.connect(self.cog.db_path) as db:
+                cursor = await db.execute("SELECT value FROM settings WHERE key='color_index'")
+                res = await cursor.fetchone()
+                color_index = int(res[0]) if res else 0
+                # Increment for next user
+                next_index = (color_index + 1) % len(ACCENT_COLORS)
+                await db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('color_index', ?)", (str(next_index),))
+                await db.commit()
+
+            lore_img = await self.cog.bot.loop.run_in_executor(None, self.cog.generate_lore_banner, ign, color_index)
             qa_img = await self.cog.bot.loop.run_in_executor(
-                None, self.cog.generate_qa_image, answers, avatar_bytes, username, user_id
+                None, self.cog.generate_qa_image, answers, avatar_bytes, username, color_index
             )
             
             # 3. FIX: BytesIO Context Manager Bug
@@ -667,15 +698,8 @@ class DynamicIntroModal(ui.Modal):
                 hook_msg = await parent_channel.send(file=file_lore)
                 
                 # Create Thread (ID = hook_msg.id)
-                thread = await hook_msg.create_thread(name=f"Welcome {ign}!", auto_archive_duration=1440) # 24h
+                thread = await hook_msg.create_thread(name=f"Welcome {ign}!", auto_archive_duration=60) # 1h
                 
-                # Save Metadata for Deletion
-                await db.execute('''
-                    INSERT OR REPLACE INTO intro_metadata (thread_id, user_id, lore_msg_id, parent_channel_id) 
-                    VALUES (?, ?, ?, ?)
-                ''', (thread.id, interaction.user.id, hook_msg.id, parent_channel.id))
-                await db.commit()
-
                 # Send Welcome in Thread
                 cursor = await db.execute("SELECT value FROM settings WHERE key='welcome_msg'")
                 w_res = await cursor.fetchone()
@@ -697,6 +721,7 @@ class DynamicIntroModal(ui.Modal):
                 # Send Q&A to intro channel as well
                 cursor = await db.execute("SELECT value FROM settings WHERE key='intro_channel_id'")
                 intro_res = await cursor.fetchone()
+                intro_channel = None
                 if intro_res:
                     intro_channel = interaction.guild.get_channel(int(intro_res[0]))
                     if not intro_channel:
@@ -709,10 +734,31 @@ class DynamicIntroModal(ui.Modal):
                         qa_img.save(bin_qa2, "PNG")
                         bin_qa2.seek(0)
                         file_qa2 = discord.File(bin_qa2, filename="qa.png")
-                        await intro_channel.send(f"**{ign}** just introduced themselves!", file=file_qa2)
+                        qa_intro_msg = await intro_channel.send(f"**{ign}** just introduced themselves!", file=file_qa2)
+
+                        # Save Metadata for Deletion (includes Q&A message in intro channel)
+                        await db.execute('''
+                            INSERT OR REPLACE INTO intro_metadata (thread_id, user_id, lore_msg_id, parent_channel_id, qa_msg_id, intro_channel_id)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                        ''', (thread.id, interaction.user.id, hook_msg.id, parent_channel.id, qa_intro_msg.id, intro_channel.id))
+                        await db.commit()
 
                         # Repost sticky button
                         await self.cog.repost_sticky_button(intro_channel, db)
+                    else:
+                        # Intro channel found but not accessible, save metadata without Q&A message ID
+                        await db.execute('''
+                            INSERT OR REPLACE INTO intro_metadata (thread_id, user_id, lore_msg_id, parent_channel_id, qa_msg_id, intro_channel_id)
+                            VALUES (?, ?, ?, ?, NULL, NULL)
+                        ''', (thread.id, interaction.user.id, hook_msg.id, parent_channel.id))
+                        await db.commit()
+                else:
+                    # No intro channel configured at all, save metadata without Q&A message ID
+                    await db.execute('''
+                        INSERT OR REPLACE INTO intro_metadata (thread_id, user_id, lore_msg_id, parent_channel_id, qa_msg_id, intro_channel_id)
+                        VALUES (?, ?, ?, ?, NULL, NULL)
+                    ''', (thread.id, interaction.user.id, hook_msg.id, parent_channel.id))
+                    await db.commit()
 
                 await interaction.followup.send("✅ Introduction posted!", ephemeral=True)
 
@@ -765,9 +811,15 @@ class RegenerateIntroModal(ui.Modal, title="Regenerate Intro"):
 
             username = self.user.display_name
 
+            # Get current color index for this regeneration (use next in rotation)
+            async with aiosqlite.connect(self.cog.db_path) as db:
+                cursor = await db.execute("SELECT value FROM settings WHERE key='color_index'")
+                res = await cursor.fetchone()
+                color_index = int(res[0]) if res else 0
+
             # Generate new image
             qa_img = await self.cog.bot.loop.run_in_executor(
-                None, self.cog.generate_qa_image, qa_list, avatar_bytes, username
+                None, self.cog.generate_qa_image, qa_list, avatar_bytes, username, color_index
             )
 
             bin_qa = io.BytesIO()

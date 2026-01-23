@@ -99,7 +99,6 @@ EXCLUDED_REGION_KEYWORDS = [
     # APAC / Pacific regions (including sub-regions with // format)
     "pacific", "apac", "asia", "asian",
     "pacific//north", "pacific//south", "pacific//east", "pacific//west",
-    "north//east", "south//east",  # Common VCT sub-region formats
     "korea", "korean", "kr", "lck",
     "japan", "japanese", "jp", "ljl",
     "china", "chinese", "cn", "lpl",
@@ -114,6 +113,26 @@ EXCLUDED_REGION_KEYWORDS = [
     "south america",
     # CIS (sometimes separate from EMEA)
     "cis", "lcl",
+]
+
+# VCT Challengers sub-regional leagues to ALWAYS exclude (even if they contain "emea")
+# These are lower-tier regional leagues, not the main VCT EMEA/Americas circuits
+VCT_CHALLENGERS_SUBREGION_KEYWORDS = [
+    # EMEA sub-regions (Challengers split format)
+    "north//east", "south//east", "north//west", "south//west",
+    "challengers east", "challengers north", "challengers south", "challengers west",
+    "challengers northern europe", "challengers southern europe",
+    "challengers eastern europe", "challengers western europe",
+    "challengers france", "challengers dach", "challengers turkey", "challengers spain",
+    "challengers italy", "challengers portugal", "challengers benelux", "challengers poland",
+    "challengers nordics", "challengers cis", "challengers mena",
+    # Americas sub-regions
+    "challengers brazil", "challengers latam", "challengers lan", "challengers las",
+    "challengers argentina", "challengers chile", "challengers mexico",
+    # Pacific sub-regions (shouldn't match anyway but being explicit)
+    "challengers japan", "challengers korea", "challengers sea", "challengers oceania",
+    "challengers indonesia", "challengers thailand", "challengers philippines",
+    "challengers hong kong", "challengers taiwan",
 ]
 
 # International LAN keywords - these bypass ALL region filtering

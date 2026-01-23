@@ -23,7 +23,7 @@ from .esports_shared import (
     DEFAULT_GAME_ICON_FALLBACK, ALLOWED_TIERS,
     ALLOWED_REGION_KEYWORDS, MAJOR_LEAGUE_KEYWORDS,
     EXCLUDED_REGION_KEYWORDS, INTERNATIONAL_LAN_KEYWORDS,
-    RLCS_EARLY_ROUND_KEYWORDS,
+    RLCS_EARLY_ROUND_KEYWORDS, VCT_CHALLENGERS_SUBREGION_KEYWORDS,
     STRAFE_GAME_SLUGS, STRAFE_GAME_PATHS, GAME_MAP_FALLBACK,
     logger, ensure_data_file, load_data_sync, save_data_sync,
     safe_parse_datetime, stitch_images, add_white_outline,
@@ -637,6 +637,14 @@ class Esports(commands.Cog):
         if game_slug == "rl":
             is_early_round = any(k in event_name for k in RLCS_EARLY_ROUND_KEYWORDS)
             if is_early_round:
+                return False
+
+        # 3.5. VCT Challengers sub-regional filtering - ALWAYS exclude these
+        # These are lower-tier regional leagues (e.g., North//East, Challengers France)
+        # and should be filtered even if they contain "emea" or other allowed keywords
+        if game_slug == "valorant":
+            is_subregion_challengers = any(k in event_name for k in VCT_CHALLENGERS_SUBREGION_KEYWORDS)
+            if is_subregion_challengers:
                 return False
 
         # 4. Region filtering - whitelist approach

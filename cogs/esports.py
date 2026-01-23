@@ -20,7 +20,10 @@ from typing import List, Dict, Any, Optional
 # Import shared resources from Part 1
 from .esports_shared import (
     GAMES, GAME_LOGOS, GAME_SHORT_NAMES, GAME_PLACEHOLDERS,
-    DEFAULT_GAME_ICON_FALLBACK, ALLOWED_TIERS, TIER_BYPASS_KEYWORDS,
+    DEFAULT_GAME_ICON_FALLBACK, ALLOWED_TIERS,
+    ALLOWED_REGION_KEYWORDS, MAJOR_LEAGUE_KEYWORDS,
+    EXCLUDED_REGION_KEYWORDS, INTERNATIONAL_LAN_KEYWORDS,
+    RLCS_EARLY_ROUND_KEYWORDS,
     STRAFE_GAME_SLUGS, STRAFE_GAME_PATHS, GAME_MAP_FALLBACK,
     logger, ensure_data_file, load_data_sync, save_data_sync,
     safe_parse_datetime, stitch_images, add_white_outline,
@@ -236,8 +239,13 @@ class StrafeClient:
             live_data = legacy_match.get('live', [])
             logger.debug(f"Strafe live_data has {len(live_data)} items")
 
+            # Log all keys for debugging
+            all_keys = [item.get('key', '') for item in live_data if isinstance(item, dict)]
+            logger.debug(f"Strafe live_data keys: {all_keys}")
+
             # Collect all map entries with their index for sorting
             map_entries = []
+            seen_indices = set()  # Track seen indices to avoid duplicates
 
             for item in live_data:
                 key = item.get('key', '')
@@ -247,31 +255,61 @@ class StrafeClient:
                 if not isinstance(item_data, dict):
                     continue
 
-                # Look for game/map items - more permissive detection
+                # Extract potential map/game info
                 map_info = item_data.get('map', {})
                 game_info = item_data.get('game', {})
                 winner_key = item_data.get('winner')  # 'home', 'away', or None
 
-                # Accept if: key starts with 'game-', or has 'index' field, or has map/game info, or has winner
-                has_index = 'index' in item_data
-                is_game_item = key.startswith('game-') or map_info or game_info or has_index or winner_key
-                if not is_game_item:
-                    continue
-
-                # Get the index for sorting (default to a high number if missing)
-                map_index = item_data.get('index', 999)
-
-                logger.debug(f"Processing item: key='{key}', index={map_index}, winner={winner_key}")
-
-                # Get map name
+                # Get map name FIRST - this is critical for validation
                 map_name = None
                 if isinstance(map_info, dict):
                     map_name = map_info.get('name')
                 elif isinstance(map_info, str):
                     map_name = map_info
 
+                # Get index - use None if not present (not a default value)
+                raw_index = item_data.get('index')
+                has_valid_index = raw_index is not None and isinstance(raw_index, int) and raw_index < 100
+
+                # Strict detection: must have EITHER:
+                # 1. A valid index (0-99) AND a winner, OR
+                # 2. A real map name from the data
+                # Keys starting with 'game-' are also strong indicators
+                key_lower = key.lower()
+                is_game_key = key_lower.startswith('game-')
+
+                # An item is a valid game entry if:
+                # - It has a game- key prefix, OR
+                # - It has a valid index AND a winner, OR
+                # - It has a real map name (not generated)
+                has_real_map_name = map_name is not None and len(map_name) > 0
+                is_valid_game = (
+                    is_game_key or
+                    (has_valid_index and winner_key) or
+                    has_real_map_name
+                )
+
+                if not is_valid_game:
+                    continue
+
+                # Use the raw index if valid, otherwise use length of current entries
+                if has_valid_index:
+                    map_index = raw_index
+                else:
+                    # Assign next available index
+                    map_index = len(map_entries)
+
+                # Skip duplicate indices
+                if map_index in seen_indices:
+                    logger.debug(f"Skipping duplicate index {map_index} for key '{key}'")
+                    continue
+                seen_indices.add(map_index)
+
+                logger.debug(f"Processing item: key='{key}', index={map_index}, winner={winner_key}, map_name={map_name}")
+
+                # If no map name, generate one based on index
                 if not map_name:
-                    map_name = f"{GAME_MAP_FALLBACK.get(game_slug, 'Game')} {map_index + 1}"
+                    map_name = f"{GAME_MAP_FALLBACK.get(game_slug, 'Map')} {map_index + 1}"
 
                 # Get scores from game.final, game.score, or directly from item_data
                 final_scores = {}
@@ -319,6 +357,11 @@ class StrafeClient:
             # Sort by index to ensure correct map order
             map_entries.sort(key=lambda x: x['index'])
 
+            # Sanity check: limit to reasonable number of maps (max 7 for Bo7)
+            if len(map_entries) > 7:
+                logger.warning(f"Too many map entries ({len(map_entries)}), limiting to first 7")
+                map_entries = map_entries[:7]
+
             # Build the final maps list (remove the index field)
             for entry in map_entries:
                 maps.append({
@@ -334,8 +377,14 @@ class StrafeClient:
             if not maps:
                 logger.debug("No maps found in live array, checking alternate paths...")
 
-                # Try 'games' array in header or root
-                games_array = legacy_match.get('games', []) or header.get('games', [])
+                # Try 'games' array in header, root, or pageProps
+                games_array = (
+                    legacy_match.get('games', []) or
+                    header.get('games', []) or
+                    page_props.get('games', []) or
+                    legacy_match.get('maps', []) or
+                    page_props.get('maps', [])
+                )
                 for idx, game in enumerate(games_array):
                     if isinstance(game, dict):
                         map_name = game.get('map', {}).get('name') if isinstance(game.get('map'), dict) else game.get('map', f"Game {idx + 1}")
@@ -374,10 +423,33 @@ class StrafeClient:
                     total_away = scores.get('away', 0) or 0
                     if total_home > 0 or total_away > 0:
                         logger.debug(f"Using header scores as fallback: {total_home}-{total_away}")
+                        # Try to get map names from veto/mapOrder if available
+                        map_order = (
+                            legacy_match.get('mapOrder', []) or
+                            legacy_match.get('veto', {}).get('maps', []) or
+                            header.get('mapOrder', []) or
+                            []
+                        )
+
                         # Create synthetic "game" entries based on the score
                         num_games = total_home + total_away
                         home_wins = 0
                         for i in range(num_games):
+                            # Try to get map name from map order
+                            if i < len(map_order):
+                                map_entry = map_order[i]
+                                if isinstance(map_entry, dict):
+                                    map_name = map_entry.get('name') or map_entry.get('map', {}).get('name')
+                                elif isinstance(map_entry, str):
+                                    map_name = map_entry
+                                else:
+                                    map_name = None
+                            else:
+                                map_name = None
+
+                            if not map_name:
+                                map_name = f"{GAME_MAP_FALLBACK.get(game_slug, 'Game')} {i + 1}"
+
                             # Alternate wins based on who won overall
                             if home_wins < total_home:
                                 winner_key = 'home'
@@ -391,7 +463,7 @@ class StrafeClient:
                                 winner = 1 if winner_key == 'home' else 0
 
                             maps.append({
-                                "name": f"{GAME_MAP_FALLBACK.get(game_slug, 'Game')} {i + 1}",
+                                "name": str(map_name)[:18],
                                 "score_a": 0,
                                 "score_b": 0,
                                 "winner": winner,
@@ -541,16 +613,48 @@ class Esports(commands.Cog):
             
         return ":globe_with_meridians:"
 
-    def is_quality_match(self, match):
+    def is_quality_match(self, match, game_slug: str = None):
         tier = match.get('tournament', {}).get('tier')
-        if tier in ALLOWED_TIERS: return True
-        
+
         event_name = (
-            (match.get('league', {}).get('name', '') or "") + " " + 
-            (match.get('serie', {}).get('full_name', '') or "") + " " + 
+            (match.get('league', {}).get('name', '') or "") + " " +
+            (match.get('serie', {}).get('full_name', '') or "") + " " +
             (match.get('tournament', {}).get('name', '') or "")
         ).lower()
-        return any(k in event_name for k in TIER_BYPASS_KEYWORDS)
+
+        # 1. International LANs always pass - these are the premier events
+        is_international = any(k in event_name for k in INTERNATIONAL_LAN_KEYWORDS)
+        if is_international:
+            return True
+
+        # 2. Check if it's a major league for this game
+        if game_slug and game_slug in MAJOR_LEAGUE_KEYWORDS:
+            is_major_league = any(k in event_name for k in MAJOR_LEAGUE_KEYWORDS[game_slug])
+            if not is_major_league:
+                return False
+
+        # 3. RLCS early round filtering - skip Swiss/early matches, only show top 16+
+        if game_slug == "rl":
+            is_early_round = any(k in event_name for k in RLCS_EARLY_ROUND_KEYWORDS)
+            if is_early_round:
+                return False
+
+        # 4. Region filtering - whitelist approach
+        # First check if it's explicitly an allowed region (NA/EU)
+        is_allowed_region = any(k in event_name for k in ALLOWED_REGION_KEYWORDS)
+
+        # Then check if it matches any excluded region
+        is_excluded_region = any(k in event_name for k in EXCLUDED_REGION_KEYWORDS)
+
+        # If it's an excluded region and NOT explicitly allowed, filter it out
+        if is_excluded_region and not is_allowed_region:
+            return False
+
+        # 5. Tier check - only S and A tier events
+        if tier not in ALLOWED_TIERS:
+            return False
+
+        return True
 
     # --- STRAFE SCRAPING ---
     def _calculate_similarity(self, a, b):
@@ -752,6 +856,9 @@ class Esports(commands.Cog):
             return []
 
     async def get_strafe_map_data(self, team_a_name, team_b_name, game_slug, match_time=None):
+        # Never fetch map data for Rocket League - individual game scores aren't meaningful
+        if game_slug == 'rl':
+            return []
         if not STRAFE_GAME_SLUGS.get(game_slug):
             return []
         try:
@@ -884,6 +991,10 @@ class Esports(commands.Cog):
         """Build map history string. Returns None if no meaningful data to display."""
         num_games = match_details.get('number_of_games') or 0
 
+        # Never show map history for Rocket League - individual game scores aren't meaningful
+        if game_slug == 'rl':
+            return None
+
         # If no map data at all, return None to signal we should hide this section
         if not map_data:
             return None
@@ -891,10 +1002,33 @@ class Esports(commands.Cog):
         if len(saved_teams) < 2:
             return None
 
+        # Count maps that have actual played data (winner != -1)
+        played_maps = [m for m in map_data if m.get('winner', -1) != -1]
+        played_count = len(played_maps)
+
+        # Validate map count based on format
+        if num_games >= 1:
+            # Minimum maps needed: winner needs majority = (num_games // 2) + 1
+            # For Bo1: 1, Bo3: 2, Bo5: 3, Bo7: 4
+            min_maps_required = (num_games // 2) + 1
+
+            if played_count < min_maps_required:
+                logger.debug(f"Insufficient maps for Bo{num_games}: got {played_count}, need {min_maps_required}")
+                return None
+
+            # Sanity check: if we have MORE maps than the format allows, data is corrupted
+            if played_count > num_games:
+                logger.warning(f"Too many maps for Bo{num_games}: got {played_count}, max is {num_games}")
+                return None
+
+        # Only display maps up to the format limit
+        max_maps_to_show = num_games if num_games > 0 else 7
+        maps_to_display = played_maps[:max_maps_to_show]
+
         lines = []
         has_real_data = False  # Track if we have any actual played map data
 
-        for m in map_data:
+        for m in maps_to_display:
             map_name = m.get('name', 'Map')
             status = m.get('status', 'finished')
             winner_idx = m.get('winner')
@@ -1184,7 +1318,7 @@ class Esports(commands.Cog):
                             if mid in data["active_matches"] or mid in data["processed_matches"]:
                                 should_skip = True
                         
-                        if should_skip or not self.is_quality_match(m) or len(m.get('opponents',[])) < 2:
+                        if should_skip or not self.is_quality_match(m, slug) or len(m.get('opponents',[])) < 2:
                             async with self.processing_lock:
                                 self.processing_matches.discard(mid)
                             continue

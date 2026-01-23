@@ -53,9 +53,89 @@ GAME_PLACEHOLDERS = {
 DEFAULT_GAME_ICON_FALLBACK = "https://upload.wikimedia.org/wikipedia/commons/thumb/3/3f/Trophy_icon.png/512px-Trophy_icon.png"
 
 ALLOWED_TIERS = ["s", "a"]
-TIER_BYPASS_KEYWORDS = [
-    "championship", "champions", "major", "masters", "invitational",
-    "world", "gamers8", "iem", "blast premier", "algs", "owl", "owcs"
+
+# --- REGION FILTERING (Whitelist approach) ---
+# Only allow NA/EU regions - everything else gets filtered unless it's international
+# These are checked as substrings in lowercase event names
+ALLOWED_REGION_KEYWORDS = [
+    # North America
+    "north america",
+    # Europe
+    "europe", "emea",
+]
+
+# --- MAJOR LEAGUES BY GAME ---
+# Only matches from these major circuits/leagues will be shown
+# Valorant is strict (region-specific), others use excluded regions list for filtering
+MAJOR_LEAGUE_KEYWORDS = {
+    "valorant": [
+        # Only NA (Americas) and EU (EMEA) VCT leagues - very specific
+        "vct americas", "vct emea",
+        "champions tour americas", "champions tour emea",
+        "challengers na", "challengers emea",
+        "ascension americas", "ascension emea",
+        "game changers na", "game changers emea",
+    ],
+    "rl": [
+        # Main RLCS circuit - region filtering handled separately
+        "rlcs",
+    ],
+    "r6siege": [
+        # Main R6 circuits
+        "six invitational", "six major", "blast r6",
+        "esl pro league", "pro league",
+    ],
+    "ow": [
+        # OWL and OWCS
+        "owl", "overwatch league",
+        "owcs", "overwatch champions series",
+        "world cup",
+    ],
+}
+
+# Region keywords to EXCLUDE (catches regions not in whitelist)
+# More comprehensive list with variations and sub-region formats
+EXCLUDED_REGION_KEYWORDS = [
+    # APAC / Pacific regions (including sub-regions with // format)
+    "pacific", "apac", "asia", "asian",
+    "pacific//north", "pacific//south", "pacific//east", "pacific//west",
+    "north//east", "south//east",  # Common VCT sub-region formats
+    "korea", "korean", "kr", "lck",
+    "japan", "japanese", "jp", "ljl",
+    "china", "chinese", "cn", "lpl",
+    "sea", "southeast asia", "vcs",  # Vietnam
+    "pcs",  # Pacific Championship Series
+    "oce", "oceania", "lco",
+    "india", "south asia",
+    "mena",  # Middle East & North Africa (sometimes separate from EMEA)
+    # Latin America / Brazil (separate from NA)
+    "brazil", "brazilian", "br", "cblol",
+    "latam", "latin america", "lla",
+    "south america",
+    # CIS (sometimes separate from EMEA)
+    "cis", "lcl",
+]
+
+# International LAN keywords - these bypass ALL region filtering
+# NOTE: "kickoff" removed - regional kickoffs (China, Pacific) are NOT international LANs
+INTERNATIONAL_LAN_KEYWORDS = [
+    "masters", "champions", "championship", "world",
+    "major", "invitational", "grand final", "finals",
+    "lock//in", "lockin", "lock-in",
+    "gamers8", "iem", "blast premier",
+    "six invitational", "six major",
+    "all-star", "allstar",
+]
+
+# RLCS early round keywords - skip these matches (typically before top 16)
+# RLCS starts with 32 teams in Swiss format, we only want top 16+ matches
+RLCS_EARLY_ROUND_KEYWORDS = [
+    "swiss", "swiss stage",
+    "day 1", "day 2",  # Swiss days before top 16
+    "round 1", "round 2", "round 3", "round 4", "round 5",  # Swiss rounds
+    "round of 32", "ro32",
+    "group stage", "group a", "group b", "group c", "group d",
+    "open qualifier", "closed qualifier",
 ]
 
 STRAFE_GAME_SLUGS = {
@@ -337,9 +417,265 @@ class EmojiGuildSelect(discord.ui.Select):
             save_data_sync(data)
         await interaction.response.send_message(f"Storage Updated! Saving to {len(selected_ids)} servers.", ephemeral=True)
 
+
+# --- LEADERBOARD ADMIN VIEWS ---
+
+class GameSelectForWipeAll(discord.ui.Select):
+    """Select dropdown for choosing which game's leaderboard to wipe."""
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="All Games", value="all", description="Wipe leaderboards for all games", emoji="🎮")
+        ]
+        for slug, name in GAMES.items():
+            options.append(discord.SelectOption(label=name, value=slug, description=f"Wipe {name} leaderboard"))
+        super().__init__(placeholder="Select game to wipe...", options=options, row=0)
+
+    async def callback(self, interaction: discord.Interaction):
+        self.view.selected_game = self.values[0]
+        game_display = "All Games" if self.values[0] == "all" else GAMES.get(self.values[0], self.values[0])
+        self.view.confirm_btn.disabled = False
+        self.view.confirm_btn.label = f"Confirm Wipe: {game_display}"
+        await interaction.response.edit_message(view=self.view)
+
+
+class WipeAllScoresView(discord.ui.View):
+    """View for wiping all users' scores from a leaderboard."""
+    def __init__(self, cog):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.selected_game = None
+        self.add_item(GameSelectForWipeAll())
+
+        self.confirm_btn = discord.ui.Button(label="Select a game first", style=discord.ButtonStyle.danger, disabled=True, row=1)
+        self.confirm_btn.callback = self.confirm_wipe
+        self.add_item(self.confirm_btn)
+
+    async def confirm_wipe(self, interaction: discord.Interaction):
+        if not self.selected_game:
+            await interaction.response.send_message("Please select a game first.", ephemeral=True)
+            return
+
+        async with self.cog.data_lock:
+            data = load_data_sync()
+            if self.selected_game == "all":
+                data["leaderboards"] = {k: {} for k in GAMES.keys()}
+                msg = "All leaderboards have been wiped."
+            else:
+                data["leaderboards"][self.selected_game] = {}
+                msg = f"{GAMES.get(self.selected_game, self.selected_game)} leaderboard has been wiped."
+            save_data_sync(data)
+
+        await interaction.response.edit_message(content=f"✅ {msg}", view=None)
+
+
+class UserIdModal(discord.ui.Modal):
+    """Modal for entering a user ID or mention."""
+    def __init__(self, action_type: str, cog):
+        super().__init__(title=f"{action_type} - Enter User")
+        self.cog = cog
+        self.action_type = action_type
+
+        self.user_input = discord.ui.TextInput(
+            label="User ID or @mention",
+            placeholder="Enter user ID (e.g., 123456789) or @mention",
+            required=True,
+            max_length=50
+        )
+        self.add_item(self.user_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        user_input = self.user_input.value.strip()
+
+        # Extract user ID from mention or raw ID
+        user_id = None
+        if user_input.startswith("<@") and user_input.endswith(">"):
+            # Handle mention format <@123456> or <@!123456>
+            user_id = user_input.replace("<@", "").replace("!", "").replace(">", "")
+        else:
+            user_id = user_input
+
+        # Validate it's a number
+        if not user_id.isdigit():
+            await interaction.response.send_message("❌ Invalid user ID. Please enter a valid user ID or mention.", ephemeral=True)
+            return
+
+        # Check if user exists in guild
+        member = interaction.guild.get_member(int(user_id))
+        member_name = member.display_name if member else f"User {user_id}"
+
+        if self.action_type == "Wipe User Score":
+            view = WipeUserGameSelectView(self.cog, user_id, member_name)
+            await interaction.response.send_message(
+                f"Select game to wipe scores for **{member_name}**:",
+                view=view,
+                ephemeral=True
+            )
+        else:  # Modify Points
+            modal = PointsInputModal(self.cog, user_id, member_name)
+            await interaction.response.send_modal(modal)
+
+
+class GameSelectForUser(discord.ui.Select):
+    """Select dropdown for choosing which game when wiping a user's score."""
+    def __init__(self, user_id: str, member_name: str):
+        self.user_id = user_id
+        self.member_name = member_name
+        options = []
+        for slug, name in GAMES.items():
+            options.append(discord.SelectOption(label=name, value=slug, description=f"Wipe {name} score"))
+        super().__init__(placeholder="Select game...", options=options, row=0)
+
+    async def callback(self, interaction: discord.Interaction):
+        self.view.selected_game = self.values[0]
+        game_display = GAMES.get(self.values[0], self.values[0])
+        self.view.confirm_btn.disabled = False
+        self.view.confirm_btn.label = f"Confirm Wipe: {game_display}"
+        await interaction.response.edit_message(view=self.view)
+
+
+class WipeUserGameSelectView(discord.ui.View):
+    """View for selecting game when wiping a single user's score."""
+    def __init__(self, cog, user_id: str, member_name: str):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.user_id = user_id
+        self.member_name = member_name
+        self.selected_game = None
+        self.add_item(GameSelectForUser(user_id, member_name))
+
+        self.confirm_btn = discord.ui.Button(label="Select a game first", style=discord.ButtonStyle.danger, disabled=True, row=1)
+        self.confirm_btn.callback = self.confirm_wipe
+        self.add_item(self.confirm_btn)
+
+    async def confirm_wipe(self, interaction: discord.Interaction):
+        if not self.selected_game:
+            await interaction.response.send_message("Please select a game first.", ephemeral=True)
+            return
+
+        async with self.cog.data_lock:
+            data = load_data_sync()
+            game_lb = data["leaderboards"].get(self.selected_game, {})
+
+            if self.user_id in game_lb:
+                del game_lb[self.user_id]
+                data["leaderboards"][self.selected_game] = game_lb
+                save_data_sync(data)
+                msg = f"✅ Wiped **{self.member_name}**'s {GAMES.get(self.selected_game)} score."
+            else:
+                msg = f"⚠️ **{self.member_name}** has no score in {GAMES.get(self.selected_game)}."
+
+        await interaction.response.edit_message(content=msg, view=None)
+
+
+class PointsInputModal(discord.ui.Modal):
+    """Modal for entering points to add/remove."""
+    def __init__(self, cog, user_id: str, member_name: str):
+        super().__init__(title=f"Modify Points - {member_name[:30]}")
+        self.cog = cog
+        self.user_id = user_id
+        self.member_name = member_name
+
+        self.wins_input = discord.ui.TextInput(
+            label="Wins to add (use negative to remove)",
+            placeholder="e.g., 5 or -3",
+            required=True,
+            max_length=10
+        )
+        self.add_item(self.wins_input)
+
+        self.losses_input = discord.ui.TextInput(
+            label="Losses to add (use negative to remove)",
+            placeholder="e.g., 2 or -1",
+            required=True,
+            max_length=10
+        )
+        self.add_item(self.losses_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            wins_delta = int(self.wins_input.value.strip())
+            losses_delta = int(self.losses_input.value.strip())
+        except ValueError:
+            await interaction.response.send_message("❌ Invalid input. Please enter numbers only.", ephemeral=True)
+            return
+
+        view = ModifyPointsGameSelectView(self.cog, self.user_id, self.member_name, wins_delta, losses_delta)
+        await interaction.response.send_message(
+            f"Select game to modify points for **{self.member_name}**:\n"
+            f"Wins: {'+' if wins_delta >= 0 else ''}{wins_delta}, Losses: {'+' if losses_delta >= 0 else ''}{losses_delta}",
+            view=view,
+            ephemeral=True
+        )
+
+
+class GameSelectForModify(discord.ui.Select):
+    """Select dropdown for choosing which game when modifying points."""
+    def __init__(self):
+        options = []
+        for slug, name in GAMES.items():
+            options.append(discord.SelectOption(label=name, value=slug, description=f"Modify {name} points"))
+        super().__init__(placeholder="Select game...", options=options, row=0)
+
+    async def callback(self, interaction: discord.Interaction):
+        self.view.selected_game = self.values[0]
+        game_display = GAMES.get(self.values[0], self.values[0])
+        self.view.confirm_btn.disabled = False
+        self.view.confirm_btn.label = f"Confirm: {game_display}"
+        await interaction.response.edit_message(view=self.view)
+
+
+class ModifyPointsGameSelectView(discord.ui.View):
+    """View for selecting game when modifying a user's points."""
+    def __init__(self, cog, user_id: str, member_name: str, wins_delta: int, losses_delta: int):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.user_id = user_id
+        self.member_name = member_name
+        self.wins_delta = wins_delta
+        self.losses_delta = losses_delta
+        self.selected_game = None
+        self.add_item(GameSelectForModify())
+
+        self.confirm_btn = discord.ui.Button(label="Select a game first", style=discord.ButtonStyle.primary, disabled=True, row=1)
+        self.confirm_btn.callback = self.confirm_modify
+        self.add_item(self.confirm_btn)
+
+    async def confirm_modify(self, interaction: discord.Interaction):
+        if not self.selected_game:
+            await interaction.response.send_message("Please select a game first.", ephemeral=True)
+            return
+
+        async with self.cog.data_lock:
+            data = load_data_sync()
+            game_lb = data["leaderboards"].get(self.selected_game, {})
+
+            if self.user_id not in game_lb:
+                game_lb[self.user_id] = {"wins": 0, "losses": 0, "streak": 0}
+
+            # Apply deltas
+            game_lb[self.user_id]["wins"] = max(0, game_lb[self.user_id].get("wins", 0) + self.wins_delta)
+            game_lb[self.user_id]["losses"] = max(0, game_lb[self.user_id].get("losses", 0) + self.losses_delta)
+
+            # Reset streak if removing wins
+            if self.wins_delta < 0:
+                game_lb[self.user_id]["streak"] = 0
+
+            new_wins = game_lb[self.user_id]["wins"]
+            new_losses = game_lb[self.user_id]["losses"]
+
+            data["leaderboards"][self.selected_game] = game_lb
+            save_data_sync(data)
+
+        game_name = GAMES.get(self.selected_game, self.selected_game)
+        await interaction.response.edit_message(
+            content=f"✅ Updated **{self.member_name}**'s {game_name} score:\n"
+                    f"Wins: {new_wins}, Losses: {new_losses}",
+            view=None
+        )
+
 class EsportsAdminView(discord.ui.View):
     def __init__(self, cog):
-        super().__init__(timeout=None) 
+        super().__init__(timeout=None)
         self.cog = cog
         data = load_data_sync()
         self.add_item(EmojiGuildSelect(cog.bot, data.get("emoji_storage_guilds", [])))
@@ -353,42 +689,63 @@ class EsportsAdminView(discord.ui.View):
             save_data_sync(data)
         await interaction.response.send_message(f"Updates will appear in {channel.mention}.", ephemeral=True)
 
-    @discord.ui.button(label="Cycle Test Post", style=discord.ButtonStyle.green, row=2)
-    async def test_post(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.run_test(interaction, is_result=False)
+    @discord.ui.button(label="Disable Updates", style=discord.ButtonStyle.secondary, row=2)
+    async def clear_channel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        async with self.cog.data_lock:
+            data = load_data_sync()
+            current_channel = data.get("channel_id")
+            if current_channel is None:
+                await interaction.response.send_message("Updates are already disabled (no channel set).", ephemeral=True)
+                return
+            data["channel_id"] = None
+            save_data_sync(data)
+        await interaction.response.send_message("Updates disabled. No matches will be posted until a channel is selected.", ephemeral=True)
 
-    @discord.ui.button(label="Cycle Result Test", style=discord.ButtonStyle.blurple, row=2)
-    async def test_result(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.run_test(interaction, is_result=True)
-
-    @discord.ui.button(label="Sync Team Emojis", style=discord.ButtonStyle.primary, row=3)
+    @discord.ui.button(label="Sync Emojis", style=discord.ButtonStyle.primary, row=2)
     async def sync_emojis(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message("Sync Started...", ephemeral=True)
         count = await self.cog.manage_team_emojis(interaction)
         self.cog._update_emoji_cache()
         await interaction.followup.send(f"Sync Complete! Added {count} new emojis.")
 
+    @discord.ui.button(label="Test Post", style=discord.ButtonStyle.green, row=2)
+    async def test_post(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.run_test(interaction, is_result=False)
+
+    @discord.ui.button(label="Test Result", style=discord.ButtonStyle.blurple, row=2)
+    async def test_result(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.run_test(interaction, is_result=True)
+
     @discord.ui.button(label="Debug Strafe", style=discord.ButtonStyle.secondary, row=3)
     async def debug_strafe(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.debug_strafe(interaction)
 
-    @discord.ui.button(label="Test Strafe Direct", style=discord.ButtonStyle.success, row=4)
+    @discord.ui.button(label="Test Strafe", style=discord.ButtonStyle.success, row=3)
     async def test_strafe_direct(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.test_strafe_direct(interaction)
 
-    @discord.ui.button(label="Wipe Leaderboards", style=discord.ButtonStyle.danger, row=4)
-    async def wipe_leaderboards(self, interaction: discord.Interaction, button: discord.ui.Button):
-        confirm_view = discord.ui.View(timeout=30)
-        async def confirm_cb(i: discord.Interaction):
-            async with self.cog.data_lock:
-                data = load_data_sync()
-                data["leaderboards"] = {k: {} for k in GAMES.keys()}
-                save_data_sync(data)
-            await i.response.edit_message(content="Wiped.", view=None)
+    # --- LEADERBOARD ADMIN BUTTONS ---
 
-        btn = discord.ui.Button(label="Confirm", style=discord.ButtonStyle.danger)
-        btn.callback = confirm_cb
-        confirm_view.add_item(btn)
-        await interaction.response.send_message("Wipe all leaderboards?", view=confirm_view, ephemeral=True)
+    @discord.ui.button(label="Wipe All Scores", style=discord.ButtonStyle.danger, row=4)
+    async def wipe_all_scores(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Wipe all users' scores for a specific game or all games."""
+        view = WipeAllScoresView(self.cog)
+        await interaction.response.send_message(
+            "Select which game's leaderboard to wipe:",
+            view=view,
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="Wipe User Score", style=discord.ButtonStyle.danger, row=4)
+    async def wipe_user_score(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Wipe a single user's score from a game's leaderboard."""
+        modal = UserIdModal("Wipe User Score", self.cog)
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="Modify Points", style=discord.ButtonStyle.primary, row=4)
+    async def modify_points(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Add or remove points for a specific user."""
+        modal = UserIdModal("Modify Points", self.cog)
+        await interaction.response.send_modal(modal)
 
 

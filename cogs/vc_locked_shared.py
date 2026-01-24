@@ -54,7 +54,9 @@ async def init_db():
                     bans TEXT DEFAULT '[]',
                     mute_knock_pings INTEGER DEFAULT 0,
                     guild_id INTEGER,
-                    is_basic INTEGER DEFAULT 0
+                    is_basic INTEGER DEFAULT 0,
+                    last_seen_occupied REAL DEFAULT 0,
+                    created_at REAL DEFAULT 0
                 )
             ''')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_owner ON active_vcs(owner_id)')
@@ -94,6 +96,12 @@ async def init_db():
                     if 'is_basic' not in columns:
                         logger.info("Migrating DB: Adding is_basic column...")
                         await db.execute("ALTER TABLE active_vcs ADD COLUMN is_basic INTEGER DEFAULT 0")
+                    if 'last_seen_occupied' not in columns:
+                        logger.info("Migrating DB: Adding last_seen_occupied column...")
+                        await db.execute("ALTER TABLE active_vcs ADD COLUMN last_seen_occupied REAL DEFAULT 0")
+                    if 'created_at' not in columns:
+                        logger.info("Migrating DB: Adding created_at column...")
+                        await db.execute("ALTER TABLE active_vcs ADD COLUMN created_at REAL DEFAULT 0")
             except Exception as e:
                 logger.error(f"Migration failed: {e}")
 
@@ -129,7 +137,7 @@ async def load_active_vcs():
     try:
         async with DB_SEMAPHORE:
             async with aiosqlite.connect(DB_FILE) as db:
-                async with db.execute("SELECT vc_id, owner_id, message_id, knock_mgmt_msg_id, thread_id, ghost, unlocked, bans, mute_knock_pings, guild_id, is_basic FROM active_vcs") as cursor:
+                async with db.execute("SELECT vc_id, owner_id, message_id, knock_mgmt_msg_id, thread_id, ghost, unlocked, bans, mute_knock_pings, guild_id, is_basic, last_seen_occupied, created_at FROM active_vcs") as cursor:
                     rows = await cursor.fetchall()
                     result = {}
                     corrupted = []
@@ -148,7 +156,7 @@ async def load_active_vcs():
                                     bans_list = []
                             else:
                                 bans_list = []
-                            
+
                             result[row[0]] = {
                                 'owner_id': int(row[1]) if row[1] else 0,
                                 'message_id': int(row[2]) if row[2] else None,
@@ -159,17 +167,19 @@ async def load_active_vcs():
                                 'bans': bans_list,
                                 'mute_knock_pings': bool(row[8]) if len(row) > 8 else False,
                                 'guild_id': int(row[9]) if len(row) > 9 and row[9] else None,
-                                'is_basic': bool(row[10]) if len(row) > 10 else False
+                                'is_basic': bool(row[10]) if len(row) > 10 else False,
+                                'last_seen_occupied': float(row[11]) if len(row) > 11 and row[11] else time.time(),
+                                'created_at': float(row[12]) if len(row) > 12 and row[12] else time.time()
                             }
                         except (json.JSONDecodeError, TypeError, ValueError) as e:
                             logger.error(f"Corrupted data for VC {row[0]}: {e}")
                             corrupted.append(row[0])
-                    
+
                     if corrupted:
                         await db.executemany("DELETE FROM active_vcs WHERE vc_id = ?", [(vid,) for vid in corrupted])
                         await db.commit()
                         logger.warning(f"Removed {len(corrupted)} corrupted VC records")
-                        
+
                     logger.info(f"Loaded {len(result)} active VCs")
                     return result
     except Exception as e:
@@ -554,6 +564,48 @@ class RulesEmbedModal(discord.ui.Modal, title="Post Rules Embed"):
             logger.error(f"Failed to post rules: {e}")
             await interaction.response.send_message("❌ Failed to post rules embed.", ephemeral=True)
 
+class ExclusionsModal(discord.ui.Modal, title="Set VC Exclusions"):
+    exclusions = discord.ui.TextInput(
+        label="Excluded VC Names (comma-separated)",
+        style=discord.TextStyle.paragraph,
+        placeholder="e.g. General, Music, AFK",
+        required=False,
+        max_length=1000
+    )
+
+    def __init__(self, bot):
+        super().__init__()
+        self.bot = bot
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            # Clean and validate the input
+            raw_names = self.exclusions.value.strip()
+            if raw_names:
+                # Split by comma, clean each name
+                names = [n.strip() for n in raw_names.split(",") if n.strip()]
+                # Store as comma-separated string
+                value = ",".join(names)
+            else:
+                value = ""
+
+            await set_config(f'excluded_vc_names_{interaction.guild_id}', value)
+
+            if value:
+                await interaction.response.send_message(
+                    f"✅ Exclusions set! The following VC names will be ignored:\n`{value}`",
+                    ephemeral=True
+                )
+            else:
+                await interaction.response.send_message(
+                    "✅ Exclusions cleared. No VCs will be excluded.",
+                    ephemeral=True
+                )
+        except Exception as e:
+            logger.error(f"Failed to save exclusions: {e}")
+            await interaction.response.send_message("❌ Failed to save exclusions.", ephemeral=True)
+
+
 class SavePresetModal(discord.ui.Modal, title="Save Preset"):
     preset_name = discord.ui.TextInput(label="Preset Name", placeholder="Enter a name...", max_length=50)
     def __init__(self, vc, bans):
@@ -625,6 +677,17 @@ class AdminPanelView(discord.ui.View):
     @discord.ui.button(label="Post Rules", style=discord.ButtonStyle.success, emoji="📋", custom_id="admin_post_rules")
     async def post_rules(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(RulesEmbedModal(self.bot))
+
+    @discord.ui.button(label="Set Exclusions", style=discord.ButtonStyle.secondary, emoji="🚫", custom_id="admin_set_exclusions")
+    async def set_exclusions(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Set VC names to exclude from the locked VC system"""
+        # Pre-populate the modal with current exclusions
+        current_exclusions = await get_config(f'excluded_vc_names_{interaction.guild_id}', "")
+        modal = ExclusionsModal(self.bot)
+        if current_exclusions:
+            modal.exclusions.default = current_exclusions
+        await interaction.response.send_modal(modal)
+
 
 class RulesView(discord.ui.View):
     def __init__(self, bot):
@@ -1307,71 +1370,174 @@ class KnockManagementView(discord.ui.View):
         
         elif choice == "Manage Presets":
             view = discord.ui.View(timeout=60)
-            async def save_cb(inter): 
-                await inter.response.send_modal(SavePresetModal(vc, vc_data.get('bans', [])))
+            # Store voice_id for callbacks to use (more stable than vc object)
+            voice_id = self.voice_id
+
+            async def save_cb(inter):
+                # FIX: Refresh cog and vc references inside callback
+                fresh_cog = get_cog_safe(self.bot)
+                if not fresh_cog:
+                    return await inter.response.send_message("❌ System unavailable.", ephemeral=True)
+                fresh_vc = inter.guild.get_channel(voice_id)
+                if not fresh_vc:
+                    return await inter.response.send_message("❌ VC no longer exists.", ephemeral=True)
+                fresh_vc_data = fresh_cog.get_vc_data(voice_id)
+                if not fresh_vc_data:
+                    return await inter.response.send_message("❌ VC data not found.", ephemeral=True)
+                await inter.response.send_modal(SavePresetModal(fresh_vc, fresh_vc_data.get('bans', [])))
+
             save_btn = discord.ui.Button(label="Save New", style=discord.ButtonStyle.success)
             save_btn.callback = save_cb
             view.add_item(save_btn)
-            
+
             user_presets = await get_user_presets(interaction.user.id)
             if user_presets:
                 options = [discord.SelectOption(label=name[:100]) for name in list(user_presets.keys())[:25]]
-                
+
                 async def load_cb(inter):
                     p_name = select_load.values[0]
                     data = user_presets.get(p_name)
-                    if not data or not isinstance(data, dict): 
+                    if not data or not isinstance(data, dict):
                         return await inter.response.send_message("❌ Corrupted preset data.", ephemeral=True)
-                    
+
+                    # FIX: Refresh cog reference inside callback
+                    fresh_cog = get_cog_safe(self.bot)
+                    if not fresh_cog:
+                        return await inter.response.send_message("❌ System unavailable.", ephemeral=True)
+
+                    # FIX: Refresh vc reference inside callback
+                    fresh_vc = inter.guild.get_channel(voice_id)
+                    if not fresh_vc:
+                        return await inter.response.send_message("❌ VC no longer exists.", ephemeral=True)
+
+                    # FIX: Refresh vc_data reference
+                    fresh_vc_data = fresh_cog.get_vc_data(voice_id)
+                    if not fresh_vc_data:
+                        return await inter.response.send_message("❌ VC data not found.", ephemeral=True)
+
                     # FIX: Better validation of preset data
                     safe_name = str(data.get("name", "VC"))[:100]
                     try:
-                        safe_limit = max(0, min(int(data.get("limit", 0)), cog.get_max_voice_limit(inter.guild)))
+                        safe_limit = max(0, min(int(data.get("limit", 0)), fresh_cog.get_max_voice_limit(inter.guild)))
                     except (ValueError, TypeError):
                         safe_limit = 0
                     try:
-                        safe_bitrate = min(int(data.get("bitrate", 64000)), cog.get_guild_bitrate_limit(inter.guild))
+                        safe_bitrate = min(int(data.get("bitrate", 64000)), fresh_cog.get_guild_bitrate_limit(inter.guild))
                     except (ValueError, TypeError):
                         safe_bitrate = 64000
-                    
-                    await cog.safe_edit_channel(vc, name=safe_name, user_limit=safe_limit, bitrate=safe_bitrate)
-                    
+
+                    # FIX: Preserve lock prefix when loading preset name
+                    # If VC is locked, ensure the lock emoji is preserved
+                    is_locked = not fresh_vc_data.get('unlocked', False)
+                    prefix = "🔒 "
+
+                    if is_locked:
+                        # Remove any existing prefix from preset name, then add correct prefix
+                        clean_preset_name = safe_name.replace(prefix, "").strip()
+                        final_name = f"{prefix}{clean_preset_name}"
+                    else:
+                        # Unlocked VC - remove prefix if present
+                        final_name = safe_name.replace(prefix, "").strip()
+
+                    # FIX: Set debounce key BEFORE editing channel to prevent on_guild_channel_update interference
+                    import time
+                    debounce_key = f"preset_load_{voice_id}"
+                    fresh_cog._name_update_debounce[debounce_key] = time.time()
+
+                    await fresh_cog.safe_edit_channel(fresh_vc, name=final_name, user_limit=safe_limit, bitrate=safe_bitrate)
+
                     if 'bans' in data and isinstance(data['bans'], list):
-                        current_bans = set(vc_data.get('bans', []))
+                        current_bans = set(fresh_vc_data.get('bans', []))
                         valid_preset_bans = set()
                         for b in data['bans']:
                             try:
                                 valid_preset_bans.add(int(b))
                             except (ValueError, TypeError):
                                 continue
-                        
+
                         new_bans = list(current_bans.union(valid_preset_bans))
-                        vc_data['bans'] = new_bans
-                        await cog.save_state()
+                        fresh_vc_data['bans'] = new_bans
+                        await fresh_cog.save_state()
                         bans_to_apply = valid_preset_bans - current_bans
                         ops = []
                         for bid in bans_to_apply:
                             m = inter.guild.get_member(bid)
-                            if m: 
-                                ops.append(cog.safe_set_permissions(vc, m, connect=False))
+                            if m:
+                                ops.append(fresh_cog.safe_set_permissions(fresh_vc, m, connect=False))
                         if ops:
-                            await cog.batch_operations(ops)
-                    
-                    await cog.update_hub_embed(vc.id)
+                            await fresh_cog.batch_operations(ops)
+
+                    await fresh_cog.update_hub_embed(voice_id)
                     await inter.response.send_message(f"✅ Loaded **{p_name}**.", ephemeral=True)
-                
+
                 async def delete_cb(inter):
-                    if not select_load.values: 
+                    if not select_load.values:
                         return await inter.response.send_message("❌ Select preset.", ephemeral=True)
                     p_name = select_load.values[0]
                     await delete_preset(inter.user.id, p_name)
                     await inter.response.send_message(f"🗑️ Deleted **{p_name}**.", ephemeral=True)
-                
+
                 select_load = discord.ui.Select(placeholder="Load Preset...", options=options)
                 select_load.callback = load_cb
                 view.add_item(select_load)
                 delete_btn = discord.ui.Button(label="Delete", style=discord.ButtonStyle.danger, emoji="🗑️")
                 delete_btn.callback = delete_cb
                 view.add_item(delete_btn)
-            
+
             await interaction.response.send_message("💾 **Preset Manager**", view=view, ephemeral=True)
+
+    @discord.ui.button(label="Reconnect VC", style=discord.ButtonStyle.secondary, emoji="🔄", row=2)
+    async def reconnect_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Manual reconnect button for restoring disconnected VCs"""
+        cog = self._get_cog()
+        if not cog:
+            return await interaction.response.send_message("❌ System temporarily unavailable.", ephemeral=True)
+
+        await interaction.response.defer(ephemeral=True)
+
+        # Parse owner name from thread name (format: "🔒 {owner}'s VC Settings")
+        thread = interaction.channel
+        if not isinstance(thread, discord.Thread):
+            return await interaction.followup.send("❌ This button can only be used in a VC settings thread.", ephemeral=True)
+
+        # Check if VC is still tracked
+        vc_data = cog.get_vc_data(self.voice_id)
+        vc = interaction.guild.get_channel(self.voice_id)
+
+        # Determine if user is authorized
+        is_owner = False
+        is_in_vc = False
+
+        if vc_data:
+            is_owner = interaction.user.id == vc_data['owner_id']
+        else:
+            # VC data lost - parse owner from thread name
+            thread_name = thread.name
+            if "'s VC Settings" in thread_name:
+                # Extract owner name from thread
+                owner_name_part = thread_name.replace("🔒 ", "").replace("'s VC Settings", "")
+                # Check if user's display name matches
+                if owner_name_part.lower() in interaction.user.display_name.lower():
+                    is_owner = True
+
+        # Check if user is in the VC (if VC exists)
+        if vc:
+            is_in_vc = interaction.user in vc.members
+
+        # Authorization check: must be owner OR (if owner not in VC, must be in VC)
+        if not is_owner and not is_in_vc:
+            return await interaction.followup.send(
+                "❌ You must be the VC owner or be in the VC to use this button.",
+                ephemeral=True
+            )
+
+        # Call the manual reconnect method
+        try:
+            success, message = await cog.reconnect_vc_manual(self.voice_id, interaction.guild, interaction.user)
+            if success:
+                await interaction.followup.send(f"✅ {message}", ephemeral=True)
+            else:
+                await interaction.followup.send(f"❌ {message}", ephemeral=True)
+        except Exception as e:
+            logger.error(f"Manual reconnect failed: {e}", exc_info=True)
+            await interaction.followup.send(f"❌ Reconnect failed: {str(e)}", ephemeral=True)

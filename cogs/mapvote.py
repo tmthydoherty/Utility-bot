@@ -480,20 +480,38 @@ class MapVote(commands.Cog, name="mapvote"):
         async with self.config_lock:
             guild_cfg = self._get_guild_config_sync(gid)
             vote = guild_cfg.get("active_votes", {}).get(mid)
-            if not vote: 
+            if not vote:
                 return False, "This vote has expired or is no longer active.", None, False
+
+            # Check if voter is allowed (for custom match votes with restricted voters)
+            allowed_voters = vote.get("allowed_voters")
+            allowed_role_ids = vote.get("allowed_role_ids", [])
+
+            if allowed_voters or allowed_role_ids:
+                is_allowed = False
+                # Check if user ID is in allowed_voters
+                if allowed_voters and uid in allowed_voters:
+                    is_allowed = True
+                # Check if user has one of the allowed roles
+                if allowed_role_ids and hasattr(inter.user, 'roles'):
+                    user_role_ids = {r.id for r in inter.user.roles}
+                    if not user_role_ids.isdisjoint(allowed_role_ids):
+                        is_allowed = True
+
+                if not is_allowed:
+                    return False, "Only match players can vote in this map vote.", None, False
 
             new_vote, votes = vote["maps"][map_idx], vote["votes"]
             old_vote = next((m for m, v in votes.items() if uid in v), None)
-            
-            if old_vote == new_vote: 
+
+            if old_vote == new_vote:
                 return False, f"You are already voting for **{new_vote}**.", None, False
-            
-            if old_vote: 
+
+            if old_vote:
                 votes[old_vote].remove(uid)
-            
+
             votes[new_vote].append(uid)
-            
+
             # --- CRITICAL FIX 2 ---
             # Check for conclusion *inside* the lock
             voter_ids = {uid for v_list in votes.values() for uid in v_list}
@@ -919,6 +937,115 @@ class MapVote(commands.Cog, name="mapvote"):
         stats = [f"• **{m}**: {win_hist.get(m, 0)} wins ({(win_hist.get(m, 0)/total*100) if total else 0:.1f}%)" for m in all_maps_copy]
         embed = discord.Embed(title=f"🏆 Stats for {game}", color=EMBED_COLOR_MAP, description="\n".join(stats)).set_footer(text=f"Based on {total} total wins.")
         await inter.followup.send(embed=embed, ephemeral=True)
+
+    # --- PROGRAMMATIC VOTE FOR CUSTOM MATCH INTEGRATION ---
+
+    async def start_programmatic_vote(
+        self,
+        guild_id: int,
+        channel: discord.TextChannel,
+        game_name: str,
+        duration: int = 3,
+        min_users: int = 1,
+        max_votes: int = 10,
+        allowed_voters: Optional[List[int]] = None,
+        red_role_id: Optional[int] = None,
+        blue_role_id: Optional[int] = None
+    ) -> Optional[int]:
+        """
+        Start a map vote programmatically (for custom match integration).
+        Returns message_id or None on failure.
+
+        Args:
+            guild_id: The guild ID
+            channel: The channel to post the vote in
+            game_name: The game to vote on
+            duration: Vote duration in minutes (default 3)
+            min_users: Minimum users required for vote to pass (default 1)
+            max_votes: Maximum votes before auto-conclude (default 10)
+            allowed_voters: List of user IDs who can vote (if None, anyone can vote)
+            red_role_id: Optional role ID for red team (alternative voter restriction)
+            blue_role_id: Optional role ID for blue team (alternative voter restriction)
+        """
+        try:
+            async with self.config_lock:
+                guild_cfg = self._get_guild_config_sync(guild_id)
+                games_cfg = self._get_games_config_sync()
+
+                self._ensure_latest_game_format(game_name)
+                gd = games_cfg.get(game_name)
+
+                if not gd:
+                    log_map.warning(f"Programmatic vote failed: Game '{game_name}' not configured")
+                    return None
+
+                unseen = gd.get("unseen_maps", [])
+                seen = gd.get("seen_maps", [])
+
+                if len(unseen) + len(seen) < VOTE_MAP_COUNT:
+                    log_map.warning(f"Programmatic vote failed: '{game_name}' needs at least {VOTE_MAP_COUNT} maps")
+                    return None
+
+                # Select maps
+                if len(unseen) >= VOTE_MAP_COUNT:
+                    chosen_maps = random.sample(unseen, VOTE_MAP_COUNT)
+                    gd["unseen_maps"] = [m for m in unseen if m not in chosen_maps]
+                    gd["seen_maps"].extend(chosen_maps)
+                else:
+                    chosen_maps = list(unseen)
+                    needed = VOTE_MAP_COUNT - len(chosen_maps)
+                    fillers = random.sample(seen, needed)
+                    chosen_maps.extend(fillers)
+                    gd["unseen_maps"] = [m for m in seen if m not in fillers]
+                    gd["seen_maps"] = chosen_maps
+
+                guild_cfg["vote_counter"] = guild_cfg.get("vote_counter", 0) + 1
+                vote_data = {
+                    "channel_id": channel.id,
+                    "end_time_iso": (datetime.now(timezone.utc) + timedelta(minutes=duration)).isoformat(),
+                    "maps": chosen_maps,
+                    "votes": {m: [] for m in chosen_maps},
+                    "game": game_name,
+                    "short_id": guild_cfg["vote_counter"],
+                    "min_users": min_users,
+                    "max_votes": max_votes,
+                    "allowed_voters": allowed_voters,
+                    "allowed_role_ids": [r for r in [red_role_id, blue_role_id] if r]
+                }
+
+                img_file = await self.create_composite_image(chosen_maps, game_name)
+                embed = self._generate_vote_embed(vote_data)
+                view = VotingView(self)
+
+                for i, child in enumerate(c for c in view.children if c.custom_id and c.custom_id.startswith("map_vote_")):
+                    if i < len(chosen_maps):
+                        child.label = f"{chosen_maps[i]} (0)"
+                        child.disabled = False
+                    else:
+                        child.disabled = True
+
+                msg = None
+                if img_file:
+                    img_bytes = img_file.fp.read()
+                    vote_data["composite_bytes"] = list(img_bytes)
+                    img_file.fp.close()
+                    send_buffer = io.BytesIO(img_bytes)
+                    send_file = discord.File(send_buffer, filename=img_file.filename)
+                    embed.set_image(url=f"attachment://{send_file.filename}")
+                    msg = await channel.send(file=send_file, embed=embed, view=view)
+                else:
+                    msg = await channel.send(embed=embed, view=view)
+
+                guild_cfg.setdefault("active_votes", {})[str(msg.id)] = vote_data
+                await self._save_config()
+
+                log_map.info(f"Programmatic vote started for {game_name} in channel {channel.id}")
+                return msg.id
+
+        except Exception as e:
+            log_map.error(f"Error starting programmatic vote: {e}", exc_info=True)
+            return None
+
 
 async def setup(bot: commands.Bot):
     """The setup function called by discord.py to load the cog."""

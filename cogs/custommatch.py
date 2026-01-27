@@ -16,6 +16,13 @@ import random
 import secrets
 from dataclasses import dataclass, field
 from enum import Enum
+import io
+
+try:
+    from playwright.async_api import async_playwright
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    PLAYWRIGHT_AVAILABLE = False
 
 logger = logging.getLogger('custommatch')
 
@@ -43,8 +50,9 @@ K_FACTOR_LEARNING = 35    # Games 6-15
 K_FACTOR_STABLE = 20      # Games 16+
 
 def generate_short_id() -> str:
-    """Generate a 5-character alphanumeric ID."""
-    return secrets.token_hex(3)[:5]
+    """Generate a 5-character alphanumeric ID without confusing chars."""
+    chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ123456789'  # No 0, O, I, L
+    return ''.join(secrets.choice(chars) for _ in range(5))
 
 
 def parse_duration_to_minutes(value: str) -> int:
@@ -64,12 +72,188 @@ NEWBIE_GAMES = 5
 LEARNING_GAMES = 15
 RIVALRY_MIN_GAMES = 5
 
-# Colors
-COLOR_RED = 0xFF0000
-COLOR_BLUE = 0x0000FF
-COLOR_NEUTRAL = 0x2F3136
-COLOR_SUCCESS = 0x00FF00
-COLOR_WARNING = 0xFFAA00
+# Colors (all white for consistent styling)
+COLOR_WHITE = 0xFFFFFF
+COLOR_RED = COLOR_WHITE
+COLOR_BLUE = COLOR_WHITE
+COLOR_NEUTRAL = COLOR_WHITE
+COLOR_SUCCESS = COLOR_WHITE
+COLOR_WARNING = COLOR_WHITE
+
+# Stats card template path
+STATS_TEMPLATE_PATH = Path(__file__).parent / "templates" / "stats_card.html"
+FONTS_PATH = Path(__file__).parent.parent / "fonts"
+
+# =============================================================================
+# STATS CARD GENERATOR
+# =============================================================================
+
+class StatsCardGenerator:
+    """Generates stats card images using Playwright and HTML templates."""
+
+    def __init__(self):
+        self.browser = None
+        self.playwright = None
+
+    async def initialize(self):
+        """Initialize the browser."""
+        if not PLAYWRIGHT_AVAILABLE:
+            logger.warning("Playwright not available. Stats cards will use embeds.")
+            return False
+
+        try:
+            self.playwright = await async_playwright().start()
+            self.browser = await self.playwright.chromium.launch()
+            logger.info("Stats card generator initialized.")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to initialize stats card generator: {e}")
+            return False
+
+    async def close(self):
+        """Close the browser."""
+        if self.browser:
+            await self.browser.close()
+        if self.playwright:
+            await self.playwright.stop()
+
+    async def generate_stats_image(self, player_data: dict) -> Optional[io.BytesIO]:
+        """Generate a stats card image from player data."""
+        if not self.browser:
+            return None
+
+        try:
+            # Load template
+            if not STATS_TEMPLATE_PATH.exists():
+                logger.error(f"Stats template not found at {STATS_TEMPLATE_PATH}")
+                return None
+
+            template = STATS_TEMPLATE_PATH.read_text(encoding='utf-8')
+
+            # Calculate values
+            games_played = player_data.get('games_played', 0)
+            wins = player_data.get('wins', 0)
+            losses = player_data.get('losses', 0)
+            winrate = round((wins / games_played * 100)) if games_played > 0 else 0
+            win_bar_width = min(100, winrate)
+
+            total_kills = player_data.get('total_kills', 0)
+            total_deaths = player_data.get('total_deaths', 0)
+            total_assists = player_data.get('total_assists', 0)
+            hs_percent = player_data.get('hs_percent', 0)
+
+            kd_ratio = round(total_kills / total_deaths, 2) if total_deaths > 0 else total_kills
+            kd_progress = min(100, kd_ratio * 25)  # Scale: 4.0 KD = 100%
+            winrate_progress = winrate
+            hs_progress = hs_percent
+
+            # Build Valorant stats HTML
+            valorant_stats_html = ""
+            if total_kills > 0 or total_deaths > 0:
+                max_stat = max(total_kills, total_deaths, total_assists, 1)
+                valorant_stats_html = f'''
+            <div class="stat-item">
+                <div class="stat-label">Kills</div>
+                <div class="stat-bar-container">
+                    <div class="stat-bar kills" style="width: {min(100, total_kills/max_stat*100):.0f}%"></div>
+                    <span class="stat-value">{total_kills}</span>
+                </div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-label">Assists</div>
+                <div class="stat-bar-container">
+                    <div class="stat-bar assists" style="width: {min(100, total_assists/max_stat*100):.0f}%"></div>
+                    <span class="stat-value">{total_assists}</span>
+                </div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-label">K/D/A</div>
+                <div class="stat-bar-container">
+                    <div class="stat-bar kd" style="width: {min(100, kd_ratio*25):.0f}%"></div>
+                    <span class="stat-value">{total_kills}/{total_deaths}/{total_assists}</span>
+                </div>
+            </div>'''
+
+            # Build agents HTML
+            agents_html = ""
+            favorite_agents = player_data.get('favorite_agents', [])
+            if favorite_agents:
+                agents_items = ''.join(
+                    f'<div class="agent-item">{agent["name"]} ({agent["count"]})</div>'
+                    for agent in favorite_agents[:5]
+                )
+                agents_html = f'''
+    <div class="agents-section">
+        <div class="section-title">Favorite Agents</div>
+        <div class="agents-grid">{agents_items}</div>
+    </div>'''
+
+            # Build recent matches HTML
+            recent_matches = player_data.get('recent_matches', [])
+            if recent_matches:
+                matches_html = ""
+                for match in recent_matches[:5]:
+                    result_class = "win" if match.get('won') else "loss"
+                    result_letter = "W" if match.get('won') else "L"
+                    kda_text = ""
+                    if match.get('kills') is not None:
+                        kda_text = f"{match['kills']}/{match['deaths']}/{match['assists']}"
+                        if match.get('agent'):
+                            kda_text = f"{match['agent']} - {kda_text}"
+                    map_text = match.get('map_name', '')
+                    info_text = f"{map_text}" if map_text else "Match"
+
+                    matches_html += f'''
+        <div class="match-item">
+            <div class="match-result {result_class}">{result_letter}</div>
+            <div class="match-info">{info_text}</div>
+            <div class="match-kda">{kda_text}</div>
+        </div>'''
+                recent_matches_html = f'<div class="match-list">{matches_html}</div>'
+            else:
+                recent_matches_html = '<div class="no-data">No recent matches</div>'
+
+            # Replace placeholders
+            html = template.format(
+                font_path=str(FONTS_PATH),
+                avatar_url=player_data.get('avatar_url', ''),
+                player_name=player_data.get('player_name', 'Unknown'),
+                period_title=player_data.get('period_title', 'Stats'),
+                mmr=player_data.get('mmr', 1000),
+                wins=wins,
+                losses=losses,
+                win_bar_width=win_bar_width,
+                valorant_stats_html=valorant_stats_html,
+                kd_ratio=kd_ratio,
+                kd_progress=kd_progress,
+                winrate=winrate,
+                winrate_progress=winrate_progress,
+                hs_percent=round(hs_percent),
+                hs_progress=hs_progress,
+                agents_html=agents_html,
+                recent_matches_html=recent_matches_html
+            )
+
+            # Render to image
+            page = await self.browser.new_page(viewport={'width': 600, 'height': 500})
+            await page.set_content(html)
+
+            # Wait for fonts to load
+            await page.wait_for_timeout(100)
+
+            # Get the actual content height
+            body_height = await page.evaluate('document.body.scrollHeight')
+            await page.set_viewport_size({'width': 600, 'height': body_height + 48})
+
+            screenshot = await page.screenshot(type='png')
+            await page.close()
+
+            return io.BytesIO(screenshot)
+
+        except Exception as e:
+            logger.error(f"Error generating stats card: {e}")
+            return None
+
 
 # =============================================================================
 # DATABASE SETUP
@@ -245,6 +429,37 @@ CREATE TABLE IF NOT EXISTS abandon_votes (
     PRIMARY KEY (match_id, player_id),
     FOREIGN KEY (match_id) REFERENCES matches(match_id) ON DELETE CASCADE
 );
+
+-- Valorant match stats from HenrikDev API
+CREATE TABLE IF NOT EXISTS valorant_match_stats (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    match_id INTEGER NOT NULL,
+    valorant_match_id TEXT,
+    player_id INTEGER NOT NULL,
+    ign TEXT NOT NULL,
+    agent TEXT,
+    kills INTEGER DEFAULT 0,
+    deaths INTEGER DEFAULT 0,
+    assists INTEGER DEFAULT 0,
+    headshots INTEGER DEFAULT 0,
+    bodyshots INTEGER DEFAULT 0,
+    legshots INTEGER DEFAULT 0,
+    score INTEGER DEFAULT 0,
+    map_name TEXT,
+    fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (match_id) REFERENCES matches(match_id) ON DELETE CASCADE
+);
+
+-- Track players whose IGN works reliably for API lookups
+CREATE TABLE IF NOT EXISTS valorant_player_regulars (
+    player_id INTEGER NOT NULL,
+    game_id INTEGER NOT NULL,
+    ign TEXT NOT NULL,
+    puuid TEXT,
+    region TEXT DEFAULT 'na',
+    verified_at TIMESTAMP,
+    PRIMARY KEY (player_id, game_id)
+);
 """
 
 async def init_db():
@@ -274,6 +489,8 @@ async def migrate_db():
             ("penalty_3rd_minutes", "INTEGER DEFAULT 10080"),
             ("penalty_decay_days", "INTEGER DEFAULT 30"),
             ("banner_url", "TEXT"),
+            ("verification_topic", "TEXT"),
+            ("game_channel_id", "INTEGER"),
         ]
 
         for col_name, col_def in game_migrations:
@@ -337,6 +554,8 @@ class GameConfig:
     penalty_3rd_minutes: int = 10080
     penalty_decay_days: int = 30
     banner_url: Optional[str] = None
+    verification_topic: Optional[str] = None
+    game_channel_id: Optional[int] = None
 
 @dataclass
 class PlayerIGN:
@@ -501,6 +720,8 @@ class DatabaseHelper:
             penalty_3rd_minutes=row["penalty_3rd_minutes"] if "penalty_3rd_minutes" in row.keys() else 10080,
             penalty_decay_days=row["penalty_decay_days"] if "penalty_decay_days" in row.keys() else 30,
             banner_url=row["banner_url"] if "banner_url" in row.keys() else None,
+            verification_topic=row["verification_topic"] if "verification_topic" in row.keys() else None,
+            game_channel_id=row["game_channel_id"] if "game_channel_id" in row.keys() else None,
         )
 
     @staticmethod
@@ -797,7 +1018,42 @@ class DatabaseHelper:
                     (player_a, player_b, game_id, a_wins, b_wins)
                 )
             await db.commit()
-    
+
+    @staticmethod
+    async def reverse_rivalry(old_winner_id: int, old_loser_id: int, game_id: int):
+        """Reverse a rivalry record - swap a win from old_winner to old_loser."""
+        # Ensure consistent ordering
+        if old_winner_id > old_loser_id:
+            player_a, player_b = old_loser_id, old_winner_id
+            old_winner_is_b = True
+        else:
+            player_a, player_b = old_winner_id, old_loser_id
+            old_winner_is_b = False
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                """SELECT player_a_wins, player_b_wins FROM rivalries
+                   WHERE player_a_id = ? AND player_b_id = ? AND game_id = ?""",
+                (player_a, player_b, game_id)
+            ) as cursor:
+                row = await cursor.fetchone()
+
+            if row:
+                # Decrement old winner's wins, increment old loser's wins
+                if old_winner_is_b:
+                    new_a_wins = row[0] + 1  # old loser now has one more win
+                    new_b_wins = max(0, row[1] - 1)  # old winner loses a win
+                else:
+                    new_a_wins = max(0, row[0] - 1)  # old winner loses a win
+                    new_b_wins = row[1] + 1  # old loser now has one more win
+
+                await db.execute(
+                    """UPDATE rivalries SET player_a_wins = ?, player_b_wins = ?
+                       WHERE player_a_id = ? AND player_b_id = ? AND game_id = ?""",
+                    (new_a_wins, new_b_wins, player_a, player_b, game_id)
+                )
+                await db.commit()
+
     @staticmethod
     async def get_player_rivalries(player_id: int, game_id: int, limit: int = 3) -> List[dict]:
         """Get top rivalries for a player."""
@@ -1317,6 +1573,315 @@ class DatabaseHelper:
                     for row in rows
                 }
 
+    # -------------------------------------------------------------------------
+    # VALORANT STATS METHODS
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    async def save_valorant_match_stats(
+        match_id: int, valorant_match_id: str, player_id: int, ign: str,
+        agent: str, kills: int, deaths: int, assists: int,
+        headshots: int, bodyshots: int, legshots: int, score: int, map_name: str
+    ):
+        """Save Valorant match stats for a player."""
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO valorant_match_stats
+                (match_id, valorant_match_id, player_id, ign, agent, kills, deaths, assists,
+                 headshots, bodyshots, legshots, score, map_name)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (match_id, valorant_match_id, player_id, ign, agent, kills, deaths, assists,
+                  headshots, bodyshots, legshots, score, map_name))
+            await db.commit()
+
+    @staticmethod
+    async def get_valorant_match_stats(match_id: int) -> List[dict]:
+        """Get all Valorant stats for a match."""
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM valorant_match_stats WHERE match_id = ?",
+                (match_id,)
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
+
+    @staticmethod
+    async def get_valorant_player_stats(player_id: int, game_id: int, monthly: bool = False) -> dict:
+        """Get aggregated Valorant stats for a player."""
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+
+            # Build date filter for monthly stats
+            date_filter = ""
+            if monthly:
+                date_filter = "AND vms.fetched_at >= date('now', '-30 days')"
+
+            # Get aggregate stats
+            query = f"""
+                SELECT
+                    COUNT(*) as total_games,
+                    COALESCE(SUM(vms.kills), 0) as total_kills,
+                    COALESCE(SUM(vms.deaths), 0) as total_deaths,
+                    COALESCE(SUM(vms.assists), 0) as total_assists,
+                    COALESCE(SUM(vms.headshots), 0) as total_headshots,
+                    COALESCE(SUM(vms.bodyshots), 0) as total_bodyshots,
+                    COALESCE(SUM(vms.legshots), 0) as total_legshots,
+                    COALESCE(SUM(vms.score), 0) as total_score
+                FROM valorant_match_stats vms
+                JOIN matches m ON vms.match_id = m.match_id
+                WHERE vms.player_id = ? AND m.game_id = ? {date_filter}
+            """
+            async with db.execute(query, (player_id, game_id)) as cursor:
+                row = await cursor.fetchone()
+                stats = dict(row) if row else {}
+
+            # Calculate HS%
+            total_shots = stats.get('total_headshots', 0) + stats.get('total_bodyshots', 0) + stats.get('total_legshots', 0)
+            stats['hs_percent'] = round((stats.get('total_headshots', 0) / total_shots * 100), 1) if total_shots > 0 else 0
+
+            # Get map stats
+            map_query = f"""
+                SELECT
+                    vms.map_name,
+                    COUNT(*) as games,
+                    SUM(CASE WHEN mp.team = m.winning_team THEN 1 ELSE 0 END) as wins
+                FROM valorant_match_stats vms
+                JOIN matches m ON vms.match_id = m.match_id
+                JOIN match_players mp ON m.match_id = mp.match_id AND mp.player_id = vms.player_id
+                WHERE vms.player_id = ? AND m.game_id = ? AND vms.map_name IS NOT NULL {date_filter}
+                GROUP BY vms.map_name
+                HAVING games >= 3
+                ORDER BY CAST(wins AS FLOAT) / games DESC
+            """
+            async with db.execute(map_query, (player_id, game_id)) as cursor:
+                map_rows = await cursor.fetchall()
+                if map_rows:
+                    best = map_rows[0]
+                    worst = map_rows[-1]
+                    stats['best_map'] = {
+                        'name': best['map_name'],
+                        'games': best['games'],
+                        'winrate': round(best['wins'] / best['games'] * 100, 1)
+                    }
+                    stats['worst_map'] = {
+                        'name': worst['map_name'],
+                        'games': worst['games'],
+                        'winrate': round(worst['wins'] / worst['games'] * 100, 1)
+                    }
+
+            return stats
+
+    @staticmethod
+    async def get_player_teammate_stats(player_id: int, game_id: int, monthly: bool = False) -> dict:
+        """Get teammate win rates for a player."""
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+
+            date_filter = ""
+            if monthly:
+                date_filter = "AND m.decided_at >= date('now', '-30 days')"
+
+            query = f"""
+                SELECT
+                    mp2.player_id as teammate_id,
+                    COUNT(*) as games_together,
+                    SUM(CASE WHEN mp1.team = m.winning_team THEN 1 ELSE 0 END) as wins_together
+                FROM match_players mp1
+                JOIN match_players mp2 ON mp1.match_id = mp2.match_id AND mp1.team = mp2.team
+                JOIN matches m ON mp1.match_id = m.match_id
+                WHERE mp1.player_id = ? AND mp2.player_id != ? AND m.game_id = ?
+                      AND m.winning_team IS NOT NULL {date_filter}
+                GROUP BY mp2.player_id
+                HAVING games_together >= 3
+                ORDER BY CAST(wins_together AS FLOAT) / games_together DESC
+            """
+            async with db.execute(query, (player_id, player_id, game_id)) as cursor:
+                rows = await cursor.fetchall()
+
+            result = {}
+            if rows:
+                best = rows[0]
+                worst = rows[-1]
+                result['best_teammate'] = {
+                    'player_id': best['teammate_id'],
+                    'games': best['games_together'],
+                    'winrate': round(best['wins_together'] / best['games_together'] * 100, 1)
+                }
+                result['cursed_teammate'] = {
+                    'player_id': worst['teammate_id'],
+                    'games': worst['games_together'],
+                    'winrate': round(worst['wins_together'] / worst['games_together'] * 100, 1)
+                }
+            return result
+
+    @staticmethod
+    async def get_player_recent_matches(player_id: int, game_id: int, limit: int = 5) -> List[dict]:
+        """Get recent matches with Valorant stats for a player."""
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            query = """
+                SELECT
+                    m.match_id, m.winning_team, m.decided_at,
+                    mp.team,
+                    vms.kills, vms.deaths, vms.assists, vms.agent, vms.map_name
+                FROM matches m
+                JOIN match_players mp ON m.match_id = mp.match_id
+                LEFT JOIN valorant_match_stats vms ON m.match_id = vms.match_id AND vms.player_id = mp.player_id
+                WHERE mp.player_id = ? AND m.game_id = ? AND m.winning_team IS NOT NULL
+                ORDER BY m.decided_at DESC
+                LIMIT ?
+            """
+            async with db.execute(query, (player_id, game_id, limit)) as cursor:
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
+
+    @staticmethod
+    async def mark_valorant_regular(player_id: int, game_id: int, ign: str, puuid: str = None, region: str = 'na'):
+        """Mark a player as a verified Valorant regular for API lookups."""
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("""
+                INSERT OR REPLACE INTO valorant_player_regulars
+                (player_id, game_id, ign, puuid, region, verified_at)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, (player_id, game_id, ign, puuid, region))
+            await db.commit()
+
+    @staticmethod
+    async def get_valorant_regulars(game_id: int) -> List[dict]:
+        """Get all verified Valorant regulars for a game."""
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM valorant_player_regulars WHERE game_id = ?",
+                (game_id,)
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
+
+# =============================================================================
+# HENRIKDEV API
+# =============================================================================
+
+class HenrikDevAPI:
+    """Wrapper for HenrikDev Valorant API (free tier - 30 req/min)."""
+
+    BASE_URL = "https://api.henrikdev.xyz"
+
+    def __init__(self, bot):
+        self.bot = bot
+        self._session: Optional['aiohttp.ClientSession'] = None
+        self._semaphore = asyncio.Semaphore(25)  # Stay under 30 req/min limit
+        self._last_requests: List[float] = []
+
+    async def _get_session(self):
+        """Get or create aiohttp session."""
+        if self._session is None or self._session.closed:
+            import aiohttp
+            self._session = aiohttp.ClientSession()
+        return self._session
+
+    async def _rate_limit(self):
+        """Enforce rate limiting."""
+        now = asyncio.get_event_loop().time()
+        # Remove requests older than 60 seconds
+        self._last_requests = [t for t in self._last_requests if now - t < 60]
+
+        if len(self._last_requests) >= 25:
+            # Wait until oldest request is 60s old
+            wait_time = 60 - (now - self._last_requests[0])
+            if wait_time > 0:
+                await asyncio.sleep(wait_time)
+
+        self._last_requests.append(now)
+
+    async def _request(self, endpoint: str) -> Optional[dict]:
+        """Make a rate-limited request to the API."""
+        async with self._semaphore:
+            await self._rate_limit()
+            session = await self._get_session()
+            try:
+                async with session.get(f"{self.BASE_URL}{endpoint}") as resp:
+                    if resp.status == 200:
+                        return await resp.json()
+                    elif resp.status == 429:
+                        logger.warning("HenrikDev API rate limited")
+                        return None
+                    else:
+                        logger.warning(f"HenrikDev API error: {resp.status}")
+                        return None
+            except Exception as e:
+                logger.error(f"HenrikDev API request failed: {e}")
+                return None
+
+    async def get_custom_match_history(self, name: str, tag: str, region: str = 'na') -> Optional[List[dict]]:
+        """Fetch recent custom matches for a player."""
+        endpoint = f"/valorant/v1/stored-matches/{region}/{name}/{tag}?mode=custom"
+        data = await self._request(endpoint)
+        if data and data.get('status') == 200:
+            return data.get('data', [])
+        return None
+
+    async def get_match_details(self, match_id: str) -> Optional[dict]:
+        """Get full match details by match ID."""
+        endpoint = f"/valorant/v4/match/{match_id}"
+        data = await self._request(endpoint)
+        if data and data.get('status') == 200:
+            return data.get('data')
+        return None
+
+    async def find_and_fetch_match_stats(
+        self,
+        player_ign: str,
+        our_match_id: int,
+        game_id: int,
+        match_end_time: datetime
+    ) -> Optional[dict]:
+        """
+        Search a player's match history to find stats for our custom match.
+        Returns match stats if found within 30 minutes of match end time.
+        """
+        # Parse IGN (format: Name#Tag)
+        if '#' not in player_ign:
+            return None
+
+        name, tag = player_ign.rsplit('#', 1)
+        matches = await self.get_custom_match_history(name, tag)
+        if not matches:
+            return None
+
+        # Look for a match within 30 minutes of our match end time
+        for match in matches[:5]:  # Only check recent matches
+            match_time_str = match.get('metadata', {}).get('game_start_patched')
+            if not match_time_str:
+                continue
+
+            try:
+                # Parse the match time
+                match_time = datetime.fromisoformat(match_time_str.replace('Z', '+00:00'))
+                time_diff = abs((match_time - match_end_time).total_seconds())
+
+                # If within 30 minutes, this is likely our match
+                if time_diff <= 1800:
+                    valorant_match_id = match.get('metadata', {}).get('matchid')
+                    if valorant_match_id:
+                        details = await self.get_match_details(valorant_match_id)
+                        if details:
+                            return {
+                                'valorant_match_id': valorant_match_id,
+                                'details': details,
+                                'map': details.get('metadata', {}).get('map', {}).get('name')
+                            }
+            except (ValueError, TypeError):
+                continue
+
+        return None
+
+    async def close(self):
+        """Close the aiohttp session."""
+        if self._session and not self._session.closed:
+            await self._session.close()
+
 # =============================================================================
 # VIEWS & MODALS
 # =============================================================================
@@ -1525,6 +2090,27 @@ class ChannelSettingsView(discord.ui.View):
         current_str = current.mention if current else "Not set"
         await interaction.response.send_message(
             f"Current match history channel for **{game.name}**: {current_str}\n\nSelect a new channel:",
+            view=view, ephemeral=True
+        )
+
+    @discord.ui.button(label="Game Channel", style=discord.ButtonStyle.secondary)
+    async def game_channel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        games = await DatabaseHelper.get_all_games()
+        if not games:
+            await interaction.response.send_message("No games configured.", ephemeral=True)
+            return
+        view = discord.ui.View(timeout=60)
+        view.add_item(GameSelectDropdown(games, self.show_game_channel_select))
+        await interaction.response.send_message("Select a game to set game channel:", view=view, ephemeral=True)
+
+    async def show_game_channel_select(self, interaction: discord.Interaction, game_id: int):
+        game = await DatabaseHelper.get_game(game_id)
+        view = GameChannelSelectView(self.cog, game_id)
+        current = interaction.guild.get_channel(game.game_channel_id) if game.game_channel_id else None
+        current_str = current.mention if current else "Not set"
+        await interaction.response.send_message(
+            f"Current game channel for **{game.name}**: {current_str}\n"
+            f"(Match results will be posted here)\n\nSelect a new channel:",
             view=view, ephemeral=True
         )
 
@@ -1877,6 +2463,22 @@ class GameTogglesView(discord.ui.View):
         dm_btn.callback = self.toggle_dm
         self.add_item(dm_btn)
 
+        # Verification topic button
+        topic_label = f"Verify Topic: {self.game.verification_topic or 'None'}"
+        if len(topic_label) > 80:
+            topic_label = topic_label[:77] + "..."
+        topic_btn = discord.ui.Button(
+            label=topic_label,
+            style=discord.ButtonStyle.primary if self.game.verification_topic else discord.ButtonStyle.secondary,
+            row=1
+        )
+        topic_btn.callback = self.set_verification_topic
+        self.add_item(topic_btn)
+
+    async def set_verification_topic(self, interaction: discord.Interaction):
+        modal = VerificationTopicModal(self.cog, self.game, self)
+        await interaction.response.send_modal(modal)
+
     async def toggle_vc(self, interaction: discord.Interaction):
         new_val = not self.game.vc_creation_enabled
         await DatabaseHelper.update_game(self.game.game_id, vc_creation_enabled=int(new_val))
@@ -1897,6 +2499,41 @@ class GameTogglesView(discord.ui.View):
         self.game.dm_ready_up = new_val
         self.update_buttons()
         await interaction.response.edit_message(view=self)
+
+
+class VerificationTopicModal(discord.ui.Modal, title="Set Verification Topic"):
+    topic_name = discord.ui.TextInput(
+        label="Topic Name",
+        placeholder="e.g., tenman-(val) - leave empty to clear",
+        required=False,
+        max_length=100
+    )
+
+    def __init__(self, cog: 'CustomMatch', game: GameConfig, parent_view: GameTogglesView):
+        super().__init__()
+        self.cog = cog
+        self.game = game
+        self.parent_view = parent_view
+        if game.verification_topic:
+            self.topic_name.default = game.verification_topic
+
+    async def on_submit(self, interaction: discord.Interaction):
+        topic = self.topic_name.value.strip() or None
+        await DatabaseHelper.update_game(self.game.game_id, verification_topic=topic)
+        self.game.verification_topic = topic
+        self.parent_view.update_buttons()
+
+        if topic:
+            await interaction.response.send_message(
+                f"Verification topic set to `{topic}`.\n"
+                "Users without the verified role will see a button to open this ticket.",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                "Verification topic cleared.",
+                ephemeral=True
+            )
 
 
 class PenaltySettingsView(discord.ui.View):
@@ -1996,6 +2633,27 @@ class MatchHistoryChannelSelectView(discord.ui.View):
     async def clear_channel(self, interaction: discord.Interaction, button: discord.ui.Button):
         await DatabaseHelper.update_game(self.game_id, match_history_channel_id=None)
         await interaction.response.send_message("Match history channel cleared.", ephemeral=True)
+
+
+class GameChannelSelectView(discord.ui.View):
+    """View for selecting game channel (for match results)."""
+
+    def __init__(self, cog: 'CustomMatch', game_id: int):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.game_id = game_id
+
+    @discord.ui.select(cls=discord.ui.ChannelSelect, placeholder="Select a channel...",
+                       channel_types=[discord.ChannelType.text])
+    async def channel_select(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
+        channel = select.values[0]
+        await DatabaseHelper.update_game(self.game_id, game_channel_id=channel.id)
+        await interaction.response.send_message(f"Game channel set to {channel.mention}.", ephemeral=True)
+
+    @discord.ui.button(label="Clear (No Game Channel)", style=discord.ButtonStyle.secondary)
+    async def clear_channel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await DatabaseHelper.update_game(self.game_id, game_channel_id=None)
+        await interaction.response.send_message("Game channel cleared.", ephemeral=True)
 
 
 # =============================================================================
@@ -2689,6 +3347,83 @@ class AdminPanelView(discord.ui.View):
         modal = SetAdminOffsetModal(self.cog, game_id)
         await interaction.response.send_modal(modal)
 
+    @discord.ui.button(label="Mass Register", style=discord.ButtonStyle.success, row=3)
+    async def mass_register(self, interaction: discord.Interaction, button: discord.ui.Button):
+        games = await DatabaseHelper.get_all_games()
+        if not games:
+            await interaction.response.send_message("No games configured.", ephemeral=True)
+            return
+        view = discord.ui.View(timeout=60)
+        view.add_item(GameSelectDropdown(games, self.do_mass_register))
+        await interaction.response.send_message(
+            "**Mass Register Players**\n"
+            "This will scan all server members and register anyone with an MMR role for the selected game.\n\n"
+            "Select a game:",
+            view=view, ephemeral=True
+        )
+
+    async def do_mass_register(self, interaction: discord.Interaction, game_id: int):
+        await interaction.response.defer(ephemeral=True)
+
+        game = await DatabaseHelper.get_game(game_id)
+        if not game:
+            await interaction.followup.send("Game not found.", ephemeral=True)
+            return
+
+        # Get MMR roles for this game (returns {role_id: mmr_value})
+        role_mmr_map = await DatabaseHelper.get_mmr_roles(game_id)
+        if not role_mmr_map:
+            await interaction.followup.send(
+                f"No MMR roles configured for **{game.name}**. "
+                "Set up MMR roles first in Game Settings.",
+                ephemeral=True
+            )
+            return
+
+        # Scan all members
+        registered = 0
+        skipped = 0
+        errors = []
+
+        for member in interaction.guild.members:
+            if member.bot:
+                continue
+
+            # Find highest MMR role this member has
+            member_mmr = None
+            for role in member.roles:
+                if role.id in role_mmr_map:
+                    role_mmr = role_mmr_map[role.id]
+                    if member_mmr is None or role_mmr > member_mmr:
+                        member_mmr = role_mmr
+
+            if member_mmr is not None:
+                try:
+                    # Check if player already has stats
+                    stats = await DatabaseHelper.get_player_stats(member.id, game_id)
+                    if stats.games_played > 0:
+                        skipped += 1
+                        continue
+
+                    # Set their MMR
+                    stats.mmr = member_mmr
+                    await DatabaseHelper.update_player_stats(stats)
+                    registered += 1
+                except Exception as e:
+                    errors.append(f"{member.display_name}: {e}")
+
+        result = f"**Mass Registration Complete for {game.name}**\n"
+        result += f"✅ Registered: {registered} players\n"
+        result += f"⏭️ Skipped (already have games): {skipped} players\n"
+
+        if errors:
+            result += f"\n⚠️ Errors ({len(errors)}):\n"
+            result += "\n".join(errors[:5])
+            if len(errors) > 5:
+                result += f"\n... and {len(errors) - 5} more"
+
+        await interaction.followup.send(result, ephemeral=True)
+
 
 class ChangeWinnerModal(discord.ui.Modal, title="Change Match Winner"):
     match_id_input = discord.ui.TextInput(
@@ -3363,6 +4098,75 @@ class SwapModal(discord.ui.Modal, title="Swap Players"):
 
 
 # =============================================================================
+# VERIFICATION TICKET VIEW
+# =============================================================================
+
+class VerificationTicketView(discord.ui.View):
+    """View with button to open a verification ticket."""
+
+    def __init__(self, cog: 'CustomMatch', game: 'GameConfig'):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.game = game
+
+    @discord.ui.button(label="Open Verification Ticket", style=discord.ButtonStyle.primary)
+    async def open_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        ticketing_cog = self.cog.bot.get_cog("TicketSystem")
+        if not ticketing_cog:
+            await interaction.response.send_message(
+                "Ticketing system is not available. Please contact an admin.",
+                ephemeral=True
+            )
+            return
+
+        # Load topics and find the verification topic
+        import os
+        import json
+        topics_file = os.path.join("data", "topics.json")
+        if not os.path.exists(topics_file):
+            await interaction.response.send_message(
+                "No ticket topics configured. Please contact an admin.",
+                ephemeral=True
+            )
+            return
+
+        with open(topics_file, "r", encoding="utf-8") as f:
+            topics = json.load(f)
+
+        if self.game.verification_topic not in topics:
+            await interaction.response.send_message(
+                f"Verification topic '{self.game.verification_topic}' not found. Please contact an admin.",
+                ephemeral=True
+            )
+            return
+
+        topic = topics[self.game.verification_topic]
+
+        # Create the ticket channel
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            ch = await ticketing_cog._create_discussion_channel(
+                interaction, topic, interaction.user, is_ticket=True
+            )
+            if ch:
+                await interaction.followup.send(
+                    f"Your verification ticket has been created: {ch.mention}",
+                    ephemeral=True
+                )
+            else:
+                await interaction.followup.send(
+                    "Failed to create ticket. Please contact an admin.",
+                    ephemeral=True
+                )
+        except Exception as e:
+            logger.error(f"Error creating verification ticket: {e}")
+            await interaction.followup.send(
+                f"Error creating ticket: {e}",
+                ephemeral=True
+            )
+
+
+# =============================================================================
 # QUEUE VIEWS
 # =============================================================================
 
@@ -3470,14 +4274,14 @@ class CaptainDraftView(discord.ui.View):
 
 class LeaderboardView(discord.ui.View):
     """Leaderboard toggle view."""
-    
+
     def __init__(self, cog: 'CustomMatch', game_id: int, monthly: bool = True):
         super().__init__(timeout=120)
         self.cog = cog
         self.game_id = game_id
         self.monthly = monthly
         self.update_button()
-    
+
     def update_button(self):
         self.clear_items()
         if self.monthly:
@@ -3486,12 +4290,255 @@ class LeaderboardView(discord.ui.View):
             btn = discord.ui.Button(label="Switch to Monthly", style=discord.ButtonStyle.secondary)
         btn.callback = self.toggle
         self.add_item(btn)
-    
+
     async def toggle(self, interaction: discord.Interaction):
         self.monthly = not self.monthly
         self.update_button()
         embed = await self.cog.build_leaderboard_embed(interaction.guild, self.game_id, self.monthly)
         await interaction.response.edit_message(embed=embed, view=self)
+
+
+class PlayerStatsView(discord.ui.View):
+    """Multi-page player stats view with navigation and time period toggle."""
+
+    PAGE_TITLES = ["Overview", "Map Performance", "Teammates", "Recent Matches"]
+
+    def __init__(self, cog: 'CustomMatch', guild: discord.Guild, player_id: int,
+                 game: 'GameConfig', stats: 'PlayerStats', monthly: bool = True):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.guild = guild
+        self.player_id = player_id
+        self.game = game
+        self.stats = stats
+        self.monthly = monthly
+        self.current_page = 0
+        self.valorant_stats = {}
+        self.teammate_stats = {}
+        self.recent_matches = []
+        self.update_buttons()
+
+    def update_buttons(self):
+        """Update button states based on current page."""
+        self.clear_items()
+
+        # Previous button
+        prev_btn = discord.ui.Button(label="◀", style=discord.ButtonStyle.secondary, disabled=self.current_page == 0)
+        prev_btn.callback = self.prev_page
+        self.add_item(prev_btn)
+
+        # Page indicator
+        page_btn = discord.ui.Button(label=f"{self.current_page + 1}/{len(self.PAGE_TITLES)}", style=discord.ButtonStyle.secondary, disabled=True)
+        self.add_item(page_btn)
+
+        # Next button
+        next_btn = discord.ui.Button(label="▶", style=discord.ButtonStyle.secondary, disabled=self.current_page == len(self.PAGE_TITLES) - 1)
+        next_btn.callback = self.next_page
+        self.add_item(next_btn)
+
+        # Time period toggle
+        period_label = "All Time" if self.monthly else "This Month"
+        period_btn = discord.ui.Button(label=f"View: {period_label}", style=discord.ButtonStyle.primary)
+        period_btn.callback = self.toggle_period
+        self.add_item(period_btn)
+
+    async def load_data(self):
+        """Load Valorant stats and teammate data."""
+        self.valorant_stats = await DatabaseHelper.get_valorant_player_stats(
+            self.player_id, self.game.game_id, self.monthly
+        )
+        self.teammate_stats = await DatabaseHelper.get_player_teammate_stats(
+            self.player_id, self.game.game_id, self.monthly
+        )
+        self.recent_matches = await DatabaseHelper.get_player_recent_matches(
+            self.player_id, self.game.game_id, limit=5
+        )
+
+    async def build_embed(self) -> discord.Embed:
+        """Build the embed for the current page."""
+        member = self.guild.get_member(self.player_id)
+        member_name = member.display_name if member else f"User {self.player_id}"
+        period_text = "This Month" if self.monthly else "All Time"
+
+        embed = discord.Embed(
+            title=f"{member_name} - {self.game.name} Stats",
+            color=COLOR_WHITE
+        )
+        embed.set_footer(text=f"{self.PAGE_TITLES[self.current_page]} • {period_text}")
+
+        if self.current_page == 0:
+            # Overview page
+            winrate = (self.stats.wins / self.stats.games_played * 100) if self.stats.games_played > 0 else 0
+            embed.add_field(name="MMR", value=str(self.stats.mmr), inline=True)
+            embed.add_field(name="Games", value=str(self.stats.games_played), inline=True)
+            embed.add_field(name="Win Rate", value=f"{winrate:.1f}%", inline=True)
+            embed.add_field(name="Wins", value=str(self.stats.wins), inline=True)
+            embed.add_field(name="Losses", value=str(self.stats.losses), inline=True)
+
+            # Add Valorant stats if available
+            if self.valorant_stats.get('total_games', 0) > 0:
+                total_k = self.valorant_stats.get('total_kills', 0)
+                total_d = self.valorant_stats.get('total_deaths', 0)
+                total_a = self.valorant_stats.get('total_assists', 0)
+                hs_pct = self.valorant_stats.get('hs_percent', 0)
+                kd = total_k / total_d if total_d > 0 else total_k
+
+                embed.add_field(name="\u200b", value="**Valorant Stats**", inline=False)
+                embed.add_field(name="K/D/A", value=f"{total_k}/{total_d}/{total_a}", inline=True)
+                embed.add_field(name="K/D", value=f"{kd:.2f}", inline=True)
+                embed.add_field(name="HS%", value=f"{hs_pct:.1f}%", inline=True)
+
+        elif self.current_page == 1:
+            # Map performance page
+            if self.valorant_stats.get('best_map'):
+                best = self.valorant_stats['best_map']
+                embed.add_field(
+                    name="🏆 Best Map",
+                    value=f"**{best['name']}**\n{best['winrate']:.1f}% WR ({best['games']} games)",
+                    inline=True
+                )
+            else:
+                embed.add_field(name="🏆 Best Map", value="Not enough data\n(min 3 games)", inline=True)
+
+            if self.valorant_stats.get('worst_map'):
+                worst = self.valorant_stats['worst_map']
+                embed.add_field(
+                    name="💀 Worst Map",
+                    value=f"**{worst['name']}**\n{worst['winrate']:.1f}% WR ({worst['games']} games)",
+                    inline=True
+                )
+            else:
+                embed.add_field(name="💀 Worst Map", value="Not enough data\n(min 3 games)", inline=True)
+
+        elif self.current_page == 2:
+            # Teammate page
+            if self.teammate_stats.get('best_teammate'):
+                best = self.teammate_stats['best_teammate']
+                best_member = self.guild.get_member(best['player_id'])
+                best_name = best_member.display_name if best_member else f"User {best['player_id']}"
+                embed.add_field(
+                    name="🤝 Best Teammate",
+                    value=f"**{best_name}**\n{best['winrate']:.1f}% WR ({best['games']} games)",
+                    inline=True
+                )
+            else:
+                embed.add_field(name="🤝 Best Teammate", value="Not enough data\n(min 3 games together)", inline=True)
+
+            if self.teammate_stats.get('cursed_teammate'):
+                cursed = self.teammate_stats['cursed_teammate']
+                cursed_member = self.guild.get_member(cursed['player_id'])
+                cursed_name = cursed_member.display_name if cursed_member else f"User {cursed['player_id']}"
+                embed.add_field(
+                    name="💀 Cursed Teammate",
+                    value=f"**{cursed_name}**\n{cursed['winrate']:.1f}% WR ({cursed['games']} games)",
+                    inline=True
+                )
+            else:
+                embed.add_field(name="💀 Cursed Teammate", value="Not enough data\n(min 3 games together)", inline=True)
+
+        elif self.current_page == 3:
+            # Recent matches page
+            if self.recent_matches:
+                lines = []
+                for match in self.recent_matches:
+                    won = match['team'] == match['winning_team']
+                    result = "✅" if won else "❌"
+                    kda = ""
+                    if match.get('kills') is not None:
+                        kda = f" - {match['kills']}/{match['deaths']}/{match['assists']}"
+                        if match.get('agent'):
+                            kda += f" ({match['agent']})"
+                    map_name = f" on {match['map_name']}" if match.get('map_name') else ""
+                    lines.append(f"{result} Match #{match['match_id']}{map_name}{kda}")
+                embed.add_field(name="Recent Matches", value="\n".join(lines), inline=False)
+            else:
+                embed.add_field(name="Recent Matches", value="No completed matches yet", inline=False)
+
+        return embed
+
+    async def prev_page(self, interaction: discord.Interaction):
+        if self.current_page > 0:
+            self.current_page -= 1
+            self.update_buttons()
+            embed = await self.build_embed()
+            await interaction.response.edit_message(embed=embed, view=self)
+        else:
+            await interaction.response.defer()
+
+    async def next_page(self, interaction: discord.Interaction):
+        if self.current_page < len(self.PAGE_TITLES) - 1:
+            self.current_page += 1
+            self.update_buttons()
+            embed = await self.build_embed()
+            await interaction.response.edit_message(embed=embed, view=self)
+        else:
+            await interaction.response.defer()
+
+    async def toggle_period(self, interaction: discord.Interaction):
+        self.monthly = not self.monthly
+        await self.load_data()
+        self.update_buttons()
+        embed = await self.build_embed()
+        await interaction.response.edit_message(embed=embed, view=self)
+
+
+class StatsImageView(discord.ui.View):
+    """View for stats card image with Lifetime/Seasonal toggle."""
+
+    def __init__(self, cog: 'CustomMatch', member: discord.Member, game: 'GameConfig',
+                 images: Dict[str, io.BytesIO]):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.member = member
+        self.game = game
+        self.images = images  # {'lifetime': BytesIO, 'seasonal': BytesIO}
+        self.current = 'seasonal'  # Start with seasonal
+        self.update_buttons()
+
+    def update_buttons(self):
+        self.clear_items()
+
+        lifetime_btn = discord.ui.Button(
+            label="Lifetime",
+            style=discord.ButtonStyle.primary if self.current == 'lifetime' else discord.ButtonStyle.secondary,
+            disabled=self.current == 'lifetime'
+        )
+        lifetime_btn.callback = self.show_lifetime
+        self.add_item(lifetime_btn)
+
+        seasonal_btn = discord.ui.Button(
+            label="Seasonal",
+            style=discord.ButtonStyle.primary if self.current == 'seasonal' else discord.ButtonStyle.secondary,
+            disabled=self.current == 'seasonal'
+        )
+        seasonal_btn.callback = self.show_seasonal
+        self.add_item(seasonal_btn)
+
+    async def show_lifetime(self, interaction: discord.Interaction):
+        self.current = 'lifetime'
+        self.update_buttons()
+        # Reset BytesIO position
+        self.images['lifetime'].seek(0)
+        file = discord.File(self.images['lifetime'], filename='stats_lifetime.png')
+        embed = discord.Embed(
+            title=f"{self.member.display_name} - {self.game.name} Stats",
+            color=COLOR_WHITE
+        )
+        embed.set_image(url="attachment://stats_lifetime.png")
+        await interaction.response.edit_message(embed=embed, attachments=[file], view=self)
+
+    async def show_seasonal(self, interaction: discord.Interaction):
+        self.current = 'seasonal'
+        self.update_buttons()
+        # Reset BytesIO position
+        self.images['seasonal'].seek(0)
+        file = discord.File(self.images['seasonal'], filename='stats_seasonal.png')
+        embed = discord.Embed(
+            title=f"{self.member.display_name} - {self.game.name} Stats",
+            color=COLOR_WHITE
+        )
+        embed.set_image(url="attachment://stats_seasonal.png")
+        await interaction.response.edit_message(embed=embed, attachments=[file], view=self)
 
 
 # =============================================================================
@@ -3500,7 +4547,7 @@ class LeaderboardView(discord.ui.View):
 
 class CustomMatch(commands.Cog):
     """Custom match management system."""
-    
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.queues: Dict[int, QueueState] = {}  # queue_id -> QueueState
@@ -3508,12 +4555,16 @@ class CustomMatch(commands.Cog):
         self.match_timeout_tasks: Dict[int, asyncio.Task] = {}  # match_id -> task
         self.queue_timeout_task: Optional[asyncio.Task] = None
         self.penalty_decay_task: Optional[asyncio.Task] = None
+        self.henrik_api = HenrikDevAPI(bot)
+        self.stats_generator = StatsCardGenerator()
 
     async def cog_load(self):
         await init_db()
         # Start background tasks
         self.queue_timeout_task = asyncio.create_task(self.queue_timeout_check())
         self.penalty_decay_task = asyncio.create_task(self.penalty_decay_check())
+        # Initialize stats card generator
+        await self.stats_generator.initialize()
         logger.info("CustomMatch cog loaded, database initialized.")
 
     async def cog_unload(self):
@@ -3526,6 +4577,10 @@ class CustomMatch(commands.Cog):
             self.queue_timeout_task.cancel()
         if self.penalty_decay_task:
             self.penalty_decay_task.cancel()
+        # Close API session
+        await self.henrik_api.close()
+        # Close stats generator
+        await self.stats_generator.close()
 
     # -------------------------------------------------------------------------
     # BACKGROUND TASKS
@@ -3626,7 +4681,69 @@ class CustomMatch(commands.Cog):
             channel = guild.get_channel(int(channel_id))
             if channel:
                 await channel.send(f"`[{datetime.now().strftime('%H:%M:%S')}]` {message}")
-    
+
+    async def _send_mmr_embed_to_log(
+        self, guild: discord.Guild, game: GameConfig, match_id: int,
+        red_team: List[int], blue_team: List[int], igns: Dict[int, str],
+        red_role: discord.Role, blue_role: discord.Role
+    ):
+        """Send team embed with MMR values to log channel (admin only)."""
+        channel_id = await DatabaseHelper.get_config("log_channel_id")
+        if not channel_id:
+            return
+
+        channel = guild.get_channel(int(channel_id))
+        if not channel:
+            return
+
+        embed = discord.Embed(
+            title=f"Match #{match_id} Teams - {game.name}",
+            description="Team compositions with MMR values (admin view)",
+            color=COLOR_NEUTRAL
+        )
+
+        # Build red team lines with MMR
+        red_lines = []
+        red_total_mmr = 0
+        for pid in red_team:
+            stats = await DatabaseHelper.get_player_stats(pid, game.game_id)
+            mmr = stats.effective_mmr
+            red_total_mmr += mmr
+            if pid in igns:
+                line = f"`{igns[pid]}` [{mmr} MMR]"
+            else:
+                line = f"<@{pid}> [{mmr} MMR]"
+            red_lines.append(line)
+
+        # Build blue team lines with MMR
+        blue_lines = []
+        blue_total_mmr = 0
+        for pid in blue_team:
+            stats = await DatabaseHelper.get_player_stats(pid, game.game_id)
+            mmr = stats.effective_mmr
+            blue_total_mmr += mmr
+            if pid in igns:
+                line = f"`{igns[pid]}` [{mmr} MMR]"
+            else:
+                line = f"<@{pid}> [{mmr} MMR]"
+            blue_lines.append(line)
+
+        red_avg = red_total_mmr // len(red_team) if red_team else 0
+        blue_avg = blue_total_mmr // len(blue_team) if blue_team else 0
+
+        embed.add_field(
+            name=f"{red_role.name} (Avg: {red_avg})",
+            value="\n".join(red_lines) or "None",
+            inline=True
+        )
+        embed.add_field(
+            name=f"{blue_role.name} (Avg: {blue_avg})",
+            value="\n".join(blue_lines) or "None",
+            inline=True
+        )
+
+        await channel.send(embed=embed)
+
     async def get_next_role_number(self, guild: discord.Guild, prefix: str) -> int:
         """Get the next available role number (e.g., Blue1, Blue2)."""
         existing = [r for r in guild.roles if r.name.startswith(prefix)]
@@ -3792,10 +4909,19 @@ class CustomMatch(commands.Cog):
         # Check verified role (if required)
         if game.queue_role_required and game.verified_role_id:
             if not any(r.id == game.verified_role_id for r in user.roles):
-                await interaction.response.send_message(
-                    "You need the verified role to queue for this game.",
-                    ephemeral=True
-                )
+                if game.verification_topic:
+                    view = VerificationTicketView(self, game)
+                    await interaction.response.send_message(
+                        "You need the verified role to queue for this game.\n"
+                        "Click below to open a verification ticket.",
+                        view=view,
+                        ephemeral=True
+                    )
+                else:
+                    await interaction.response.send_message(
+                        "You need the verified role to queue for this game.",
+                        ephemeral=True
+                    )
                 return
         
         # Check if already in this queue
@@ -4093,9 +5219,9 @@ class CustomMatch(commands.Cog):
             short_id=match_short_id
         )
 
-        # Create team roles using the match short_id
-        red_role = await guild.create_role(name=f"Red {match_short_id}", color=discord.Color.red())
-        blue_role = await guild.create_role(name=f"Blue {match_short_id}", color=discord.Color.blue())
+        # Create team roles using the match short_id (mentionable so players can ping their team)
+        red_role = await guild.create_role(name=f"Red {match_short_id}", color=discord.Color.red(), mentionable=True)
+        blue_role = await guild.create_role(name=f"Blue {match_short_id}", color=discord.Color.blue(), mentionable=True)
 
         await DatabaseHelper.update_match(
             match_id,
@@ -4103,21 +5229,10 @@ class CustomMatch(commands.Cog):
             blue_role_id=blue_role.id
         )
         
-        # Update queue embed to "ongoing"
-        embed = discord.Embed(
-            title=f"{game.name} - Match in Progress",
-            description=f"Match #{match_id}",
-            color=COLOR_NEUTRAL
-        )
-        embed.add_field(
-            name="Teams",
-            value=f"{red_role.mention} vs {blue_role.mention}",
-            inline=False
-        )
-        
+        # Delete the queue message now that match has started
         try:
             msg = await channel.fetch_message(queue_state.message_id)
-            await msg.edit(embed=embed, view=None)
+            await msg.delete()
         except:
             pass
         
@@ -4266,32 +5381,45 @@ class CustomMatch(commands.Cog):
         picks_needed = len(available)
         current_picker = "red"  # Red picks first
         pick_count = {"red": 0, "blue": 0}
-        
+
+        # Fetch IGNs for display (show only IGN when available)
+        igns = await DatabaseHelper.get_match_igns(match_id)
+
+        def format_player(pid: int, is_captain: bool = False) -> str:
+            """Format player display - show only IGN when available."""
+            if pid in igns:
+                line = f"`{igns[pid]}`"
+            else:
+                line = f"<@{pid}>"
+            if is_captain:
+                line += " (C)"
+            return line
+
         async def update_draft_embed():
             embed = discord.Embed(
                 title=f"{game.name} - Captain Draft",
                 color=COLOR_NEUTRAL
             )
-            
-            red_list = "\n".join([f"• <@{pid}>" + (" (C)" if pid == red_captain else "") 
+
+            red_list = "\n".join([f"• {format_player(pid, pid == red_captain)}"
                                   for pid in red_team])
-            blue_list = "\n".join([f"• <@{pid}>" + (" (C)" if pid == blue_captain else "") 
+            blue_list = "\n".join([f"• {format_player(pid, pid == blue_captain)}"
                                    for pid in blue_team])
-            
+
             embed.add_field(name=f"Red Team ({red_role.mention})", value=red_list or "None", inline=True)
             embed.add_field(name=f"Blue Team ({blue_role.mention})", value=blue_list or "None", inline=True)
-            
+
             if available:
-                avail_list = "\n".join([f"• <@{pid}>" for pid in available])
+                avail_list = "\n".join([f"• {format_player(pid)}" for pid in available])
                 embed.add_field(name="Available", value=avail_list, inline=False)
-                
+
                 if current_picker == "red":
-                    embed.add_field(name="Now Picking", value=f"<@{red_captain}> (Red)", inline=False)
+                    embed.add_field(name="Now Picking", value=f"{format_player(red_captain)} (Red)", inline=False)
                 else:
-                    embed.add_field(name="Now Picking", value=f"<@{blue_captain}> (Blue)", inline=False)
+                    embed.add_field(name="Now Picking", value=f"{format_player(blue_captain)} (Blue)", inline=False)
             else:
                 embed.add_field(name="Status", value="Draft complete!", inline=False)
-            
+
             return embed
         
         embed = await update_draft_embed()
@@ -4451,23 +5579,25 @@ class CustomMatch(commands.Cog):
         red_captain = next((p["player_id"] for p in players if p["team"] == "red" and p["was_captain"]), None)
         blue_captain = next((p["player_id"] for p in players if p["team"] == "blue" and p["was_captain"]), None)
 
-        # Build team lists with IGNs
+        # Build team lists with IGNs (show only IGN when available)
         red_lines = []
         for pid in red_team:
-            line = f"<@{pid}>"
+            if pid in igns:
+                line = f"`{igns[pid]}`"
+            else:
+                line = f"<@{pid}>"
             if pid == red_captain:
                 line += " (C)"
-            if pid in igns:
-                line += f" - `{igns[pid]}`"
             red_lines.append(line)
 
         blue_lines = []
         for pid in blue_team:
-            line = f"<@{pid}>"
+            if pid in igns:
+                line = f"`{igns[pid]}`"
+            else:
+                line = f"<@{pid}>"
             if pid == blue_captain:
                 line += " (C)"
-            if pid in igns:
-                line += f" - `{igns[pid]}`"
             blue_lines.append(line)
 
         embed.add_field(name="Red Team", value="\n".join(red_lines), inline=True)
@@ -4512,6 +5642,9 @@ class CustomMatch(commands.Cog):
         )
 
         await match_channel.send(f"{red_role.mention} vs {blue_role.mention}", embed=embed)
+
+        # Send MMR embed to log channel (admin view)
+        await self._send_mmr_embed_to_log(guild, game, match_id, red_team, blue_team, igns, red_role, blue_role)
 
         # Start map vote if mapvote cog is loaded and game is configured
         mapvote_cog = self.bot.get_cog("mapvote")
@@ -4729,11 +5862,21 @@ class CustomMatch(commands.Cog):
             self.match_timeout_tasks[match_id].cancel()
             del self.match_timeout_tasks[match_id]
 
+        # Fetch Valorant stats for Valorant games (do this before history embed so stats are available)
+        if 'valorant' in game.name.lower():
+            await self.fetch_valorant_match_stats(match_id, game, players)
+
         # Send match history embed if configured
         if game.match_history_channel_id:
             history_channel = guild.get_channel(game.match_history_channel_id)
             if history_channel:
                 await self.send_match_history_embed(history_channel, game, match_id, players, winning_team)
+
+        # Send winner/loser embed to game channel if configured
+        if game.game_channel_id:
+            game_channel = guild.get_channel(game.game_channel_id)
+            if game_channel:
+                await self._send_winner_loser_embed(game_channel, game, match_id, players, winning_team)
 
         # Clean up
         await self.cleanup_match(guild, match)
@@ -4743,7 +5886,112 @@ class CustomMatch(commands.Cog):
             guild,
             f"Match #{match_id} ({game.name}): {winning_team.value.capitalize()} team wins!"
         )
-    
+
+    async def fetch_valorant_match_stats(self, match_id: int, game: GameConfig, players: List[dict]):
+        """Fetch Valorant stats from HenrikDev API for a completed match."""
+        try:
+            match_end_time = datetime.now(timezone.utc)
+            igns = await DatabaseHelper.get_match_igns(match_id)
+
+            # Get list of regulars to prioritize
+            regulars = await DatabaseHelper.get_valorant_regulars(game.game_id)
+            regular_pids = {r['player_id'] for r in regulars}
+
+            # Sort players - regulars first
+            sorted_players = sorted(players, key=lambda p: p['player_id'] not in regular_pids)
+
+            valorant_match_data = None
+            found_player_ign = None
+
+            # Try to find the match using any player's history
+            for player in sorted_players:
+                pid = player['player_id']
+                if pid not in igns:
+                    continue
+
+                player_ign = igns[pid]
+                if '#' not in player_ign:
+                    continue
+
+                match_data = await self.henrik_api.find_and_fetch_match_stats(
+                    player_ign, match_id, game.game_id, match_end_time
+                )
+
+                if match_data:
+                    valorant_match_data = match_data
+                    found_player_ign = player_ign
+                    # Mark this player as a reliable regular
+                    await DatabaseHelper.mark_valorant_regular(pid, game.game_id, player_ign)
+                    break
+
+            if not valorant_match_data:
+                logger.info(f"Could not find Valorant match data for match #{match_id}")
+                return
+
+            # Extract stats for all players in the match
+            details = valorant_match_data['details']
+            valorant_match_id = valorant_match_data['valorant_match_id']
+            map_name = valorant_match_data.get('map')
+
+            # Build a lookup of Valorant player data by normalized IGN
+            val_players = {}
+            for team_data in details.get('players', []):
+                for vp in team_data if isinstance(team_data, list) else [team_data]:
+                    if not isinstance(vp, dict):
+                        continue
+                    vp_name = vp.get('name', '')
+                    vp_tag = vp.get('tag', '')
+                    if vp_name and vp_tag:
+                        key = f"{vp_name}#{vp_tag}".lower()
+                        val_players[key] = vp
+
+            # Also check 'all_players' format if different structure
+            if 'all_players' in details:
+                for vp in details['all_players']:
+                    if isinstance(vp, dict):
+                        vp_name = vp.get('name', '')
+                        vp_tag = vp.get('tag', '')
+                        if vp_name and vp_tag:
+                            key = f"{vp_name}#{vp_tag}".lower()
+                            val_players[key] = vp
+
+            # Save stats for each player in our match
+            for player in players:
+                pid = player['player_id']
+                if pid not in igns:
+                    continue
+
+                player_ign = igns[pid]
+                ign_key = player_ign.lower()
+
+                if ign_key not in val_players:
+                    continue
+
+                vp = val_players[ign_key]
+                stats = vp.get('stats', {})
+                agent = vp.get('agent', {}).get('name') if isinstance(vp.get('agent'), dict) else vp.get('agent')
+
+                await DatabaseHelper.save_valorant_match_stats(
+                    match_id=match_id,
+                    valorant_match_id=valorant_match_id,
+                    player_id=pid,
+                    ign=player_ign,
+                    agent=agent,
+                    kills=stats.get('kills', 0),
+                    deaths=stats.get('deaths', 0),
+                    assists=stats.get('assists', 0),
+                    headshots=stats.get('headshots', 0),
+                    bodyshots=stats.get('bodyshots', 0),
+                    legshots=stats.get('legshots', 0),
+                    score=stats.get('score', 0),
+                    map_name=map_name
+                )
+
+            logger.info(f"Saved Valorant stats for match #{match_id}")
+
+        except Exception as e:
+            logger.error(f"Error fetching Valorant stats for match #{match_id}: {e}")
+
     async def cancel_match(self, guild: discord.Guild, match_id: int):
         """Cancel a match without updating stats."""
         match = await DatabaseHelper.get_match(match_id)
@@ -4815,30 +6063,40 @@ class CustomMatch(commands.Cog):
         """Send match history embed to configured channel."""
         igns = await DatabaseHelper.get_match_igns(match_id)
 
+        # Get Valorant stats if available
+        val_stats = await DatabaseHelper.get_valorant_match_stats(match_id)
+        val_stats_by_player = {s['player_id']: s for s in val_stats}
+
         # Get team members
         red_players = [p for p in players if p["team"] == "red"]
         blue_players = [p for p in players if p["team"] == "blue"]
 
-        # Build team lists with IGNs
-        red_lines = []
-        for p in red_players:
+        def format_player_line(p: dict) -> str:
+            """Format a player line with IGN and optional Valorant stats."""
             pid = p["player_id"]
-            line = f"<@{pid}>"
+            if pid in igns:
+                line = f"`{igns[pid]}`"
+            else:
+                line = f"<@{pid}>"
             if p.get("was_captain"):
                 line += " (C)"
-            if pid in igns:
-                line += f" - `{igns[pid]}`"
-            red_lines.append(line)
 
-        blue_lines = []
-        for p in blue_players:
-            pid = p["player_id"]
-            line = f"<@{pid}>"
-            if p.get("was_captain"):
-                line += " (C)"
-            if pid in igns:
-                line += f" - `{igns[pid]}`"
-            blue_lines.append(line)
+            # Add Valorant stats if available
+            if pid in val_stats_by_player:
+                vs = val_stats_by_player[pid]
+                kda = f"{vs['kills']}/{vs['deaths']}/{vs['assists']}"
+                total_shots = vs['headshots'] + vs['bodyshots'] + vs['legshots']
+                hs_pct = round(vs['headshots'] / total_shots * 100) if total_shots > 0 else 0
+                agent = vs.get('agent', '')
+                if agent:
+                    line += f" - {agent}"
+                line += f" | {kda} ({hs_pct}% HS)"
+
+            return line
+
+        # Build team lists with IGNs and stats
+        red_lines = [format_player_line(p) for p in red_players]
+        blue_lines = [format_player_line(p) for p in blue_players]
 
         # Create embed
         winner_color = COLOR_RED if winning_team == Team.RED else COLOR_BLUE
@@ -4847,6 +6105,10 @@ class CustomMatch(commands.Cog):
             color=winner_color,
             timestamp=datetime.now(timezone.utc)
         )
+
+        # Add map name if available from Valorant stats
+        if val_stats and val_stats[0].get('map_name'):
+            embed.description = f"**Map:** {val_stats[0]['map_name']}"
 
         # Add winner indicator
         red_header = "Red Team" + (" ★ WINNER" if winning_team == Team.RED else "")
@@ -4858,12 +6120,123 @@ class CustomMatch(commands.Cog):
         embed.set_footer(text=f"Match ID: {match_id}")
 
         await channel.send(embed=embed)
-    
+
+    async def _send_winner_loser_embed(
+        self, channel: discord.TextChannel, game: GameConfig,
+        match_id: int, players: List[dict], winning_team: Team
+    ):
+        """Send match result embed to configured game channel."""
+        igns = await DatabaseHelper.get_match_igns(match_id)
+
+        # Separate by team
+        red_players = [p for p in players if p["team"] == "red"]
+        blue_players = [p for p in players if p["team"] == "blue"]
+
+        def format_player(p: dict) -> str:
+            pid = p["player_id"]
+            if pid in igns:
+                return f"`{igns[pid]}`"
+            return f"<@{pid}>"
+
+        red_lines = [format_player(p) for p in red_players]
+        blue_lines = [format_player(p) for p in blue_players]
+
+        # Determine winner/loser
+        if winning_team == Team.RED:
+            winner_name = "Red Team"
+            winner_players = "\n".join(red_lines) or "None"
+            loser_name = "Blue Team"
+            loser_players = "\n".join(blue_lines) or "None"
+        else:
+            winner_name = "Blue Team"
+            winner_players = "\n".join(blue_lines) or "None"
+            loser_name = "Red Team"
+            loser_players = "\n".join(red_lines) or "None"
+
+        embed = discord.Embed(
+            title=f"{game.name} Match #{match_id} - Result",
+            color=COLOR_SUCCESS,
+            timestamp=datetime.now(timezone.utc)
+        )
+
+        embed.add_field(
+            name=f"WINNER - {winner_name}",
+            value=winner_players,
+            inline=True
+        )
+        embed.add_field(
+            name=f"LOSER - {loser_name}",
+            value=loser_players,
+            inline=True
+        )
+
+        await channel.send(embed=embed)
+
     # -------------------------------------------------------------------------
     # LEADERBOARD & STATS
     # -------------------------------------------------------------------------
-    
-    async def build_leaderboard_embed(self, guild: discord.Guild, game_id: int, 
+
+    async def _gather_stats_data(
+        self, member: discord.Member, game: GameConfig, monthly: bool
+    ) -> dict:
+        """Gather stats data for image generation."""
+        stats = await DatabaseHelper.get_player_stats(member.id, game.game_id)
+        valorant_stats = await DatabaseHelper.get_valorant_player_stats(
+            member.id, game.game_id, monthly
+        )
+        recent_matches = await DatabaseHelper.get_player_recent_matches(
+            member.id, game.game_id, limit=5
+        )
+
+        now = datetime.now(timezone.utc)
+        if monthly:
+            period_title = f"Season {now.strftime('%B %Y')} Stats"
+        else:
+            period_title = "Lifetime Stats"
+
+        # Build recent matches list
+        formatted_matches = []
+        for match in recent_matches:
+            won = match.get('team') == match.get('winning_team')
+            formatted_matches.append({
+                'won': won,
+                'kills': match.get('kills'),
+                'deaths': match.get('deaths'),
+                'assists': match.get('assists'),
+                'agent': match.get('agent'),
+                'map_name': match.get('map_name')
+            })
+
+        # Get favorite agents
+        favorite_agents = []
+        if valorant_stats.get('agent_stats'):
+            sorted_agents = sorted(
+                valorant_stats['agent_stats'].items(),
+                key=lambda x: x[1],
+                reverse=True
+            )
+            favorite_agents = [
+                {'name': name, 'count': count}
+                for name, count in sorted_agents[:5]
+            ]
+
+        return {
+            'player_name': member.display_name,
+            'avatar_url': member.display_avatar.url,
+            'period_title': period_title,
+            'mmr': stats.effective_mmr,
+            'games_played': stats.games_played,
+            'wins': stats.wins,
+            'losses': stats.losses,
+            'total_kills': valorant_stats.get('total_kills', 0),
+            'total_deaths': valorant_stats.get('total_deaths', 0),
+            'total_assists': valorant_stats.get('total_assists', 0),
+            'hs_percent': valorant_stats.get('hs_percent', 0),
+            'recent_matches': formatted_matches,
+            'favorite_agents': favorite_agents
+        }
+
+    async def build_leaderboard_embed(self, guild: discord.Guild, game_id: int,
                                        monthly: bool = True) -> discord.Embed:
         """Build a leaderboard embed."""
         game = await DatabaseHelper.get_game(game_id)
@@ -5063,9 +6436,115 @@ class CustomMatch(commands.Cog):
     @app_commands.describe(user="The user to view stats for (defaults to yourself)")
     async def stats_cmd(self, interaction: discord.Interaction, user: discord.Member = None):
         target = user or interaction.user
-        embed = await self.build_stats_embed(interaction.guild, target)
-        await interaction.response.send_message(embed=embed)
-    
+        games = await DatabaseHelper.get_all_games()
+
+        if not games:
+            await interaction.response.send_message("No games configured.", ephemeral=True)
+            return
+
+        async def show_player_stats(inter: discord.Interaction, game_id: int):
+            game = await DatabaseHelper.get_game(game_id)
+            if not game:
+                await inter.response.send_message("Game not found.", ephemeral=True)
+                return
+
+            # Try to use image generation if available
+            if self.stats_generator.browser:
+                await inter.response.defer()
+
+                # Generate both seasonal and lifetime images
+                seasonal_data = await self._gather_stats_data(target, game, monthly=True)
+                lifetime_data = await self._gather_stats_data(target, game, monthly=False)
+
+                seasonal_image = await self.stats_generator.generate_stats_image(seasonal_data)
+                lifetime_image = await self.stats_generator.generate_stats_image(lifetime_data)
+
+                if seasonal_image and lifetime_image:
+                    images = {'seasonal': seasonal_image, 'lifetime': lifetime_image}
+                    view = StatsImageView(self, target, game, images)
+
+                    # Show seasonal first
+                    images['seasonal'].seek(0)
+                    file = discord.File(images['seasonal'], filename='stats_seasonal.png')
+                    embed = discord.Embed(
+                        title=f"{target.display_name} - {game.name} Stats",
+                        color=COLOR_WHITE
+                    )
+                    embed.set_image(url="attachment://stats_seasonal.png")
+                    await inter.followup.send(embed=embed, file=file, view=view)
+                    return
+
+            # Fallback to embed-based stats
+            stats = await DatabaseHelper.get_player_stats(target.id, game.game_id)
+            view = PlayerStatsView(self, inter.guild, target.id, game, stats, monthly=True)
+            await view.load_data()
+            embed = await view.build_embed()
+            if inter.response.is_done():
+                await inter.followup.send(embed=embed, view=view)
+            else:
+                await inter.response.send_message(embed=embed, view=view)
+
+        if len(games) == 1:
+            await show_player_stats(interaction, games[0].game_id)
+        else:
+            view = discord.ui.View(timeout=60)
+            view.add_item(GameSelectDropdown(games, show_player_stats))
+            await interaction.response.send_message("Select a game:", view=view, ephemeral=True)
+
+    @cm_group.command(name="reverse", description="Reverse a match result (CM Admins)")
+    @app_commands.describe(match_id="The match ID to reverse")
+    async def reverse_cmd(self, interaction: discord.Interaction, match_id: int):
+        # Check CM admin role
+        if not await self.is_cm_admin(interaction.user):
+            await interaction.response.send_message("You need the CM Admin role.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        # Get the match
+        match = await DatabaseHelper.get_completed_match(match_id)
+        if not match:
+            await interaction.followup.send(f"Match #{match_id} not found.", ephemeral=True)
+            return
+
+        if not match.get("winning_team"):
+            await interaction.followup.send(f"Match #{match_id} has no recorded winner to reverse.", ephemeral=True)
+            return
+
+        old_winner = match["winning_team"]
+        new_winner = "blue" if old_winner == "red" else "red"
+        game = await DatabaseHelper.get_game(match["game_id"])
+
+        # Get players for rivalry reversal
+        players = await DatabaseHelper.get_match_players(match_id)
+        old_winners = [p["player_id"] for p in players if p["team"] == old_winner]
+        old_losers = [p["player_id"] for p in players if p["team"] != old_winner]
+
+        # Reverse the match (MMR and W/L stats)
+        success = await DatabaseHelper.reverse_match_result(match_id)
+        if not success:
+            await interaction.followup.send(f"Failed to reverse match #{match_id}. No MMR history found.", ephemeral=True)
+            return
+
+        # Reverse rivalries - old winners vs old losers
+        for old_winner_id in old_winners:
+            for old_loser_id in old_losers:
+                await DatabaseHelper.reverse_rivalry(old_winner_id, old_loser_id, game.game_id)
+
+        # Re-finalize with the new winner
+        await self.finalize_match(interaction.guild, match_id, Team(new_winner))
+
+        await self.log_action(
+            interaction.guild,
+            f"Match #{match_id} result reversed by {interaction.user.mention}: {old_winner.capitalize()} → {new_winner.capitalize()}"
+        )
+
+        await interaction.followup.send(
+            f"Match #{match_id} reversed. New winner: **{new_winner.capitalize()} Team**\n"
+            f"MMR, W/L stats, and rivalries have been updated.",
+            ephemeral=True
+        )
+
     @app_commands.command(name="win", description="Report the match winner")
     async def win_cmd(self, interaction: discord.Interaction):
         # Check if in a match channel
@@ -5190,12 +6669,6 @@ class CustomMatch(commands.Cog):
 
         # Delete all player stats (permanently removed from leaderboards)
         await DatabaseHelper.delete_player_stats(member.id)
-
-        # Log the removal
-        await self.log_action(
-            member.guild,
-            f"{member.display_name} ({member.id}) left the server - all stats deleted"
-        )
     
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):

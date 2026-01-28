@@ -460,6 +460,11 @@ CREATE TABLE IF NOT EXISTS valorant_player_regulars (
     verified_at TIMESTAMP,
     PRIMARY KEY (player_id, game_id)
 );
+
+-- Mod roles that get access to all match channels
+CREATE TABLE IF NOT EXISTS mod_roles (
+    role_id INTEGER PRIMARY KEY
+);
 """
 
 async def init_db():
@@ -491,6 +496,8 @@ async def migrate_db():
             ("banner_url", "TEXT"),
             ("verification_topic", "TEXT"),
             ("game_channel_id", "INTEGER"),
+            ("ready_loading_emoji", "TEXT DEFAULT '<a:loading:1234567890>'"),
+            ("ready_done_emoji", "TEXT DEFAULT '<:check:1234567890>'"),
         ]
 
         for col_name, col_def in game_migrations:
@@ -507,6 +514,7 @@ async def migrate_db():
             ("red_vc_id", "INTEGER"),
             ("blue_vc_id", "INTEGER"),
             ("short_id", "TEXT"),
+            ("valorant_match_id", "TEXT"),
         ]
 
         for col_name, col_def in match_migrations:
@@ -556,6 +564,8 @@ class GameConfig:
     banner_url: Optional[str] = None
     verification_topic: Optional[str] = None
     game_channel_id: Optional[int] = None
+    ready_loading_emoji: str = "<a:loading:1234567890>"
+    ready_done_emoji: str = "<:check:1234567890>"
 
 @dataclass
 class PlayerIGN:
@@ -722,6 +732,8 @@ class DatabaseHelper:
             banner_url=row["banner_url"] if "banner_url" in row.keys() else None,
             verification_topic=row["verification_topic"] if "verification_topic" in row.keys() else None,
             game_channel_id=row["game_channel_id"] if "game_channel_id" in row.keys() else None,
+            ready_loading_emoji=row["ready_loading_emoji"] if "ready_loading_emoji" in row.keys() and row["ready_loading_emoji"] else "<a:loading:1234567890>",
+            ready_done_emoji=row["ready_done_emoji"] if "ready_done_emoji" in row.keys() and row["ready_done_emoji"] else "<:check:1234567890>",
         )
 
     @staticmethod
@@ -1759,6 +1771,45 @@ class DatabaseHelper:
                 rows = await cursor.fetchall()
                 return [dict(row) for row in rows]
 
+    @staticmethod
+    async def get_mod_roles() -> List[int]:
+        """Get all mod role IDs."""
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute("SELECT role_id FROM mod_roles") as cursor:
+                rows = await cursor.fetchall()
+                return [row[0] for row in rows]
+
+    @staticmethod
+    async def add_mod_role(role_id: int):
+        """Add a mod role."""
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "INSERT OR IGNORE INTO mod_roles (role_id) VALUES (?)",
+                (role_id,)
+            )
+            await db.commit()
+
+    @staticmethod
+    async def remove_mod_role(role_id: int):
+        """Remove a mod role."""
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "DELETE FROM mod_roles WHERE role_id = ?",
+                (role_id,)
+            )
+            await db.commit()
+
+    @staticmethod
+    async def get_match_valorant_id(match_id: int) -> Optional[str]:
+        """Get the Valorant match ID for a custom match (if available)."""
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT valorant_match_id FROM valorant_match_stats WHERE match_id = ? LIMIT 1",
+                (match_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                return row[0] if row else None
+
 # =============================================================================
 # HENRIKDEV API
 # =============================================================================
@@ -2191,6 +2242,35 @@ class SettingsView(discord.ui.View):
         view = BlacklistActionView(self.cog)
         await interaction.response.send_message("Select blacklist action:", view=view, ephemeral=True)
 
+    @discord.ui.button(label="Mod Roles", style=discord.ButtonStyle.secondary, row=2)
+    async def mod_roles_menu(self, interaction: discord.Interaction, button: discord.ui.Button):
+        mod_role_ids = await DatabaseHelper.get_mod_roles()
+        lines = ["**Mod Roles**\n", "These roles get permission to type and manage messages in all match channels.\n"]
+        if mod_role_ids:
+            for role_id in mod_role_ids:
+                role = interaction.guild.get_role(role_id)
+                role_name = role.name if role else f"Unknown ({role_id})"
+                lines.append(f"• {role_name}")
+        else:
+            lines.append("No mod roles configured.")
+        view = ModRolesView(self.cog)
+        await interaction.response.send_message("\n".join(lines), view=view, ephemeral=True)
+
+    @discord.ui.button(label="Ready Emojis", style=discord.ButtonStyle.secondary, row=2)
+    async def ready_emojis_menu(self, interaction: discord.Interaction, button: discord.ui.Button):
+        games = await DatabaseHelper.get_all_games()
+        if not games:
+            await interaction.response.send_message("No games configured.", ephemeral=True)
+            return
+        view = discord.ui.View(timeout=60)
+        view.add_item(GameSelectDropdown(games, self.show_ready_emojis_modal))
+        await interaction.response.send_message("Select a game to configure ready emojis:", view=view, ephemeral=True)
+
+    async def show_ready_emojis_modal(self, interaction: discord.Interaction, game_id: int):
+        game = await DatabaseHelper.get_game(game_id)
+        modal = ReadyEmojisModal(self.cog, game)
+        await interaction.response.send_modal(modal)
+
     # Row 3: Game settings
     @discord.ui.button(label="Game Toggles", style=discord.ButtonStyle.primary, row=3)
     async def game_toggles(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2230,6 +2310,177 @@ class SettingsView(discord.ui.View):
         embed.add_field(name="3rd+ Offense", value=f"{game.penalty_3rd_minutes} min", inline=True)
         embed.add_field(name="Decay Period", value=f"{game.penalty_decay_days} days", inline=True)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    @discord.ui.button(label="Mass Register", style=discord.ButtonStyle.success, row=4)
+    async def mass_register(self, interaction: discord.Interaction, button: discord.ui.Button):
+        games = await DatabaseHelper.get_all_games()
+        if not games:
+            await interaction.response.send_message("No games configured.", ephemeral=True)
+            return
+        view = discord.ui.View(timeout=60)
+        view.add_item(GameSelectDropdown(games, self.do_mass_register))
+        await interaction.response.send_message(
+            "**Mass Register Players**\n"
+            "This will scan all server members and register anyone with an MMR role for the selected game.\n\n"
+            "Select a game:",
+            view=view, ephemeral=True
+        )
+
+    async def do_mass_register(self, interaction: discord.Interaction, game_id: int):
+        await interaction.response.defer(ephemeral=True)
+
+        game = await DatabaseHelper.get_game(game_id)
+        if not game:
+            await interaction.followup.send("Game not found.", ephemeral=True)
+            return
+
+        # Get MMR roles for this game (returns {role_id: mmr_value})
+        role_mmr_map = await DatabaseHelper.get_mmr_roles(game_id)
+        if not role_mmr_map:
+            await interaction.followup.send(
+                f"No MMR roles configured for **{game.name}**. "
+                "Set up MMR roles first in Game Settings.",
+                ephemeral=True
+            )
+            return
+
+        # Scan all members
+        registered = 0
+        skipped = 0
+        errors = []
+
+        for member in interaction.guild.members:
+            if member.bot:
+                continue
+
+            # Find highest MMR role this member has
+            member_mmr = None
+            for role in member.roles:
+                if role.id in role_mmr_map:
+                    role_mmr = role_mmr_map[role.id]
+                    if member_mmr is None or role_mmr > member_mmr:
+                        member_mmr = role_mmr
+
+            if member_mmr is not None:
+                try:
+                    # Check if player already has stats
+                    stats = await DatabaseHelper.get_player_stats(member.id, game_id)
+                    if stats.games_played > 0:
+                        skipped += 1
+                        continue
+
+                    # Set their MMR
+                    stats.mmr = member_mmr
+                    await DatabaseHelper.update_player_stats(stats)
+                    registered += 1
+                except Exception as e:
+                    errors.append(f"{member.display_name}: {e}")
+
+        result = f"**Mass Registration Complete for {game.name}**\n"
+        result += f"Registered: {registered} players\n"
+        result += f"Skipped (already have games): {skipped} players\n"
+
+        if errors:
+            result += f"\nErrors ({len(errors)}):\n"
+            result += "\n".join(errors[:5])
+            if len(errors) > 5:
+                result += f"\n... and {len(errors) - 5} more"
+
+        await interaction.followup.send(result, ephemeral=True)
+
+
+class ModRolesView(discord.ui.View):
+    """View for managing mod roles."""
+
+    def __init__(self, cog: 'CustomMatch'):
+        super().__init__(timeout=120)
+        self.cog = cog
+
+    @discord.ui.button(label="Add Mod Role", style=discord.ButtonStyle.success)
+    async def add_mod_role(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = AddModRoleSelectView(self.cog)
+        await interaction.response.send_message("Select a role to add as mod role:", view=view, ephemeral=True)
+
+    @discord.ui.button(label="Remove Mod Role", style=discord.ButtonStyle.danger)
+    async def remove_mod_role(self, interaction: discord.Interaction, button: discord.ui.Button):
+        mod_role_ids = await DatabaseHelper.get_mod_roles()
+        if not mod_role_ids:
+            await interaction.response.send_message("No mod roles configured.", ephemeral=True)
+            return
+        view = RemoveModRoleSelectView(self.cog, mod_role_ids, interaction.guild)
+        await interaction.response.send_message("Select a role to remove:", view=view, ephemeral=True)
+
+
+class AddModRoleSelectView(discord.ui.View):
+    """View for selecting a role to add as mod role."""
+
+    def __init__(self, cog: 'CustomMatch'):
+        super().__init__(timeout=60)
+        self.cog = cog
+
+    @discord.ui.select(cls=discord.ui.RoleSelect, placeholder="Select a role...")
+    async def role_select(self, interaction: discord.Interaction, select: discord.ui.RoleSelect):
+        role = select.values[0]
+        await DatabaseHelper.add_mod_role(role.id)
+        await interaction.response.send_message(f"Added **{role.name}** as a mod role.", ephemeral=True)
+
+
+class RemoveModRoleSelectView(discord.ui.View):
+    """View for selecting a mod role to remove."""
+
+    def __init__(self, cog: 'CustomMatch', mod_role_ids: List[int], guild: discord.Guild):
+        super().__init__(timeout=60)
+        self.cog = cog
+
+        options = []
+        for role_id in mod_role_ids:
+            role = guild.get_role(role_id)
+            name = role.name if role else f"Unknown ({role_id})"
+            options.append(discord.SelectOption(label=name, value=str(role_id)))
+
+        select = discord.ui.Select(placeholder="Select role to remove...", options=options[:25])
+        select.callback = self.on_select
+        self.add_item(select)
+
+    async def on_select(self, interaction: discord.Interaction):
+        role_id = int(interaction.data["values"][0])
+        await DatabaseHelper.remove_mod_role(role_id)
+        await interaction.response.send_message("Removed mod role.", ephemeral=True)
+
+
+class ReadyEmojisModal(discord.ui.Modal, title="Configure Ready Emojis"):
+    loading_emoji = discord.ui.TextInput(
+        label="Loading Emoji (shown while waiting)",
+        placeholder="e.g., <a:loading:123456> or a Unicode emoji",
+        required=True
+    )
+    done_emoji = discord.ui.TextInput(
+        label="Ready Emoji (shown when player is ready)",
+        placeholder="e.g., <:check:123456> or a Unicode emoji",
+        required=True
+    )
+
+    def __init__(self, cog: 'CustomMatch', game: GameConfig):
+        super().__init__()
+        self.cog = cog
+        self.game = game
+        self.loading_emoji.default = game.ready_loading_emoji
+        self.done_emoji.default = game.ready_done_emoji
+
+    async def on_submit(self, interaction: discord.Interaction):
+        loading = self.loading_emoji.value.strip()
+        done = self.done_emoji.value.strip()
+        await DatabaseHelper.update_game(
+            self.game.game_id,
+            ready_loading_emoji=loading,
+            ready_done_emoji=done
+        )
+        await interaction.response.send_message(
+            f"Ready emojis updated for **{self.game.name}**:\n"
+            f"Loading: {loading}\n"
+            f"Ready: {done}",
+            ephemeral=True
+        )
 
 
 class MMRRolesView(discord.ui.View):
@@ -3346,83 +3597,6 @@ class AdminPanelView(discord.ui.View):
     async def show_offset_modal(self, interaction: discord.Interaction, game_id: int):
         modal = SetAdminOffsetModal(self.cog, game_id)
         await interaction.response.send_modal(modal)
-
-    @discord.ui.button(label="Mass Register", style=discord.ButtonStyle.success, row=3)
-    async def mass_register(self, interaction: discord.Interaction, button: discord.ui.Button):
-        games = await DatabaseHelper.get_all_games()
-        if not games:
-            await interaction.response.send_message("No games configured.", ephemeral=True)
-            return
-        view = discord.ui.View(timeout=60)
-        view.add_item(GameSelectDropdown(games, self.do_mass_register))
-        await interaction.response.send_message(
-            "**Mass Register Players**\n"
-            "This will scan all server members and register anyone with an MMR role for the selected game.\n\n"
-            "Select a game:",
-            view=view, ephemeral=True
-        )
-
-    async def do_mass_register(self, interaction: discord.Interaction, game_id: int):
-        await interaction.response.defer(ephemeral=True)
-
-        game = await DatabaseHelper.get_game(game_id)
-        if not game:
-            await interaction.followup.send("Game not found.", ephemeral=True)
-            return
-
-        # Get MMR roles for this game (returns {role_id: mmr_value})
-        role_mmr_map = await DatabaseHelper.get_mmr_roles(game_id)
-        if not role_mmr_map:
-            await interaction.followup.send(
-                f"No MMR roles configured for **{game.name}**. "
-                "Set up MMR roles first in Game Settings.",
-                ephemeral=True
-            )
-            return
-
-        # Scan all members
-        registered = 0
-        skipped = 0
-        errors = []
-
-        for member in interaction.guild.members:
-            if member.bot:
-                continue
-
-            # Find highest MMR role this member has
-            member_mmr = None
-            for role in member.roles:
-                if role.id in role_mmr_map:
-                    role_mmr = role_mmr_map[role.id]
-                    if member_mmr is None or role_mmr > member_mmr:
-                        member_mmr = role_mmr
-
-            if member_mmr is not None:
-                try:
-                    # Check if player already has stats
-                    stats = await DatabaseHelper.get_player_stats(member.id, game_id)
-                    if stats.games_played > 0:
-                        skipped += 1
-                        continue
-
-                    # Set their MMR
-                    stats.mmr = member_mmr
-                    await DatabaseHelper.update_player_stats(stats)
-                    registered += 1
-                except Exception as e:
-                    errors.append(f"{member.display_name}: {e}")
-
-        result = f"**Mass Registration Complete for {game.name}**\n"
-        result += f"✅ Registered: {registered} players\n"
-        result += f"⏭️ Skipped (already have games): {skipped} players\n"
-
-        if errors:
-            result += f"\n⚠️ Errors ({len(errors)}):\n"
-            result += "\n".join(errors[:5])
-            if len(errors) > 5:
-                result += f"\n... and {len(errors) - 5} more"
-
-        await interaction.followup.send(result, ephemeral=True)
 
 
 class ChangeWinnerModal(discord.ui.Modal, title="Change Match Winner"):
@@ -4803,30 +4977,28 @@ class CustomMatch(commands.Cog):
     
     async def create_ready_check_embed(self, game: GameConfig, queue_state: QueueState,
                                         time_remaining: int) -> discord.Embed:
-        """Create the ready check embed."""
-        ready = [pid for pid, is_ready in queue_state.players.items() if is_ready]
-        waiting = [pid for pid, is_ready in queue_state.players.items() if not is_ready]
-        
+        """Create the ready check embed with emoji indicators."""
+        ready_count = sum(1 for is_ready in queue_state.players.values() if is_ready)
+        total_count = len(queue_state.players)
+
         embed = discord.Embed(
             title="Queue Full - Ready Check!",
-            description=f"Time remaining: {time_remaining}s",
+            description=f"Time remaining: {time_remaining}s\n\nReady: {ready_count}/{total_count}",
             color=COLOR_WARNING
         )
-        
-        if ready:
-            embed.add_field(
-                name=f"Ready ({len(ready)})",
-                value="\n".join([f"• <@{pid}>" for pid in ready]),
-                inline=True
-            )
-        
-        if waiting:
-            embed.add_field(
-                name=f"Waiting ({len(waiting)})",
-                value="\n".join([f"• <@{pid}>" for pid in waiting]),
-                inline=True
-            )
-        
+
+        # Build player list with emoji indicators
+        player_lines = []
+        for pid, is_ready in queue_state.players.items():
+            emoji = game.ready_done_emoji if is_ready else game.ready_loading_emoji
+            player_lines.append(f"{emoji} <@{pid}>")
+
+        embed.add_field(
+            name="Players",
+            value="\n".join(player_lines) if player_lines else "No players",
+            inline=False
+        )
+
         return embed
     
     async def start_queue(self, channel: discord.TextChannel, game: GameConfig) -> int:
@@ -5505,15 +5677,40 @@ class CustomMatch(commands.Cog):
                                     red_role: discord.Role, blue_role: discord.Role,
                                     draft_channel: discord.TextChannel = None):
         """Create the match channel and assign roles."""
-        # Create channel
-        channel_name = await self.get_next_channel_suffix(guild, category, "match-lobby")
+        # Get match short_id for naming
+        match_data = await DatabaseHelper.get_match(match_id)
+        short_id = match_data.get("short_id", str(match_id)) if match_data else str(match_id)
 
+        # Create channel named "lobby-{short_id}"
+        channel_name = f"lobby-{short_id}"
+
+        # Get mod roles and admin role for permissions
+        mod_role_ids = await DatabaseHelper.get_mod_roles()
+        admin_role_id = await DatabaseHelper.get_config("cm_admin_role_id")
+
+        # Channel viewable by everyone but only players, admins, and mods can type
         overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+            guild.default_role: discord.PermissionOverwrite(view_channel=True, send_messages=False),
+            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_messages=True),
             red_role: discord.PermissionOverwrite(view_channel=True, send_messages=True),
             blue_role: discord.PermissionOverwrite(view_channel=True, send_messages=True)
         }
+
+        # Add CM admin role permissions
+        if admin_role_id:
+            admin_role = guild.get_role(int(admin_role_id))
+            if admin_role:
+                overwrites[admin_role] = discord.PermissionOverwrite(
+                    view_channel=True, send_messages=True, manage_messages=True
+                )
+
+        # Add mod role permissions
+        for mod_role_id in mod_role_ids:
+            mod_role = guild.get_role(mod_role_id)
+            if mod_role:
+                overwrites[mod_role] = discord.PermissionOverwrite(
+                    view_channel=True, send_messages=True, manage_messages=True
+                )
 
         match_channel = await category.create_text_channel(name=channel_name, overwrites=overwrites)
         await DatabaseHelper.update_match(match_id, channel_id=match_channel.id)
@@ -5522,25 +5719,27 @@ class CustomMatch(commands.Cog):
         red_vc_id = None
         blue_vc_id = None
         if game.vc_creation_enabled:
+            # VC permissions: only team members can connect/speak, others can't even view
             red_vc_overwrites = {
-                guild.default_role: discord.PermissionOverwrite(view_channel=False),
-                guild.me: discord.PermissionOverwrite(view_channel=True, connect=True),
-                red_role: discord.PermissionOverwrite(view_channel=True, connect=True),
-                blue_role: discord.PermissionOverwrite(view_channel=False, connect=False)
+                guild.default_role: discord.PermissionOverwrite(view_channel=False, connect=False, speak=False),
+                guild.me: discord.PermissionOverwrite(view_channel=True, connect=True, speak=True),
+                red_role: discord.PermissionOverwrite(view_channel=True, connect=True, speak=True),
+                blue_role: discord.PermissionOverwrite(view_channel=False, connect=False, speak=False)
             }
             blue_vc_overwrites = {
-                guild.default_role: discord.PermissionOverwrite(view_channel=False),
-                guild.me: discord.PermissionOverwrite(view_channel=True, connect=True),
-                blue_role: discord.PermissionOverwrite(view_channel=True, connect=True),
-                red_role: discord.PermissionOverwrite(view_channel=False, connect=False)
+                guild.default_role: discord.PermissionOverwrite(view_channel=False, connect=False, speak=False),
+                guild.me: discord.PermissionOverwrite(view_channel=True, connect=True, speak=True),
+                blue_role: discord.PermissionOverwrite(view_channel=True, connect=True, speak=True),
+                red_role: discord.PermissionOverwrite(view_channel=False, connect=False, speak=False)
             }
 
+            # Name VCs after the team role (e.g., "Red 72KW9" or "Blue 72KW9")
             red_vc = await category.create_voice_channel(
-                name=f"Red Team #{match_id}",
+                name=red_role.name,
                 overwrites=red_vc_overwrites
             )
             blue_vc = await category.create_voice_channel(
-                name=f"Blue Team #{match_id}",
+                name=blue_role.name,
                 overwrites=blue_vc_overwrites
             )
             red_vc_id = red_vc.id
@@ -6153,8 +6352,27 @@ class CustomMatch(commands.Cog):
             loser_name = "Red Team"
             loser_players = "\n".join(red_lines) or "None"
 
+        # Build tracker.gg URL - try Valorant match ID first, fall back to player profile
+        tracker_url = None
+        valorant_match_id = await DatabaseHelper.get_match_valorant_id(match_id)
+        if valorant_match_id:
+            # Direct match URL
+            tracker_url = f"https://tracker.gg/valorant/match/{valorant_match_id}"
+        else:
+            # Fall back to first player's profile using their IGN
+            for pid, ign in igns.items():
+                if '#' in ign:
+                    name, tag = ign.rsplit('#', 1)
+                    # URL encode the name and tag
+                    import urllib.parse
+                    encoded_name = urllib.parse.quote(name)
+                    encoded_tag = urllib.parse.quote(tag)
+                    tracker_url = f"https://tracker.gg/valorant/profile/riot/{encoded_name}%23{encoded_tag}/overview"
+                    break
+
         embed = discord.Embed(
             title=f"{game.name} Match #{match_id} - Result",
+            url=tracker_url,  # Makes the title clickable
             color=COLOR_SUCCESS,
             timestamp=datetime.now(timezone.utc)
         )
@@ -6169,6 +6387,27 @@ class CustomMatch(commands.Cog):
             value=loser_players,
             inline=True
         )
+
+        # Add monthly top 10 leaderboard
+        leaderboard = await DatabaseHelper.get_leaderboard(game.game_id, monthly=True, limit=10)
+        if leaderboard:
+            now = datetime.now(timezone.utc)
+            lb_lines = []
+            for i, entry in enumerate(leaderboard, 1):
+                member = channel.guild.get_member(entry["player_id"])
+                name = member.display_name if member else str(entry["player_id"])
+                # Truncate long names
+                if len(name) > 15:
+                    name = name[:12] + "..."
+                wins = entry["wins"]
+                losses = entry["losses"]
+                lb_lines.append(f"`{i:>2}.` **{name}** ({wins}W-{losses}L)")
+
+            embed.add_field(
+                name=f"Top 10 - {now.strftime('%B %Y')}",
+                value="\n".join(lb_lines),
+                inline=False
+            )
 
         await channel.send(embed=embed)
 
@@ -6545,7 +6784,7 @@ class CustomMatch(commands.Cog):
             ephemeral=True
         )
 
-    @app_commands.command(name="win", description="Report the match winner")
+    @cm_group.command(name="win", description="Report the match winner")
     async def win_cmd(self, interaction: discord.Interaction):
         # Check if in a match channel
         match = await DatabaseHelper.get_match_by_channel(interaction.channel.id)
@@ -6584,7 +6823,7 @@ class CustomMatch(commands.Cog):
         view = WinVoteView(self, match["match_id"])
         await interaction.response.send_message(embed=embed, view=view)
 
-    @app_commands.command(name="abandon", description="Vote to abandon the current match")
+    @cm_group.command(name="abandon", description="Vote to abandon the current match")
     async def abandon_cmd(self, interaction: discord.Interaction):
         # Check if in a match channel
         match = await DatabaseHelper.get_match_by_channel(interaction.channel.id)
@@ -6621,7 +6860,7 @@ class CustomMatch(commands.Cog):
         view = AbandonVoteView(self, match["match_id"], needed)
         await interaction.response.send_message(embed=embed, view=view)
 
-    ign_group = app_commands.Group(name="ign", description="In-game name commands")
+    ign_group = app_commands.Group(name="ign", description="In-game name commands", parent=cm_group)
 
     @ign_group.command(name="set", description="Set your in-game name for a game")
     async def ign_set_cmd(self, interaction: discord.Interaction):

@@ -256,9 +256,16 @@ class Reminders(commands.Cog):
 
         guild_id = str(interaction.guild.id)
         config = self.config.get(guild_id, {})
-        admin_role_ids = config.get('admin_role_ids', [])
-        user_role_ids = [role.id for role in interaction.user.roles]
-        return any(role_id in admin_role_ids for role_id in user_role_ids)
+
+        # Convert admin role IDs to set of ints for reliable comparison
+        # (handles potential type mismatches from JSON serialization)
+        try:
+            admin_role_ids = {int(rid) for rid in config.get('admin_role_ids', [])}
+        except (ValueError, TypeError):
+            admin_role_ids = set()
+
+        user_role_ids = {role.id for role in interaction.user.roles}
+        return bool(admin_role_ids & user_role_ids)
 
     def get_guild_config(self, guild_id: int) -> dict:
         """Get guild configuration, creating if doesn't exist."""
@@ -1295,6 +1302,13 @@ class ReminderModal(discord.ui.Modal):
 
         # Note: Schedule configuration is now handled by ScheduleConfigView (dropdown UI)
 
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        logger.error(f"Modal error in {self.title}: {error}", exc_info=True)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(f"Error: {error}", ephemeral=True)
+        else:
+            await interaction.followup.send(f"Error: {error}", ephemeral=True)
+
     async def on_submit(self, interaction: discord.Interaction):
         new_data = {
             'type': self.r_type,
@@ -1326,7 +1340,8 @@ class ReminderModal(discord.ui.Modal):
         # Check duplicates
         if not self.rid:
             for d in self.cog.reminders.values():
-                if d.get('name', '').lower() == new_data['name'].lower():
+                existing_name = d.get('name') or ''
+                if existing_name.lower() == new_data['name'].lower():
                     return await interaction.response.send_message(
                         f"A reminder named `{new_data['name']}` already exists. Continue anyway?",
                         view=DuplicateNameConfirmView(self.cog, new_data, interaction.guild),
@@ -1546,6 +1561,11 @@ class SkipDatesModal(discord.ui.Modal):
             max_length=500
         )
         self.add_item(self.dates_field)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        logger.error(f"SkipDatesModal error: {error}", exc_info=True)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(f"Error: {error}", ephemeral=True)
 
     async def on_submit(self, interaction: discord.Interaction):
         dates_text = str(self.dates_field.value).strip()
@@ -1936,6 +1956,11 @@ class EventNameModal(discord.ui.Modal):
         )
         self.add_item(self.name_input)
 
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        logger.error(f"EventNameModal error: {error}", exc_info=True)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(f"Error: {error}", ephemeral=True)
+
     async def on_submit(self, interaction):
         self.parent_view.event_name = self.name_input.value.strip()
         self.parent_view.build_ui()
@@ -1975,6 +2000,11 @@ class ReactionRoleConfigModal(discord.ui.Modal):
         self.add_item(self.role_id_input)
         self.add_item(self.button_label)
         self.add_item(self.button_emoji)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        logger.error(f"ReactionRoleConfigModal error: {error}", exc_info=True)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(f"Error: {error}", ephemeral=True)
 
     async def on_submit(self, interaction):
         role_id_str = self.role_id_input.value.strip()
@@ -2072,6 +2102,11 @@ class TimezoneModal(discord.ui.Modal):
             max_length=50
         )
         self.add_item(self.tz_input)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        logger.error(f"TimezoneModal error: {error}", exc_info=True)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(f"Error: {error}", ephemeral=True)
 
     async def on_submit(self, interaction):
         from zoneinfo import ZoneInfo

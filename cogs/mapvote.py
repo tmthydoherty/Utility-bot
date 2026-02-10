@@ -564,6 +564,17 @@ class MapVote(commands.Cog, name="mapvote"):
             pool = [m for m, v in vote.get("votes", {}).items() for _ in v]
             winner = random.choice(pool) if pool else random.choice(vote["maps"])
 
+            # Store map name in custommatch database if match_id provided
+            if match_id := vote.get("match_id"):
+                try:
+                    custommatch_cog = self.bot.get_cog("CustomMatch")
+                    if custommatch_cog:
+                        from cogs.custommatch import DatabaseHelper
+                        await DatabaseHelper.set_match_map(match_id, winner)
+                        log_map.info(f"Stored map '{winner}' for match {match_id}")
+                except Exception as e:
+                    log_map.error(f"Failed to store map for match {match_id}: {e}")
+
             if game_name := vote.get("game"):
                 self._ensure_latest_game_format(game_name)
                 games_cfg = self._get_games_config_sync()
@@ -950,7 +961,8 @@ class MapVote(commands.Cog, name="mapvote"):
         max_votes: int = 10,
         allowed_voters: Optional[List[int]] = None,
         red_role_id: Optional[int] = None,
-        blue_role_id: Optional[int] = None
+        blue_role_id: Optional[int] = None,
+        match_id: Optional[int] = None
     ) -> Optional[int]:
         """
         Start a map vote programmatically (for custom match integration).
@@ -966,6 +978,7 @@ class MapVote(commands.Cog, name="mapvote"):
             allowed_voters: List of user IDs who can vote (if None, anyone can vote)
             red_role_id: Optional role ID for red team (alternative voter restriction)
             blue_role_id: Optional role ID for blue team (alternative voter restriction)
+            match_id: Optional match ID from custommatch cog (for storing selected map)
         """
         try:
             async with self.config_lock:
@@ -1010,7 +1023,8 @@ class MapVote(commands.Cog, name="mapvote"):
                     "min_users": min_users,
                     "max_votes": max_votes,
                     "allowed_voters": allowed_voters,
-                    "allowed_role_ids": [r for r in [red_role_id, blue_role_id] if r]
+                    "allowed_role_ids": [r for r in [red_role_id, blue_role_id] if r],
+                    "match_id": match_id
                 }
 
                 img_file = await self.create_composite_image(chosen_maps, game_name)

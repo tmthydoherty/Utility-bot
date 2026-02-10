@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        @font-face {{
+            font-family: 'Cinzel';
+            src: url('file://{font_path}/Cinzel-Regular.ttf') format('truetype');
+            font-weight: normal;
+        }}
+        @font-face {{
+            font-family: 'Cinzel';
+            src: url('file://{font_path}/Cinzel-Bold.ttf') format('truetype');
+            font-weight: bold;
+        }}
+
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+
+        body {{
+            width: 900px;
+            font-family: 'Cinzel', 'Segoe UI', sans-serif;
+            font-weight: bold;
+            background: linear-gradient(180deg, #1a1b1e 0%, #0f1012 100%);
+            color: #ffffff;
+            padding: 28px;
+        }}
+
+        .header {{
+            text-align: center;
+            margin-bottom: 20px;
+            padding-bottom: 16px;
+            border-bottom: 2px solid rgba(88, 101, 242, 0.5);
+        }}
+
+        .title {{
+            font-size: 28px;
+            font-weight: bold;
+            color: #ffffff;
+            margin-bottom: 6px;
+        }}
+
+        .subtitle {{
+            font-size: 16px;
+            color: #b9bbbe;
+        }}
+
+        .columns-container {{
+            display: flex;
+            gap: 24px;
+        }}
+
+        .column {{
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }}
+
+        .column-headers {{
+            display: grid;
+            grid-template-columns: 40px 1fr 40px 40px 50px;
+            padding: 10px 14px;
+            margin-bottom: 6px;
+            font-size: 12px;
+            color: #72767d;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }}
+
+        .column-headers span {{
+            text-align: center;
+        }}
+
+        .column-headers span:nth-child(2) {{
+            text-align: left;
+        }}
+
+        .leaderboard {{
+            display: flex;
+            flex-direction: column;
+            gap: 3px;
+        }}
+
+        .player-row {{
+            display: grid;
+            grid-template-columns: 40px 1fr 40px 40px 50px;
+            align-items: center;
+            padding: 10px 14px;
+            border-radius: 6px;
+            background: rgba(255, 255, 255, 0.02);
+        }}
+
+        .player-row.shaded {{
+            background: rgba(255, 255, 255, 0.06);
+        }}
+
+        .player-row.top-3 {{
+            border-left: 3px solid;
+        }}
+
+        .player-row.rank-1 {{
+            border-left-color: #ffd700;
+            background: linear-gradient(90deg, rgba(255, 215, 0, 0.15), rgba(255, 255, 255, 0.02));
+        }}
+
+        .player-row.rank-2 {{
+            border-left-color: #c0c0c0;
+            background: linear-gradient(90deg, rgba(192, 192, 192, 0.12), rgba(255, 255, 255, 0.02));
+        }}
+
+        .player-row.rank-3 {{
+            border-left-color: #cd7f32;
+            background: linear-gradient(90deg, rgba(205, 127, 50, 0.12), rgba(255, 255, 255, 0.02));
+        }}
+
+        .rank {{
+            font-size: 20px;
+            font-weight: 900;
+            color: #72767d;
+            text-align: center;
+            text-shadow: 1px 1px 2px rgba(0,0,0,0.3);
+        }}
+
+        .rank-1 .rank {{ color: #ffd700; text-shadow: 0 0 8px rgba(255, 215, 0, 0.4); }}
+        .rank-2 .rank {{ color: #c0c0c0; text-shadow: 0 0 8px rgba(192, 192, 192, 0.4); }}
+        .rank-3 .rank {{ color: #cd7f32; text-shadow: 0 0 8px rgba(205, 127, 50, 0.4); }}
+
+        .player-name {{
+            font-size: 15px;
+            font-weight: bold;
+            color: #ffffff;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            padding-right: 10px;
+        }}
+
+        .stat {{
+            font-size: 14px;
+            font-weight: bold;
+            text-align: center;
+        }}
+
+        .stat-wins {{
+            color: #43b581;
+        }}
+
+        .stat-losses {{
+            color: #f04747;
+        }}
+
+        .stat-winrate {{
+            color: #b9bbbe;
+        }}
+
+        .no-data {{
+            text-align: center;
+            padding: 40px;
+            color: #72767d;
+            font-style: italic;
+        }}
+
+        .empty-slot {{
+            visibility: hidden;
+            padding: 10px 14px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="title">{title}</div>
+        <div class="subtitle">{subtitle}</div>
+    </div>
+
+    <div class="columns-container">
+        <div class="column">
+            <div class="column-headers">
+                <span>#</span>
+                <span>Player</span>
+                <span>W</span>
+                <span>L</span>
+                <span>WR</span>
+            </div>
+            <div class="leaderboard">
+                {left_rows_html}
+            </div>
+        </div>
+        <div class="column">
+            <div class="column-headers">
+                <span>#</span>
+                <span>Player</span>
+                <span>W</span>
+                <span>L</span>
+                <span>WR</span>
+            </div>
+            <div class="leaderboard">
+                {right_rows_html}
+            </div>
+        </div>
+    </div>
+</body>
+</html>

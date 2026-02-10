@@ -146,16 +146,31 @@ INTERNATIONAL_LAN_KEYWORDS = [
     "all-star", "allstar",
 ]
 
-# RLCS early round keywords - skip these matches (typically before top 16)
-# RLCS starts with 32 teams in Swiss format, we only want top 16+ matches
+# RLCS early round keywords - skip these matches to reduce spam
+# League Play has 16 teams per region across 3 days (Fri/Sat/Sun)
+# Only filter day 1 (Friday) which has the most matches; show day 2-3 for playoffs progression
 RLCS_EARLY_ROUND_KEYWORDS = [
-    "swiss", "swiss stage",
-    "day 1", "day 2",  # Swiss days before top 16
-    "round 1", "round 2", "round 3", "round 4", "round 5",  # Swiss rounds
+    "day 1",  # Filter first day of League Play (8 matches) to reduce spam
+    # Note: "swiss"/"swiss stage" removed - RLCS Regional Opens use Swiss format for ALL 3 days,
+    # so this was blocking Days 2-3 as well. "day 1" already handles Day 1 filtering.
     "round of 32", "ro32",
     "group stage", "group a", "group b", "group c", "group d",
     "open qualifier", "closed qualifier",
 ]
+
+# Additional keywords to filter for RLCS LAN events (Majors/Worlds)
+# LANs have Swiss stage spanning days 1-2, so we filter more aggressively
+RLCS_LAN_EXTRA_KEYWORDS = ["day 2"]
+
+# Keywords that identify an RLCS LAN event (Major, World Championship, etc.)
+RLCS_LAN_IDENTIFIERS = ["major", "world", "championship", "lan", "grand final"]
+
+LIQUIPEDIA_GAME_SLUGS = {
+    "valorant": "valorant",
+    "rl": "rocketleague",
+    "r6siege": "rainbowsix",
+    "ow": "overwatch",
+}
 
 STRAFE_GAME_SLUGS = {
     "valorant": "valorant",

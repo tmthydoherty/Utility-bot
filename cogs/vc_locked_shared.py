@@ -76,6 +76,17 @@ async def init_db():
                     PRIMARY KEY (user_id, preset_name)
                 )
             ''')
+
+            # FIX: Table for persisting accepted knocks across restarts
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS accepted_knocks (
+                    vc_id INTEGER,
+                    user_id INTEGER,
+                    accepted_at REAL DEFAULT 0,
+                    PRIMARY KEY (vc_id, user_id)
+                )
+            ''')
+            await db.execute('CREATE INDEX IF NOT EXISTS idx_accepted_knocks_vc ON accepted_knocks(vc_id)')
             
             # Migrations
             try:
@@ -213,15 +224,21 @@ async def save_multiple_vcs(vcs_dict):
                 int(data['guild_id']) if data.get('guild_id') else None,
                 int(data.get('is_basic', False))
             ))
-        if not data_list: 
+        if not data_list:
             return
         async with DB_SEMAPHORE:
             async with aiosqlite.connect(DB_FILE) as db:
-                await db.executemany('''
-                    INSERT OR REPLACE INTO active_vcs (vc_id, owner_id, message_id, knock_mgmt_msg_id, thread_id, ghost, unlocked, bans, mute_knock_pings, guild_id, is_basic)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', data_list)
-                await db.commit()
+                # FIX: Use explicit transaction for atomicity
+                try:
+                    await db.execute("BEGIN TRANSACTION")
+                    await db.executemany('''
+                        INSERT OR REPLACE INTO active_vcs (vc_id, owner_id, message_id, knock_mgmt_msg_id, thread_id, ghost, unlocked, bans, mute_knock_pings, guild_id, is_basic)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', data_list)
+                    await db.commit()
+                except Exception as e:
+                    await db.rollback()
+                    raise
     except Exception as e:
         logger.error(f"Failed to save VCs: {e}")
         raise
@@ -232,10 +249,78 @@ async def delete_vc_data(vc_id):
         async with DB_SEMAPHORE:
             async with aiosqlite.connect(DB_FILE) as db:
                 await db.execute("DELETE FROM active_vcs WHERE vc_id = ?", (vc_id,))
+                # FIX: Also delete accepted knocks for this VC
+                await db.execute("DELETE FROM accepted_knocks WHERE vc_id = ?", (vc_id,))
                 await db.commit()
     except Exception as e:
         logger.error(f"Failed to delete VC data for {vc_id}: {e}")
         raise
+
+
+# --- ACCEPTED KNOCKS PERSISTENCE ---
+
+async def save_accepted_knock(vc_id, user_id):
+    """Save an accepted knock to database for persistence across restarts"""
+    try:
+        async with DB_SEMAPHORE:
+            async with aiosqlite.connect(DB_FILE) as db:
+                await db.execute('''
+                    INSERT OR REPLACE INTO accepted_knocks (vc_id, user_id, accepted_at)
+                    VALUES (?, ?, ?)
+                ''', (vc_id, user_id, time.time()))
+                await db.commit()
+        logger.debug(f"Saved accepted knock: vc_id={vc_id}, user_id={user_id}")
+    except Exception as e:
+        logger.error(f"Failed to save accepted knock: {e}")
+
+
+async def delete_accepted_knock(vc_id, user_id):
+    """Delete an accepted knock from database"""
+    try:
+        async with DB_SEMAPHORE:
+            async with aiosqlite.connect(DB_FILE) as db:
+                await db.execute("DELETE FROM accepted_knocks WHERE vc_id = ? AND user_id = ?", (vc_id, user_id))
+                await db.commit()
+        logger.debug(f"Deleted accepted knock: vc_id={vc_id}, user_id={user_id}")
+    except Exception as e:
+        logger.error(f"Failed to delete accepted knock: {e}")
+
+
+async def load_accepted_knocks():
+    """Load all accepted knocks from database"""
+    try:
+        async with DB_SEMAPHORE:
+            async with aiosqlite.connect(DB_FILE) as db:
+                async with db.execute("SELECT vc_id, user_id, accepted_at FROM accepted_knocks") as cursor:
+                    rows = await cursor.fetchall()
+                    result = {}
+                    for vc_id, user_id, accepted_at in rows:
+                        if vc_id not in result:
+                            result[vc_id] = {}
+                        result[vc_id][user_id] = {'accepted_at': accepted_at}
+                    logger.info(f"Loaded {len(rows)} accepted knocks from database")
+                    return result
+    except Exception as e:
+        logger.error(f"Failed to load accepted knocks: {e}")
+        return {}
+
+
+async def cleanup_expired_accepted_knocks(max_age_seconds=300):
+    """Clean up accepted knocks older than max_age_seconds (default 5 minutes)"""
+    try:
+        cutoff = time.time() - max_age_seconds
+        async with DB_SEMAPHORE:
+            async with aiosqlite.connect(DB_FILE) as db:
+                cursor = await db.execute("DELETE FROM accepted_knocks WHERE accepted_at < ?", (cutoff,))
+                deleted = cursor.rowcount
+                await db.commit()
+                if deleted > 0:
+                    logger.info(f"Cleaned up {deleted} expired accepted knocks")
+                return deleted
+    except Exception as e:
+        logger.error(f"Failed to cleanup expired accepted knocks: {e}")
+        return 0
+
 
 async def get_user_presets(user_id):
     try:
@@ -769,28 +854,54 @@ class RulesView(discord.ui.View):
             else:
                 logger.info(f"VC {vc.id} already has lock emoji: {vc.name}")
 
-            # Create hub message
-            await cog.create_hub_message(vc)
-
-            # Create settings thread
+            # FIX: Create settings thread FIRST and save thread_id IMMEDIATELY
+            # This prevents race conditions where update_knock_panel might create duplicate threads
             hub_id = await get_config(f"hub_channel_id_{interaction.guild.id}")
             if hub_id:
                 hub = interaction.guild.get_channel(int(hub_id))
                 if hub:
                     perms = hub.permissions_for(interaction.guild.me)
                     try:
-                        if not perms.create_private_threads or not perms.manage_threads:
-                            thread = await hub.create_thread(
-                                name=f"🔒 {clean_name}'s VC Settings",
-                                auto_archive_duration=1440
-                            )
-                        else:
-                            thread = await hub.create_thread(
-                                name=f"🔒 {clean_name}'s VC Settings",
-                                type=discord.ChannelType.private_thread,
-                                auto_archive_duration=1440,
-                                invitable=False
-                            )
+                        expected_thread_name = f"🔒 {clean_name}'s VC Settings"
+                        thread = None
+
+                        # FIX: Check for existing thread before creating a new one
+                        for t in hub.threads:
+                            if t.name == expected_thread_name:
+                                thread = t
+                                logger.info(f"Found existing thread {t.id} for VC {vc.id}")
+                                break
+
+                        # Check archived threads if no active thread found
+                        if not thread:
+                            try:
+                                async for t in hub.archived_threads(limit=50):
+                                    if t.name == expected_thread_name:
+                                        await t.edit(archived=False)
+                                        thread = t
+                                        logger.info(f"Found and unarchived existing thread {t.id} for VC {vc.id}")
+                                        break
+                            except Exception as e:
+                                logger.debug(f"Error searching archived threads: {e}")
+
+                        # Only create new thread if none found
+                        if not thread:
+                            if not perms.create_private_threads or not perms.manage_threads:
+                                thread = await hub.create_thread(
+                                    name=expected_thread_name,
+                                    auto_archive_duration=1440
+                                )
+                            else:
+                                thread = await hub.create_thread(
+                                    name=expected_thread_name,
+                                    type=discord.ChannelType.private_thread,
+                                    auto_archive_duration=1440,
+                                    invitable=False
+                                )
+                            logger.info(f"Created new thread {thread.id} for VC {vc.id}")
+
+                        # FIX: CRITICAL - Save thread_id IMMEDIATELY after creation/finding thread
+                        user_vc_data['thread_id'] = thread.id
 
                         try:
                             await thread.add_user(interaction.user)
@@ -803,10 +914,12 @@ class RulesView(discord.ui.View):
                         self.bot.add_view(view, message_id=knock_msg.id)
 
                         user_vc_data['knock_mgmt_msg_id'] = knock_msg.id
-                        user_vc_data['thread_id'] = thread.id
                         await cog.save_state()
                     except Exception as e:
                         logger.error(f"Failed to create thread: {e}")
+
+            # FIX: Create hub message AFTER thread is fully set up to prevent race conditions
+            await cog.create_hub_message(vc)
 
             # Update hub name
             await cog.update_hub_name(interaction.guild, force=True)
@@ -1025,11 +1138,21 @@ class HubEntryView(discord.ui.View):
         if not vc:
             return await interaction.response.send_message("❌ This VC no longer exists.", ephemeral=True)
 
-        # Validate VC data
+        # Validate VC data - with auto-recovery
         vc_data = cog.get_vc_data(self.voice_id)
         if not vc_data:
-            logger.warning(f"VC data not found for knock on VC {self.voice_id}")
-            return await interaction.response.send_message("❌ This VC is no longer active.", ephemeral=True)
+            # FIX: Try auto-recovery if VC exists but data is missing
+            logger.warning(f"VC data not found for knock on VC {self.voice_id}, attempting recovery")
+            try:
+                success = await cog.reconnect_vc(vc)
+                if success:
+                    vc_data = cog.get_vc_data(self.voice_id)
+                    logger.info(f"Auto-recovered VC {self.voice_id} during knock")
+            except Exception as e:
+                logger.error(f"Auto-recovery failed during knock for VC {self.voice_id}: {e}")
+
+            if not vc_data:
+                return await interaction.response.send_message("❌ This VC is no longer active. It may have been disconnected.", ephemeral=True)
 
         # Validate user is a member
         user = await validate_member(interaction.guild, interaction.user.id)
@@ -1104,36 +1227,75 @@ class KnockManagementView(discord.ui.View):
         self.settings_select.custom_id = f"knock_settings:{voice_id}"
     
     def _get_cog(self):
-        """Get cog reference, refreshing if needed"""
-        if self.cog_ref and hasattr(self.cog_ref, 'get_vc_data'):
-            return self.cog_ref
-        return get_cog_safe(self.bot)
+        """Get cog reference - ALWAYS get fresh from bot to handle reloads"""
+        # FIX: Always get fresh cog reference from bot, don't trust cached self.cog_ref
+        # This prevents stale cog issues after cog reloads
+        cog = get_cog_safe(self.bot)
+        if cog:
+            self.cog_ref = cog  # Update cache for consistency
+        return cog
+
+    async def _validate_owner_with_recovery(self, interaction: discord.Interaction, cog):
+        """
+        Validate the owner with auto-recovery for missing VC data.
+        Returns (vc_data, error_message) - vc_data is None if validation failed.
+        """
+        vc_data = cog.get_vc_data(self.voice_id)
+
+        if not vc_data:
+            # VC data missing - try auto-recovery
+            logger.warning(f"VC data missing for voice_id={self.voice_id}, attempting recovery")
+
+            vc = interaction.guild.get_channel(self.voice_id)
+            if vc and isinstance(vc, discord.VoiceChannel):
+                # VC exists on Discord but not in tracking - reconnect it
+                try:
+                    success = await cog.reconnect_vc(vc)
+                    if success:
+                        vc_data = cog.get_vc_data(self.voice_id)
+                        logger.info(f"Auto-recovered VC {self.voice_id}")
+                except Exception as e:
+                    logger.error(f"Auto-recovery failed for VC {self.voice_id}: {e}")
+
+            if not vc_data:
+                return None, "❌ VC data not found. The VC may have been disconnected.\n\nTry using `/vc reconnect` or creating a new VC."
+
+        # Check owner
+        if interaction.user.id != vc_data['owner_id']:
+            return None, "❌ Only the VC owner can do this."
+
+        return vc_data, None
     
     @discord.ui.button(label="Accept", style=discord.ButtonStyle.success, emoji="✅", row=0)
     async def accept_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         cog = self._get_cog()
         if not cog:
-            return await interaction.response.send_message("❌ System temporarily unavailable.", ephemeral=True)
-        
-        vc_data = cog.get_vc_data(self.voice_id)
-        if not vc_data or interaction.user.id != vc_data['owner_id']:
-            return await interaction.response.send_message("❌ Only the owner can do this.", ephemeral=True)
-        
+            return await interaction.response.send_message("❌ System temporarily unavailable. Please try again.", ephemeral=True)
+
+        # FIX: Use new validation helper with auto-recovery
+        vc_data, error = await self._validate_owner_with_recovery(interaction, cog)
+        if error:
+            return await interaction.response.send_message(error, ephemeral=True)
+
         pending = cog.pending_knocks.get(self.voice_id, [])
         if not pending:
             return await interaction.response.send_message("❌ No pending knocks.", ephemeral=True)
-        
+
         await interaction.response.defer(ephemeral=True)
-        
+
         vc = interaction.guild.get_channel(self.voice_id)
         if not vc:
             return await interaction.followup.send("❌ VC no longer exists.", ephemeral=True)
-        
-        # FIX: Safe pop with race condition handling
-        try:
+
+        # FIX: Use lock to prevent race conditions when owner clicks rapidly
+        knock_lock = cog.get_knock_accept_lock(self.voice_id)
+        async with knock_lock:
+            # Re-check pending after acquiring lock
+            pending = cog.pending_knocks.get(self.voice_id, [])
+            if not pending:
+                return await interaction.followup.send("❌ No pending knocks.", ephemeral=True)
+
             user_id = pending.pop(0)
-        except IndexError:
-            return await interaction.followup.send("❌ No pending knocks.", ephemeral=True)
         
         user = interaction.guild.get_member(user_id)
         
@@ -1173,29 +1335,34 @@ class KnockManagementView(discord.ui.View):
     async def deny_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         cog = self._get_cog()
         if not cog:
-            return await interaction.response.send_message("❌ System temporarily unavailable.", ephemeral=True)
-        
-        vc_data = cog.get_vc_data(self.voice_id)
-        if not vc_data or interaction.user.id != vc_data['owner_id']:
-            return await interaction.response.send_message("❌ Only the owner can do this.", ephemeral=True)
-        
+            return await interaction.response.send_message("❌ System temporarily unavailable. Please try again.", ephemeral=True)
+
+        # FIX: Use new validation helper with auto-recovery
+        vc_data, error = await self._validate_owner_with_recovery(interaction, cog)
+        if error:
+            return await interaction.response.send_message(error, ephemeral=True)
+
         pending = cog.pending_knocks.get(self.voice_id, [])
         if not pending:
             return await interaction.response.send_message("❌ No pending knocks.", ephemeral=True)
-        
+
         await interaction.response.defer(ephemeral=True)
-        
-        # FIX: Safe pop with race condition handling
-        try:
+
+        # FIX: Use lock to prevent race conditions when owner clicks rapidly
+        knock_lock = cog.get_knock_accept_lock(self.voice_id)
+        async with knock_lock:
+            # Re-check pending after acquiring lock
+            pending = cog.pending_knocks.get(self.voice_id, [])
+            if not pending:
+                return await interaction.followup.send("❌ No pending knocks.", ephemeral=True)
+
             user_id = pending.pop(0)
-        except IndexError:
-            return await interaction.followup.send("❌ No pending knocks.", ephemeral=True)
-        
+
         user = interaction.guild.get_member(user_id)
-        
+
         # Delete ping notification
         await self._delete_knock_ping_notification(interaction.channel)
-        
+
         await cog.update_knock_panel(self.voice_id)
         name = user.display_name if user else f"User {user_id}"
         await interaction.followup.send(f"❌ Denied **{name}**", ephemeral=True)
@@ -1230,17 +1397,16 @@ class KnockManagementView(discord.ui.View):
     async def settings_select(self, interaction: discord.Interaction, select: discord.ui.Select):
         cog = self._get_cog()
         if not cog:
-            return await interaction.response.send_message("❌ System temporarily unavailable.", ephemeral=True)
-        
-        vc_data = cog.get_vc_data(self.voice_id)
-        if not vc_data:
-            return await interaction.response.send_message("❌ VC no longer exists.", ephemeral=True)
-        if interaction.user.id != vc_data['owner_id']:
-            return await interaction.response.send_message("❌ Only the VC owner can access settings.", ephemeral=True)
-        
+            return await interaction.response.send_message("❌ System temporarily unavailable. Please try again.", ephemeral=True)
+
+        # FIX: Use new validation helper with auto-recovery
+        vc_data, error = await self._validate_owner_with_recovery(interaction, cog)
+        if error:
+            return await interaction.response.send_message(error, ephemeral=True)
+
         vc = interaction.guild.get_channel(self.voice_id)
         if not vc:
-            return await interaction.response.send_message("❌ VC no longer exists.", ephemeral=True)
+            return await interaction.response.send_message("❌ VC channel no longer exists on Discord.", ephemeral=True)
         
         choice = select.values[0]
         

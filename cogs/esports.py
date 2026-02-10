@@ -9,6 +9,7 @@ import secrets
 import os
 import json
 import re
+import unicodedata
 from collections import OrderedDict
 from io import BytesIO
 from PIL import Image
@@ -23,7 +24,9 @@ from .esports_shared import (
     DEFAULT_GAME_ICON_FALLBACK, ALLOWED_TIERS,
     ALLOWED_REGION_KEYWORDS, MAJOR_LEAGUE_KEYWORDS,
     EXCLUDED_REGION_KEYWORDS, INTERNATIONAL_LAN_KEYWORDS,
-    RLCS_EARLY_ROUND_KEYWORDS, VCT_CHALLENGERS_SUBREGION_KEYWORDS,
+    RLCS_EARLY_ROUND_KEYWORDS, RLCS_LAN_EXTRA_KEYWORDS, RLCS_LAN_IDENTIFIERS,
+    VCT_CHALLENGERS_SUBREGION_KEYWORDS,
+    LIQUIPEDIA_GAME_SLUGS,
     STRAFE_GAME_SLUGS, STRAFE_GAME_PATHS, GAME_MAP_FALLBACK,
     logger, ensure_data_file, load_data_sync, save_data_sync,
     safe_parse_datetime, stitch_images, add_white_outline,
@@ -54,6 +57,19 @@ class StrafeClient:
     async def close(self):
         if self.session and not self.session.closed:
             await self.session.close()
+
+    @staticmethod
+    def _normalize_team_name(name: str) -> str:
+        """Normalize team name for fuzzy matching - strip suffixes, accents, etc."""
+        # Normalize unicode (é -> e, ü -> u, etc.)
+        name = unicodedata.normalize('NFKD', name).encode('ascii', 'ignore').decode('ascii')
+        name = name.lower().strip()
+        # Strip common esports suffixes
+        for suffix in [' esports', ' e-sports', ' esport', ' gaming', ' team', ' clan', ' org', ' gg']:
+            if name.endswith(suffix):
+                name = name[:-len(suffix)].strip()
+                break
+        return name
 
     async def find_strafe_match(self, team_a_name, team_b_name, game_slug, match_time=None):
         """Find a match on Strafe by scraping multiple pages. Returns match dict with 'slug' for URL."""
@@ -131,6 +147,10 @@ class StrafeClient:
                 unique_matches.append(m)
 
         best_match, best_score = None, 0
+        # Pre-normalize PandaScore team names once
+        norm_a = self._normalize_team_name(team_a_name)
+        norm_b = self._normalize_team_name(team_b_name)
+
         for m in unique_matches:
             competitors = m.get('competitors', [])
             if len(competitors) < 2:
@@ -163,17 +183,20 @@ class StrafeClient:
             if not home_name or not away_name:
                 continue
 
-            sim_a_home = SequenceMatcher(None, team_a_name.lower(), home_name.lower()).ratio()
-            sim_b_away = SequenceMatcher(None, team_b_name.lower(), away_name.lower()).ratio()
-            sim_a_away = SequenceMatcher(None, team_a_name.lower(), away_name.lower()).ratio()
-            sim_b_home = SequenceMatcher(None, team_b_name.lower(), home_name.lower()).ratio()
+            # Normalize Strafe names too before comparing
+            norm_home = self._normalize_team_name(home_name)
+            norm_away = self._normalize_team_name(away_name)
+
+            sim_a_home = SequenceMatcher(None, norm_a, norm_home).ratio()
+            sim_b_away = SequenceMatcher(None, norm_b, norm_away).ratio()
+            sim_a_away = SequenceMatcher(None, norm_a, norm_away).ratio()
+            sim_b_home = SequenceMatcher(None, norm_b, norm_home).ratio()
 
             score = max((sim_a_home + sim_b_away) / 2, (sim_a_away + sim_b_home) / 2)
 
             if score > 0.25:
                 logger.debug(f"Strafe candidate: {home_name} vs {away_name} (score: {score:.2f})")
 
-            # Lowered threshold from 0.4 to 0.35 to catch more matches with slightly different names
             if score > best_score and score > 0.35:
                 best_score, best_match = score, m
 
@@ -185,14 +208,23 @@ class StrafeClient:
         return best_match
 
     async def get_map_scores(self, strafe_match_slug, team_a_name, team_b_name, game_slug):
-        """Fetch map scores by scraping the match page directly."""
+        """Fetch map scores by scraping the match page directly.
+
+        Uses multiple extraction methods to ensure we get ALL map data:
+        1. Primary: Parse 'live' array for game entries
+        2. Secondary: Search 'games'/'maps' arrays in various locations
+        3. Tertiary: Recursive deep search for game-like structures
+        4. Final fallback: Synthesize from header scores + veto data
+
+        The get_map_history function will validate the final data against match scores.
+        """
         maps = []
         if not strafe_match_slug:
             return maps
 
         url = f"https://www.strafe.com/match/{strafe_match_slug}/"
         session = await self._get_session()
-        logger.debug(f"Fetching map scores from Strafe match page: {url}")
+        logger.info(f"Fetching map scores from Strafe match page: {url}")
 
         try:
             async with session.get(url) as resp:
@@ -329,6 +361,11 @@ class StrafeClient:
                         winner = 0
                     elif winner_key == 'away':
                         winner = 1
+                    elif score_home > score_away:
+                        # Infer winner from scores if winner_key not recognized
+                        winner = 0
+                    elif score_away > score_home:
+                        winner = 1
                     else:
                         winner = -1
                 else:
@@ -337,11 +374,17 @@ class StrafeClient:
                         winner = 1
                     elif winner_key == 'away':
                         winner = 0
+                    elif score_home > score_away:
+                        # Infer winner from scores if winner_key not recognized
+                        winner = 1
+                    elif score_away > score_home:
+                        winner = 0
                     else:
                         winner = -1
 
                 status = item_data.get('status', 'unknown')
-                if winner_key:
+                # Mark as finished if we have a winner (either from winner_key or inferred from scores)
+                if winner_key or winner != -1:
                     status = 'finished'
 
                 map_entries.append({
@@ -373,102 +416,181 @@ class StrafeClient:
                 })
                 logger.debug(f"Map {len(maps)}: {entry['name']} - {entry['score_a']}:{entry['score_b']}, winner: {entry['winner']}")
 
-            # If no maps found via 'live', try alternate data paths
-            if not maps:
-                logger.debug("No maps found in live array, checking alternate paths...")
+            # Get expected map count from header scores for validation
+            header_scores = header.get('scores', {})
+            expected_maps = 0
+            if isinstance(header_scores, dict):
+                expected_maps = (header_scores.get('home', 0) or 0) + (header_scores.get('away', 0) or 0)
+            logger.info(f"Expected {expected_maps} maps based on header scores")
 
-                # Try 'games' array in header, root, or pageProps
-                games_array = (
-                    legacy_match.get('games', []) or
-                    header.get('games', []) or
-                    page_props.get('games', []) or
-                    legacy_match.get('maps', []) or
-                    page_props.get('maps', [])
-                )
-                for idx, game in enumerate(games_array):
-                    if isinstance(game, dict):
-                        map_name = game.get('map', {}).get('name') if isinstance(game.get('map'), dict) else game.get('map', f"Game {idx + 1}")
-                        if not map_name:
-                            map_name = f"{GAME_MAP_FALLBACK.get(game_slug, 'Game')} {idx + 1}"
+            # If we don't have enough maps from 'live', try alternate data paths
+            if len(maps) < expected_maps or not maps:
+                logger.info(f"Have {len(maps)} maps, need {expected_maps}. Trying alternate extraction paths...")
 
-                        score_data = game.get('score', {}) or game.get('final', {})
-                        score_home = score_data.get('home', 0) or 0
-                        score_away = score_data.get('away', 0) or 0
+                # Helper to extract game data from various structures
+                def extract_game_from_dict(game, idx, is_a_home_param):
+                    """Extract map data from a game dict structure."""
+                    if not isinstance(game, dict):
+                        return None
 
-                        winner_key = game.get('winner')
+                    # Get map name from various possible locations
+                    map_name = None
+                    map_obj = game.get('map')
+                    if isinstance(map_obj, dict):
+                        map_name = map_obj.get('name')
+                    elif isinstance(map_obj, str):
+                        map_name = map_obj
+                    if not map_name:
+                        map_name = game.get('mapName') or game.get('map_name')
+                    if not map_name:
+                        map_name = f"{GAME_MAP_FALLBACK.get(game_slug, 'Game')} {idx + 1}"
 
-                        if is_a_home:
-                            score_a, score_b = score_home, score_away
-                            winner = 0 if winner_key == 'home' else (1 if winner_key == 'away' else -1)
+                    # Get scores from various possible locations
+                    score_data = (
+                        game.get('score', {}) or
+                        game.get('final', {}) or
+                        game.get('scores', {}) or
+                        game.get('result', {}) or
+                        {}
+                    )
+                    score_home = score_data.get('home', 0) or 0
+                    score_away = score_data.get('away', 0) or 0
+
+                    # Get winner from various possible keys
+                    winner_key = game.get('winner') or game.get('winnerSide') or game.get('winner_side')
+
+                    # Determine winner index
+                    if is_a_home_param:
+                        score_a, score_b = score_home, score_away
+                        if winner_key == 'home':
+                            winner = 0
+                        elif winner_key == 'away':
+                            winner = 1
+                        elif score_home > score_away:
+                            winner = 0
+                        elif score_away > score_home:
+                            winner = 1
                         else:
-                            score_a, score_b = score_away, score_home
-                            winner = 1 if winner_key == 'home' else (0 if winner_key == 'away' else -1)
+                            winner = -1
+                    else:
+                        score_a, score_b = score_away, score_home
+                        if winner_key == 'home':
+                            winner = 1
+                        elif winner_key == 'away':
+                            winner = 0
+                        elif score_home > score_away:
+                            winner = 1
+                        elif score_away > score_home:
+                            winner = 0
+                        else:
+                            winner = -1
 
-                        maps.append({
-                            "name": str(map_name)[:18],
-                            "score_a": score_a,
-                            "score_b": score_b,
-                            "winner": winner,
-                            "status": "finished" if winner_key else "unknown"
-                        })
+                    # Only return if we have a determined winner
+                    if winner == -1 and not winner_key:
+                        return None
 
-            # Final fallback: try to extract from 'scores' in header (gives overall match result at minimum)
-            if not maps:
-                logger.debug("No games array found, trying header scores...")
-                scores = header.get('scores', {})
-                if isinstance(scores, dict) and 'home' in scores and 'away' in scores:
-                    # This is just the overall match score, not per-map
-                    # Only use this if we have nothing else
-                    total_home = scores.get('home', 0) or 0
-                    total_away = scores.get('away', 0) or 0
-                    if total_home > 0 or total_away > 0:
-                        logger.debug(f"Using header scores as fallback: {total_home}-{total_away}")
-                        # Try to get map names from veto/mapOrder if available
-                        map_order = (
-                            legacy_match.get('mapOrder', []) or
-                            legacy_match.get('veto', {}).get('maps', []) or
-                            header.get('mapOrder', []) or
-                            []
-                        )
+                    return {
+                        "name": str(map_name)[:18],
+                        "score_a": score_a,
+                        "score_b": score_b,
+                        "winner": winner,
+                        "status": "finished"
+                    }
 
-                        # Create synthetic "game" entries based on the score
-                        num_games = total_home + total_away
-                        home_wins = 0
-                        for i in range(num_games):
-                            # Try to get map name from map order
-                            if i < len(map_order):
-                                map_entry = map_order[i]
-                                if isinstance(map_entry, dict):
-                                    map_name = map_entry.get('name') or map_entry.get('map', {}).get('name')
-                                elif isinstance(map_entry, str):
-                                    map_name = map_entry
-                                else:
-                                    map_name = None
-                            else:
-                                map_name = None
+                # Method 2: Try 'games' array in multiple locations
+                games_arrays_to_try = [
+                    legacy_match.get('games', []),
+                    header.get('games', []),
+                    page_props.get('games', []),
+                    legacy_match.get('maps', []),
+                    page_props.get('maps', []),
+                    legacy_match.get('rounds', []),
+                    page_props.get('rounds', []),
+                ]
 
-                            if not map_name:
-                                map_name = f"{GAME_MAP_FALLBACK.get(game_slug, 'Game')} {i + 1}"
+                for games_array in games_arrays_to_try:
+                    if not games_array or len(maps) >= expected_maps:
+                        continue
 
-                            # Alternate wins based on who won overall
-                            if home_wins < total_home:
-                                winner_key = 'home'
-                                home_wins += 1
-                            else:
-                                winner_key = 'away'
+                    logger.debug(f"Trying games array with {len(games_array)} items")
+                    for idx, game in enumerate(games_array):
+                        extracted = extract_game_from_dict(game, idx, is_a_home)
+                        if extracted and len(maps) < 7:
+                            # Check for duplicate map names
+                            if not any(m['name'] == extracted['name'] for m in maps):
+                                maps.append(extracted)
 
-                            if is_a_home:
-                                winner = 0 if winner_key == 'home' else 1
-                            else:
-                                winner = 1 if winner_key == 'home' else 0
+                # Method 3: Deep recursive search for game-like structures
+                if len(maps) < expected_maps:
+                    logger.info(f"Still have {len(maps)} maps, performing deep recursive search...")
 
-                            maps.append({
-                                "name": str(map_name)[:18],
-                                "score_a": 0,
-                                "score_b": 0,
-                                "winner": winner,
-                                "status": "finished"
-                            })
+                    found_games = []
+
+                    def deep_find_games(obj, depth=0):
+                        """Recursively search for game/map data structures."""
+                        if depth > 10:  # Prevent infinite recursion
+                            return
+
+                        if isinstance(obj, dict):
+                            # Check if this looks like a game entry
+                            has_winner = 'winner' in obj or 'winnerSide' in obj
+                            has_scores = 'score' in obj or 'scores' in obj or 'final' in obj
+                            has_map_ref = 'map' in obj or 'mapName' in obj
+                            has_index = 'index' in obj or 'gameNumber' in obj or 'number' in obj
+
+                            # A game-like structure has winner and/or scores
+                            if has_winner and (has_scores or has_map_ref):
+                                # Avoid duplicates
+                                obj_str = json.dumps(obj, sort_keys=True, default=str)[:200]
+                                if obj_str not in [json.dumps(g, sort_keys=True, default=str)[:200] for g in found_games]:
+                                    found_games.append(obj)
+
+                            # Recurse into values
+                            for v in obj.values():
+                                deep_find_games(v, depth + 1)
+
+                        elif isinstance(obj, list):
+                            for item in obj:
+                                deep_find_games(item, depth + 1)
+
+                    deep_find_games(page_props)
+
+                    logger.debug(f"Deep search found {len(found_games)} potential game structures")
+
+                    # Sort by index if available
+                    def get_game_index(g):
+                        return g.get('index', g.get('gameNumber', g.get('number', 999)))
+
+                    found_games.sort(key=get_game_index)
+
+                    for idx, game in enumerate(found_games):
+                        if len(maps) >= expected_maps or len(maps) >= 7:
+                            break
+                        extracted = extract_game_from_dict(game, idx, is_a_home)
+                        if extracted:
+                            # Check for duplicate map names
+                            if not any(m['name'] == extracted['name'] for m in maps):
+                                maps.append(extracted)
+
+            # Synthetic fallback removed - fabricating map data from header scores
+            # produced unreliable data that usually failed validation anyway.
+            # Better to return nothing and let the result post without map history.
+
+            # Final validation: log detailed results for debugging
+            map_wins_home = sum(1 for m in maps if m.get('winner') == (0 if is_a_home else 1))
+            map_wins_away = sum(1 for m in maps if m.get('winner') == (1 if is_a_home else 0))
+            logger.info(
+                f"Strafe extraction complete: {len(maps)} maps found, "
+                f"expected {expected_maps}, wins: {map_wins_home}-{map_wins_away}"
+            )
+
+            # If we still don't have enough maps after all extraction methods,
+            # log a warning but let get_map_history handle the validation
+            if expected_maps > 0 and len(maps) < expected_maps:
+                logger.warning(
+                    f"Could not extract all maps: got {len(maps)}, expected {expected_maps}. "
+                    f"Map history will be hidden if data doesn't match final score."
+                )
 
         except Exception as e:
             logger.warning(f"Error fetching Strafe map data: {e}")
@@ -572,15 +694,101 @@ class Esports(commands.Cog):
                 await asyncio.sleep(1)
         return None
 
+    async def fetch_roster_liquipedia(self, team_name: str, game_slug: str) -> list:
+        """Fetch roster from Liquipedia wiki page. Returns list of player names or empty list."""
+        wiki_slug = LIQUIPEDIA_GAME_SLUGS.get(game_slug)
+        if not wiki_slug:
+            return []
+
+        team_slug = team_name.strip().replace(" ", "_")
+        url = f"https://liquipedia.net/{wiki_slug}/{urllib.parse.quote(team_slug)}"
+
+        headers = {
+            "User-Agent": "VibeyBot/1.0 (Discord esports bot; contact via Discord)",
+            "Accept": "text/html",
+        }
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+                async with session.get(url) as resp:
+                    if resp.status != 200:
+                        logger.debug(f"Liquipedia returned {resp.status} for {url}")
+                        return []
+                    html = await resp.text()
+
+            soup = BeautifulSoup(html, 'html.parser')
+
+            # Strategy 1: roster-card divs (modern Liquipedia format)
+            players = []
+            roster_cards = soup.select('.roster-card .player-name, .roster-card .ID')
+            if roster_cards:
+                for card in roster_cards:
+                    name = card.get_text(strip=True)
+                    if name and len(name) >= 2:
+                        players.append(name)
+
+            # Strategy 2: "Active Squad" / "Player Roster" table heading
+            if not players:
+                for heading in soup.find_all(['h2', 'h3']):
+                    heading_text = heading.get_text(strip=True).lower()
+                    if any(kw in heading_text for kw in ['active', 'roster', 'squad', 'player']):
+                        sibling = heading.find_next(['table', 'div'])
+                        if sibling:
+                            for row in sibling.find_all('tr'):
+                                cells = row.find_all('td')
+                                for cell in cells:
+                                    id_link = cell.find('a', href=True)
+                                    if id_link:
+                                        text = id_link.get_text(strip=True)
+                                        if text and 2 <= len(text) <= 20 and not text.startswith('/'):
+                                            players.append(text)
+                                            break
+                        if players:
+                            break
+
+            # Strategy 3: .wikitable with player data
+            if not players:
+                for table in soup.select('.wikitable'):
+                    rows = table.find_all('tr')
+                    for row in rows[1:]:
+                        cells = row.find_all('td')
+                        if len(cells) >= 2:
+                            id_text = cells[1].get_text(strip=True)
+                            if id_text and 2 <= len(id_text) <= 20:
+                                players.append(id_text)
+
+            # Deduplicate preserving order, limit to 6
+            seen = set()
+            unique_players = []
+            for p in players:
+                if p.lower() not in seen:
+                    seen.add(p.lower())
+                    unique_players.append(p)
+
+            if unique_players:
+                logger.debug(f"Liquipedia roster for {team_name}: {unique_players[:6]}")
+                return unique_players[:6]
+
+        except asyncio.TimeoutError:
+            logger.debug(f"Liquipedia timeout for {team_name}")
+        except Exception as e:
+            logger.debug(f"Liquipedia roster fetch failed for {team_name}: {e}")
+
+        return []
+
     async def fetch_roster(self, team_id, team_name, game_slug):
+        # Try Liquipedia first (more up-to-date rosters)
+        roster = await self.fetch_roster_liquipedia(team_name, game_slug)
+        if roster:
+            return roster
+
+        # Fall back to PandaScore API
         team_data = await self.get_pandascore_data(f"/teams/{team_id}")
         if team_data and 'players' in team_data:
-            # First try active players only
             roster = [p.get('name', 'Unknown') for p in team_data['players'] if p.get('active', True)]
-            # If no active players, try all players (some APIs don't set active correctly)
             if not roster:
                 roster = [p.get('name', 'Unknown') for p in team_data['players']]
-            # Return if we have at least 1 player (lowered from 3 to be more permissive)
             if roster:
                 return roster[:6]
         return []
@@ -622,10 +830,34 @@ class Esports(commands.Cog):
             (match.get('tournament', {}).get('name', '') or "")
         ).lower()
 
-        # 1. International LANs always pass - these are the premier events
-        is_international = any(k in event_name for k in INTERNATIONAL_LAN_KEYWORDS)
-        if is_international:
-            return True
+        # Check region status upfront - this is critical for correct filtering
+        is_allowed_region = any(k in event_name for k in ALLOWED_REGION_KEYWORDS)
+        is_excluded_region = any(k in event_name for k in EXCLUDED_REGION_KEYWORDS)
+
+        # 1. REGION FILTERING FIRST - explicitly excluded regions are blocked
+        # UNLESS the event is a TRUE international LAN (not just "champions tour")
+        # True international LANs: "masters", "world championship", "champions 2026" (finals), etc.
+        # NOT international: "champions tour pacific" - this is a regional league
+        if is_excluded_region and not is_allowed_region:
+            # Only allow through if it's a TRUE international event
+            # These are standalone events, not regional league matches
+            true_international_keywords = [
+                "masters", "world", "lock//in", "lockin", "lock-in",
+                "gamers8", "iem", "blast premier", "six invitational",
+                "six major", "all-star", "allstar", "grand final",
+            ]
+            # "champions" alone is NOT enough - it must be "champions 20XX" (finals event)
+            # or similar standalone championship, not "champions tour [region]"
+            is_true_international = any(k in event_name for k in true_international_keywords)
+
+            # Special case: "champions 20XX" events (the yearly finals) are international
+            # but "champions tour [region]" is a regional league
+            champions_finals = re.search(r'\bchampions\s+20\d{2}\b', event_name)
+            if champions_finals and "tour" not in event_name:
+                is_true_international = True
+
+            if not is_true_international:
+                return False
 
         # 2. Check if it's a major league for this game
         if game_slug and game_slug in MAJOR_LEAGUE_KEYWORDS:
@@ -638,25 +870,25 @@ class Esports(commands.Cog):
             is_early_round = any(k in event_name for k in RLCS_EARLY_ROUND_KEYWORDS)
             if is_early_round:
                 return False
+            # For LAN events (Majors/Worlds), apply extra filtering (day 2)
+            # LANs have Swiss stage spanning multiple days, so filter more aggressively
+            is_rlcs_lan = any(k in event_name for k in RLCS_LAN_IDENTIFIERS)
+            # Don't classify regional qualifiers as LANs even if the series contains "major"
+            # e.g. "RLCS 2026 Major 1 NA Regional Open 3 Day 2" is a regional, NOT a LAN
+            if is_rlcs_lan and any(k in event_name for k in ["regional", "open", "qualifier", "closed"]):
+                is_rlcs_lan = False
+            if is_rlcs_lan:
+                is_lan_early_round = any(k in event_name for k in RLCS_LAN_EXTRA_KEYWORDS)
+                if is_lan_early_round:
+                    return False
 
-        # 3.5. VCT Challengers sub-regional filtering - ALWAYS exclude these
+        # 4. VCT Challengers sub-regional filtering - ALWAYS exclude these
         # These are lower-tier regional leagues (e.g., North//East, Challengers France)
         # and should be filtered even if they contain "emea" or other allowed keywords
         if game_slug == "valorant":
             is_subregion_challengers = any(k in event_name for k in VCT_CHALLENGERS_SUBREGION_KEYWORDS)
             if is_subregion_challengers:
                 return False
-
-        # 4. Region filtering - whitelist approach
-        # First check if it's explicitly an allowed region (NA/EU)
-        is_allowed_region = any(k in event_name for k in ALLOWED_REGION_KEYWORDS)
-
-        # Then check if it matches any excluded region
-        is_excluded_region = any(k in event_name for k in EXCLUDED_REGION_KEYWORDS)
-
-        # If it's an excluded region and NOT explicitly allowed, filter it out
-        if is_excluded_region and not is_allowed_region:
-            return False
 
         # 5. Tier check - only S and A tier events
         if tier not in ALLOWED_TIERS:
@@ -821,15 +1053,35 @@ class Esports(commands.Cog):
                 if is_team_a_home:
                     # A = Home, B = Away
                     s_a, s_b = score_home, score_away
-                    if winner_key == 'home': winner_idx = 0
-                    elif winner_key == 'away': winner_idx = 1
-                    else: winner_idx = -1
+                    if winner_key == 'home':
+                        winner_idx = 0
+                    elif winner_key == 'away':
+                        winner_idx = 1
+                    elif score_home > score_away:
+                        # Infer winner from scores if winner_key not recognized
+                        winner_idx = 0
+                    elif score_away > score_home:
+                        winner_idx = 1
+                    else:
+                        winner_idx = -1
                 else:
                     # A = Away, B = Home
                     s_a, s_b = score_away, score_home
-                    if winner_key == 'home': winner_idx = 1
-                    elif winner_key == 'away': winner_idx = 0
-                    else: winner_idx = -1
+                    if winner_key == 'home':
+                        winner_idx = 1
+                    elif winner_key == 'away':
+                        winner_idx = 0
+                    elif score_home > score_away:
+                        # Infer winner from scores if winner_key not recognized
+                        winner_idx = 1
+                    elif score_away > score_home:
+                        winner_idx = 0
+                    else:
+                        winner_idx = -1
+
+                # Mark as finished if we have a valid winner
+                if winner_key or winner_idx != -1:
+                    status = 'finished'
 
                 map_entries.append({
                     "index": map_index,
@@ -863,19 +1115,61 @@ class Esports(commands.Cog):
             logger.error(f"Strafe JSON scrape error: {e}")
             return []
 
-    async def get_strafe_map_data(self, team_a_name, team_b_name, game_slug, match_time=None):
+    async def get_strafe_map_data(self, team_a_name, team_b_name, game_slug, match_time=None, winner_idx=None):
         # Never fetch map data for Rocket League - individual game scores aren't meaningful
         if game_slug == 'rl':
             return []
         if not STRAFE_GAME_SLUGS.get(game_slug):
             return []
-        try:
-            strafe_match = await self.strafe.find_strafe_match(team_a_name, team_b_name, game_slug, match_time)
-            if strafe_match and strafe_match.get('slug'):
-                return await self.strafe.get_map_scores(strafe_match['slug'], team_a_name, team_b_name, game_slug)
-        except Exception as e:
-            logger.error(f"Strafe error: {e}")
+
+        for attempt in range(2):
+            try:
+                strafe_match = await self.strafe.find_strafe_match(team_a_name, team_b_name, game_slug, match_time)
+                if strafe_match and strafe_match.get('slug'):
+                    map_data = await self.strafe.get_map_scores(strafe_match['slug'], team_a_name, team_b_name, game_slug)
+                    if map_data:
+                        # Validate winner mapping against PandaScore's known winner
+                        if winner_idx is not None:
+                            map_data = self._validate_winner_mapping(map_data, winner_idx)
+                        return map_data
+            except Exception as e:
+                logger.error(f"Strafe error (attempt {attempt + 1}): {e}")
+
+            # Retry once after delay - Strafe may not have updated yet
+            if attempt == 0:
+                logger.info(f"No Strafe map data on first attempt, retrying in 45s...")
+                await asyncio.sleep(45)
+
         return []
+
+    def _validate_winner_mapping(self, map_data: list, winner_idx: int) -> list:
+        """Check if map winners align with PandaScore's known match winner. Fix if flipped."""
+        played = [m for m in map_data if m.get('winner') in (0, 1)]
+        if not played:
+            return map_data
+
+        map_wins_a = sum(1 for m in played if m['winner'] == 0)
+        map_wins_b = sum(1 for m in played if m['winner'] == 1)
+
+        # If the team with more map wins doesn't match PandaScore's winner, flip
+        needs_flip = (
+            (map_wins_a > map_wins_b and winner_idx == 1) or
+            (map_wins_b > map_wins_a and winner_idx == 0)
+        )
+
+        if needs_flip:
+            logger.info(
+                f"Flipping Strafe map winners to match PandaScore "
+                f"(was {map_wins_a}-{map_wins_b}, winner should be team {winner_idx})"
+            )
+            for m in map_data:
+                if m.get('winner') == 0:
+                    m['winner'] = 1
+                elif m.get('winner') == 1:
+                    m['winner'] = 0
+                m['score_a'], m['score_b'] = m['score_b'], m['score_a']
+
+        return map_data
 
     # --- IMAGE & EMOJI MANAGEMENT ---
     async def download_image(self, session, url):
@@ -919,84 +1213,126 @@ class Esports(commands.Cog):
         target_guilds = [g for g in self.bot.guilds if str(g.id) in data.get("emoji_storage_guilds", [])]
         if not target_guilds: return 0
 
-        unique_teams = {}
+        # Group keys by team using image_url as identity
+        # teams_by_logo: { image_url: { "keys": set(), "name": str } }
+        teams_by_logo = {}
         for game_slug in GAMES.keys():
-            matches = await self.get_pandascore_data(f"/{game_slug}/matches", params={"sort": "-begin_at", "page[size]": 100})
-            if not matches: continue
-            
-            for m in matches:
-                if m.get('tournament', {}).get('tier') not in ['s', 'a']: continue
-                for opp in m.get('opponents', []):
-                    t = opp.get('opponent')
-                    if not t or not t.get('image_url'): continue
-                    
-                    # Generate keys used in get_team_display
-                    keys_to_save = []
-                    
-                    # 1. Acronym
-                    if t.get('acronym'):
-                        keys_to_save.append(t['acronym'].upper())
-                    
-                    # 2. First Word Key
-                    name_parts = t.get('name', '').split(' ')
-                    if name_parts:
-                        k1 = "".join(c for c in name_parts[0].upper() if c.isalnum())
-                        keys_to_save.append(k1)
-                    
-                    # 3. Full Name Key
-                    k2 = "".join(c for c in t.get('name', '').upper() if c.isalnum())
-                    keys_to_save.append(k2)
+            # Fetch 3 pages per game to catch more teams
+            for page in range(1, 4):
+                matches = await self.get_pandascore_data(
+                    f"/{game_slug}/matches",
+                    params={"sort": "-begin_at", "page[size]": 100, "page[number]": page}
+                )
+                if not matches:
+                    break
+                for m in matches:
+                    if m.get('tournament', {}).get('tier') not in ['s', 'a']:
+                        continue
+                    for opp in m.get('opponents', []):
+                        t = opp.get('opponent')
+                        if not t or not t.get('image_url'):
+                            continue
 
-                    for key in keys_to_save:
-                        if len(key) >= 2 and key not in unique_teams:
-                            unique_teams[key] = t['image_url']
+                        img_url = t['image_url']
+                        if img_url not in teams_by_logo:
+                            teams_by_logo[img_url] = {"keys": set(), "name": t.get('name', '')}
 
+                        # Generate all keys for this team
+                        if t.get('acronym'):
+                            key = t['acronym'].upper()
+                            if len(key) >= 2:
+                                teams_by_logo[img_url]["keys"].add(key)
+
+                        name_parts = t.get('name', '').split(' ')
+                        if name_parts:
+                            k1 = "".join(c for c in name_parts[0].upper() if c.isalnum())
+                            if len(k1) >= 2:
+                                teams_by_logo[img_url]["keys"].add(k1)
+
+                        k2 = "".join(c for c in t.get('name', '').upper() if c.isalnum())
+                        if len(k2) >= 2:
+                            teams_by_logo[img_url]["keys"].add(k2)
+
+        emoji_map = data.get("emoji_map", {})
         added_count = 0
-        async with aiohttp.ClientSession() as session:
-            for key, url in unique_teams.items():
-                if added_count >= 150: break
-                
-                # Check exist
-                exists = False
-                # We need to check if ANY emoji maps to this key in our data
-                if key in data["emoji_map"]: 
-                    exists = True
-                
-                if exists: continue
 
-                # Upload
+        async with aiohttp.ClientSession() as session:
+            for img_url, team_info in teams_by_logo.items():
+                keys = team_info["keys"]
+                if not keys:
+                    continue
+
+                # Check if this team already has an emoji (any key already mapped)
+                existing_emoji = None
+                for key in keys:
+                    if key in emoji_map:
+                        existing_emoji = emoji_map[key]
+                        break
+
+                if existing_emoji:
+                    # Backfill: map any missing keys to the same existing emoji
+                    backfilled = False
+                    for key in keys:
+                        if key not in emoji_map:
+                            emoji_map[key] = existing_emoji
+                            backfilled = True
+                    if backfilled:
+                        async with self.data_lock:
+                            d = load_data_sync()
+                            d["emoji_map"] = emoji_map
+                            save_data_sync(d)
+                    continue
+
+                # Upload ONE emoji for this team
+                if added_count >= 150:
+                    break
+
                 target = next((g for g in target_guilds if len(g.emojis) < g.emoji_limit), None)
-                if not target: break
+                if not target:
+                    break
 
                 try:
-                    async with session.get(url) as resp:
-                        if resp.status != 200: continue
+                    async with session.get(img_url) as resp:
+                        if resp.status != 200:
+                            continue
                         img_data = await resp.read()
-                    
+
                     img = Image.open(BytesIO(img_data)).convert("RGBA")
                     img.thumbnail((128, 128))
                     img = add_white_outline(img, thickness=3)
-                    
+
                     out = BytesIO()
                     img.save(out, format="PNG")
                     out.seek(0)
-                    
-                    emoji_name = f"esp_{key}"[:32]
+
+                    # Use the shortest key for the emoji name
+                    primary_key = min(keys, key=len)
+                    emoji_name = f"esp_{primary_key}"[:32]
                     new_emoji = await target.create_custom_emoji(name=emoji_name, image=out.read())
+                    emoji_str = str(new_emoji)
+
+                    # Map ALL keys for this team to the single emoji
                     async with self.data_lock:
                         d = load_data_sync()
-                        d["emoji_map"][key] = str(new_emoji)
+                        for key in keys:
+                            d["emoji_map"][key] = emoji_str
                         save_data_sync(d)
+                        emoji_map = d["emoji_map"]
+
                     added_count += 1
                     await asyncio.sleep(1.5)
                 except Exception as e:
-                    logger.error(f"Emoji upload failed for {key}: {e}")
+                    logger.error(f"Emoji upload failed for {team_info['name']}: {e}")
 
         return added_count
 
     # --- EMBED BUILDERS ---
     async def get_map_history(self, match_details, saved_teams, game_slug: str, map_data: list = None) -> Optional[str]:
-        """Build map history string. Returns None if no meaningful data to display."""
+        """Build map history string. Returns None if no meaningful data to display.
+
+        CRITICAL: If map data doesn't match the final score, return None to avoid
+        displaying incorrect information. Showing nothing is better than showing wrong data.
+        """
         num_games = match_details.get('number_of_games') or 0
 
         # Never show map history for Rocket League - individual game scores aren't meaningful
@@ -1010,22 +1346,40 @@ class Esports(commands.Cog):
         if len(saved_teams) < 2:
             return None
 
+        # Get the final match score from match_details
+        results = match_details.get('results', [])
+        final_score_a = 0
+        final_score_b = 0
+        for r in results:
+            if r.get('team_id') == saved_teams[0].get('id'):
+                final_score_a = r.get('score', 0) or 0
+            elif r.get('team_id') == saved_teams[1].get('id'):
+                final_score_b = r.get('score', 0) or 0
+
+        total_maps_played = final_score_a + final_score_b
+
         # Count maps that have actual played data (winner != -1)
         played_maps = [m for m in map_data if m.get('winner', -1) != -1]
         played_count = len(played_maps)
 
-        # Validate map count based on format
-        if num_games >= 1:
-            # Minimum maps needed: winner needs majority = (num_games // 2) + 1
-            # For Bo1: 1, Bo3: 2, Bo5: 3, Bo7: 4
-            min_maps_required = (num_games // 2) + 1
+        # Count map wins from the map data
+        map_wins_a = sum(1 for m in played_maps if m.get('winner') == 0)
+        map_wins_b = sum(1 for m in played_maps if m.get('winner') == 1)
 
-            if played_count < min_maps_required:
-                logger.debug(f"Insufficient maps for Bo{num_games}: got {played_count}, need {min_maps_required}")
+        # Validate map wins match the final score - if they don't, data is unreliable
+        if total_maps_played > 0:
+            if map_wins_a != final_score_a or map_wins_b != final_score_b:
+                logger.warning(
+                    f"Map data mismatch! Final score: {final_score_a}-{final_score_b}, "
+                    f"Map wins: {map_wins_a}-{map_wins_b}. Hiding match history to avoid false info."
+                )
                 return None
 
+            # Note: count check removed - if wins match the score, partial data is still valid.
+            # Strafe may not extract every map but the ones it got are correct.
+
             # Sanity check: if we have MORE maps than the format allows, data is corrupted
-            if played_count > num_games:
+            if num_games >= 1 and played_count > num_games:
                 logger.warning(f"Too many maps for Bo{num_games}: got {played_count}, max is {num_games}")
                 return None
 
@@ -1059,14 +1413,7 @@ class Esports(commands.Cog):
         if not has_real_data or not lines:
             return None
 
-        # Only pad with "Not played" if we KNOW the format (num_games) and have fewer maps
-        # This handles cases like Bo3 where only 2 maps were played
-        if num_games > 0 and len(lines) < num_games:
-            remaining = num_games - len(lines)
-            # Cap at reasonable number to avoid spam
-            for i in range(min(remaining, 3)):
-                lines.append(f"• Map {len(lines) + 1}: Not played")
-
+        # Never pad with "Not played" - only show confirmed, validated data
         return f"||{chr(10).join(lines)}||"
 
     async def generate_leaderboard_embed(self, guild, game_slug: str):
@@ -1428,13 +1775,19 @@ class Esports(commands.Cog):
                             teams[0]['name'],
                             teams[1]['name'],
                             info['game_slug'],
-                            match_time
+                            match_time,
+                            winner_idx=w_idx
                         )
                         if map_data:
                             logger.info(f"Successfully fetched {len(map_data)} maps from Strafe for match {mid}")
-                        
+
+                        # Re-read fresh votes from disk to avoid stale data race condition
+                        async with self.data_lock:
+                            fresh_data = load_data_sync()
+                            fresh_info = fresh_data["active_matches"].get(mid, info)
+
                         await msg.delete()
-                        await self.process_result(channel, info, w_idx, details, teams, map_data)
+                        await self.process_result(channel, fresh_info, w_idx, details, teams, map_data)
                         to_remove.append(mid)
                     elif details.get('draw') or status == "canceled":
                         to_remove.append(mid)

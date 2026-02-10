@@ -3,236 +3,322 @@
 <head>
     <meta charset="UTF-8">
     <style>
-        @font-face {
+        @font-face {{
             font-family: 'Cinzel';
             src: url('file://{font_path}/Cinzel-Regular.ttf') format('truetype');
             font-weight: normal;
-        }
-        @font-face {
+        }}
+        @font-face {{
             font-family: 'Cinzel';
             src: url('file://{font_path}/Cinzel-Bold.ttf') format('truetype');
             font-weight: bold;
-        }
+        }}
 
-        * {
+        * {{
             margin: 0;
             padding: 0;
             box-sizing: border-box;
-        }
+        }}
 
-        body {
-            width: 600px;
+        body {{
+            width: 580px;
             min-height: 400px;
             font-family: 'Cinzel', 'Segoe UI', sans-serif;
+            font-weight: bold;
             background: linear-gradient(135deg, #0f1012 0%, #1e1f22 100%);
             color: #ffffff;
-            padding: 24px;
-        }
+            padding: 20px;
+        }}
 
-        .header {
+        .header {{
             display: flex;
             align-items: center;
-            margin-bottom: 20px;
+            margin-bottom: 16px;
+            padding-bottom: 12px;
             border-bottom: 1px solid rgba(255,255,255,0.1);
-            padding-bottom: 16px;
-        }
+        }}
 
-        .avatar {
-            width: 64px;
-            height: 64px;
+        .avatar {{
+            width: 56px;
+            height: 56px;
             border-radius: 50%;
-            margin-right: 16px;
+            margin-right: 14px;
             border: 2px solid #5865f2;
-        }
+        }}
 
-        .player-info {
+        .player-info {{
             flex: 1;
-        }
+        }}
 
-        .player-name {
-            font-size: 24px;
+        .player-name {{
+            font-size: 22px;
             font-weight: bold;
             color: #ffffff;
-        }
-
-        .period-title {
-            font-size: 14px;
-            color: #b9bbbe;
-            margin-top: 4px;
-        }
-
-        .mmr-badge {
-            background: linear-gradient(135deg, #5865f2, #7289da);
-            padding: 8px 16px;
-            border-radius: 8px;
-            font-size: 18px;
-            font-weight: bold;
-        }
-
-        .content {
-            display: flex;
-            gap: 20px;
-        }
-
-        .stats-column {
-            flex: 1;
-        }
-
-        .gauges-column {
-            width: 180px;
-        }
-
-        .stat-item {
-            margin-bottom: 12px;
-        }
-
-        .stat-label {
-            font-size: 12px;
-            color: #b9bbbe;
-            margin-bottom: 4px;
-        }
-
-        .stat-bar-container {
-            background: rgba(255,255,255,0.1);
-            border-radius: 4px;
-            height: 24px;
-            position: relative;
             overflow: hidden;
-        }
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            max-width: 300px;
+        }}
 
-        .stat-bar {
-            height: 100%;
-            border-radius: 4px;
-            transition: width 0.3s ease;
-        }
-
-        .stat-bar.wins { background: linear-gradient(90deg, #43b581, #3ca374); }
-        .stat-bar.kills { background: linear-gradient(90deg, #f04747, #d63838); }
-        .stat-bar.assists { background: linear-gradient(90deg, #faa61a, #e89416); }
-        .stat-bar.kd { background: linear-gradient(90deg, #5865f2, #7289da); }
-
-        .stat-value {
-            position: absolute;
-            right: 8px;
-            top: 50%;
-            transform: translateY(-50%);
-            font-size: 13px;
+        .period-title {{
+            font-size: 12px;
             font-weight: bold;
-        }
-
-        .gauge {
-            text-align: center;
-            margin-bottom: 16px;
-        }
-
-        .gauge-circle {
-            width: 80px;
-            height: 80px;
-            border-radius: 50%;
-            margin: 0 auto 8px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 20px;
-            font-weight: bold;
-            position: relative;
-        }
-
-        .gauge-circle::before {
-            content: '';
-            position: absolute;
-            inset: 4px;
-            border-radius: 50%;
-            background: #1e1f22;
-        }
-
-        .gauge-circle span {
-            position: relative;
-            z-index: 1;
-        }
-
-        .gauge-circle.kd { background: conic-gradient(#5865f2 var(--progress), rgba(255,255,255,0.1) 0); }
-        .gauge-circle.winrate { background: conic-gradient(#43b581 var(--progress), rgba(255,255,255,0.1) 0); }
-        .gauge-circle.hs { background: conic-gradient(#faa61a var(--progress), rgba(255,255,255,0.1) 0); }
-
-        .gauge-label {
-            font-size: 11px;
             color: #b9bbbe;
-        }
+            margin-top: 2px;
+        }}
 
-        .recent-matches {
-            margin-top: 20px;
-            border-top: 1px solid rgba(255,255,255,0.1);
-            padding-top: 16px;
-        }
-
-        .section-title {
-            font-size: 14px;
-            color: #b9bbbe;
-            margin-bottom: 12px;
-        }
-
-        .match-list {
-            display: flex;
-            flex-direction: column;
-            gap: 6px;
-        }
-
-        .match-item {
-            display: flex;
-            align-items: center;
-            padding: 8px 12px;
-            background: rgba(255,255,255,0.05);
-            border-radius: 6px;
-            font-size: 13px;
-        }
-
-        .match-result {
-            width: 24px;
-            height: 24px;
-            border-radius: 4px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-weight: bold;
-            margin-right: 12px;
-        }
-
-        .match-result.win { background: #43b581; }
-        .match-result.loss { background: #f04747; }
-
-        .match-info {
-            flex: 1;
-            color: #dcddde;
-        }
-
-        .match-kda {
-            color: #b9bbbe;
-        }
-
-        .agents-section {
-            margin-top: 16px;
-        }
-
-        .agents-grid {
+        .header-badges {{
             display: flex;
             gap: 8px;
-            flex-wrap: wrap;
-        }
+            align-items: center;
+        }}
 
-        .agent-item {
-            background: rgba(255,255,255,0.05);
+        .winrate-badge {{
+            background: linear-gradient(135deg, #5865f2, #7289da);
+            padding: 6px 14px;
+            border-radius: 12px;
+            font-size: 14px;
+            font-weight: bold;
+        }}
+
+        .rank-badge {{
+            background: linear-gradient(135deg, #f5a623, #e09112);
             padding: 6px 12px;
-            border-radius: 6px;
+            border-radius: 12px;
             font-size: 12px;
-        }
+            font-weight: bold;
+            white-space: nowrap;
+        }}
 
-        .no-data {
+        /* Top stats row - W/L bar, K/D bar, and key stats */
+        .top-stats {{
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 12px;
+            margin-bottom: 14px;
+        }}
+
+        .split-bar {{
+            background: rgba(255,255,255,0.03);
+            border-radius: 8px;
+            padding: 10px;
+        }}
+
+        .split-bar-label {{
+            font-size: 11px;
+            font-weight: bold;
+            color: #b9bbbe;
+            margin-bottom: 6px;
+            display: flex;
+            justify-content: space-between;
+        }}
+
+        .split-bar-container {{
+            display: flex;
+            height: 24px;
+            border-radius: 4px;
+            overflow: hidden;
+            background: rgba(255,255,255,0.1);
+        }}
+
+        .bar-left, .bar-right {{
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 11px;
+            font-weight: bold;
+            color: #fff;
+        }}
+
+        .bar-wins {{ background: linear-gradient(90deg, #43b581, #3ca374); }}
+        .bar-losses {{ background: linear-gradient(90deg, #2d7d5a, #256b4d); }}
+        .bar-kills {{ background: linear-gradient(90deg, #f04747, #d63838); }}
+        .bar-deaths {{ background: linear-gradient(90deg, #8b2e2e, #6d2424); }}
+
+        .quick-stats {{
+            background: rgba(255,255,255,0.03);
+            border-radius: 8px;
+            padding: 10px;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 4px 12px;
+        }}
+
+        .quick-stat {{
+            display: flex;
+            justify-content: space-between;
+            font-size: 11px;
+        }}
+
+        .quick-stat-name {{ color: #b9bbbe; }}
+        .quick-stat-val {{ color: #fff; }}
+
+        /* Middle section - Teammates and Stats */
+        .middle-section {{
+            display: grid;
+            grid-template-columns: 1fr 1fr 140px;
+            gap: 12px;
+            margin-bottom: 14px;
+        }}
+
+        .teammates-column {{
+            background: rgba(255,255,255,0.03);
+            border-radius: 8px;
+            padding: 10px;
+        }}
+
+        .section-title {{
+            font-size: 11px;
+            font-weight: bold;
+            color: #b9bbbe;
+            margin-bottom: 6px;
+        }}
+
+        .cursed-title {{ color: #f04747; }}
+
+        .teammates-list {{
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }}
+
+        .teammate-item {{
+            background: rgba(67, 181, 129, 0.15);
+            padding: 5px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: bold;
+            border-left: 3px solid #43b581;
+        }}
+
+        .teammate-item.cursed {{
+            background: rgba(240, 71, 71, 0.15);
+            border-left: 3px solid #f04747;
+        }}
+
+        .stats-box {{
+            background: rgba(255,255,255,0.03);
+            border-radius: 8px;
+            padding: 10px;
+        }}
+
+        .stat-row {{
+            display: flex;
+            justify-content: space-between;
+            padding: 4px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+            font-size: 11px;
+        }}
+
+        .stat-row:last-child {{ border-bottom: none; }}
+        .stat-name {{ color: #b9bbbe; }}
+        .stat-val {{ color: #fff; font-weight: bold; }}
+
+        /* Bottom section - Maps and Agents side by side */
+        .bottom-section {{
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            margin-bottom: 14px;
+        }}
+
+        .data-box {{
+            background: rgba(255,255,255,0.03);
+            border-radius: 8px;
+            padding: 10px;
+        }}
+
+        .items-grid {{
+            display: flex;
+            gap: 5px;
+            flex-wrap: wrap;
+        }}
+
+        .data-item {{
+            background: rgba(255,255,255,0.08);
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: bold;
+        }}
+
+        /* Recent matches - horizontal compact layout */
+        .recent-matches {{
+            background: rgba(255,255,255,0.03);
+            border-radius: 8px;
+            padding: 10px;
+        }}
+
+        .match-grid {{
+            display: flex;
+            gap: 8px;
+            justify-content: space-between;
+        }}
+
+        .match-card {{
+            flex: 1;
+            background: rgba(255,255,255,0.05);
+            border-radius: 6px;
+            padding: 8px;
+            text-align: center;
+            min-width: 0;
+        }}
+
+        .match-card.win {{
+            border-top: 3px solid #43b581;
+        }}
+
+        .match-card.loss {{
+            border-top: 3px solid #f04747;
+        }}
+
+        .match-result-indicator {{
+            font-size: 14px;
+            font-weight: bold;
+            margin-bottom: 4px;
+        }}
+
+        .match-result-indicator.win {{ color: #43b581; }}
+        .match-result-indicator.loss {{ color: #f04747; }}
+
+        .match-map {{
+            font-size: 10px;
+            color: #dcddde;
+            margin-bottom: 2px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }}
+
+        .match-agent {{
+            font-size: 9px;
+            color: #b9bbbe;
+            margin-bottom: 4px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }}
+
+        .match-kda {{
+            font-size: 11px;
+            font-weight: bold;
+            color: #fff;
+        }}
+
+        .no-data {{
             color: #72767d;
             font-style: italic;
-            padding: 20px;
+            padding: 10px;
             text-align: center;
-        }
+            font-size: 11px;
+        }}
+
+        .no-data-small {{
+            color: #72767d;
+            font-style: italic;
+            padding: 6px;
+            font-size: 10px;
+        }}
     </style>
 </head>
 <body>
@@ -242,47 +328,56 @@
             <div class="player-name">{player_name}</div>
             <div class="period-title">{period_title}</div>
         </div>
-        <div class="mmr-badge">{mmr} MMR</div>
-    </div>
-
-    <div class="content">
-        <div class="stats-column">
-            <div class="stat-item">
-                <div class="stat-label">Wins ({wins})</div>
-                <div class="stat-bar-container">
-                    <div class="stat-bar wins" style="width: {win_bar_width}%"></div>
-                    <span class="stat-value">{wins} W / {losses} L</span>
-                </div>
-            </div>
-
-            {valorant_stats_html}
-        </div>
-
-        <div class="gauges-column">
-            <div class="gauge">
-                <div class="gauge-circle kd" style="--progress: {kd_progress}%">
-                    <span>{kd_ratio}</span>
-                </div>
-                <div class="gauge-label">K/D Ratio</div>
-            </div>
-
-            <div class="gauge">
-                <div class="gauge-circle winrate" style="--progress: {winrate_progress}%">
-                    <span>{winrate}%</span>
-                </div>
-                <div class="gauge-label">Win Rate</div>
-            </div>
-
-            <div class="gauge">
-                <div class="gauge-circle hs" style="--progress: {hs_progress}%">
-                    <span>{hs_percent}%</span>
-                </div>
-                <div class="gauge-label">Headshot %</div>
-            </div>
+        <div class="header-badges">
+            <div class="winrate-badge">{winrate}% WR</div>
+            {rank_badge_html}
         </div>
     </div>
 
-    {agents_html}
+    <div class="top-stats">
+        <div class="split-bar">
+            <div class="split-bar-label">
+                <span>Wins: {wins}</span>
+                <span>Losses: {losses}</span>
+            </div>
+            <div class="split-bar-container">
+                <div class="bar-left bar-wins" style="width: {win_width}%">{wins}W</div>
+                <div class="bar-right bar-losses" style="width: {loss_width}%">{losses}L</div>
+            </div>
+        </div>
+
+        <div class="split-bar">
+            <div class="split-bar-label">
+                <span>Kills: {total_kills}</span>
+                <span>Deaths: {total_deaths}</span>
+            </div>
+            <div class="split-bar-container">
+                <div class="bar-left bar-kills" style="width: {kill_width}%">{total_kills}</div>
+                <div class="bar-right bar-deaths" style="width: {death_width}%">{total_deaths}</div>
+            </div>
+        </div>
+
+        <div class="quick-stats">
+            <div class="quick-stat"><span class="quick-stat-name">K/D</span><span class="quick-stat-val">{kd_ratio}</span></div>
+            <div class="quick-stat"><span class="quick-stat-name">HS%</span><span class="quick-stat-val">{hs_percent}%</span></div>
+            <div class="quick-stat"><span class="quick-stat-name">ADR</span><span class="quick-stat-val">{adr}</span></div>
+            <div class="quick-stat"><span class="quick-stat-name">FB</span><span class="quick-stat-val">{total_first_bloods}</span></div>
+        </div>
+    </div>
+
+    <div class="middle-section">
+        {teammates_html}
+
+        <div class="stats-box">
+            <div class="section-title">Performance</div>
+            {stats_list_html}
+        </div>
+    </div>
+
+    <div class="bottom-section">
+        {maps_html}
+        {agents_html}
+    </div>
 
     <div class="recent-matches">
         <div class="section-title">Recent Matches</div>

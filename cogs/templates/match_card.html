@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        @font-face {{
+            font-family: 'Cinzel';
+            src: url('file://{font_path}/Cinzel-Regular.ttf') format('truetype');
+            font-weight: normal;
+        }}
+        @font-face {{
+            font-family: 'Cinzel';
+            src: url('file://{font_path}/Cinzel-Bold.ttf') format('truetype');
+            font-weight: bold;
+        }}
+
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+
+        body {{
+            width: 520px;
+            font-family: 'Cinzel', 'Segoe UI', sans-serif;
+            font-weight: bold;
+            background: linear-gradient(135deg, #0f1012 0%, #1e1f22 100%);
+            color: #ffffff;
+            padding: 24px;
+        }}
+
+        .header {{
+            text-align: center;
+            margin-bottom: 18px;
+            padding-bottom: 14px;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }}
+
+        .map-name {{
+            font-size: 28px;
+            font-weight: bold;
+            color: #ffffff;
+            margin-bottom: 6px;
+        }}
+
+        .match-result {{
+            display: inline-block;
+            padding: 6px 20px;
+            border-radius: 6px;
+            font-size: 16px;
+            font-weight: bold;
+        }}
+
+        .match-result.victory {{
+            background: linear-gradient(135deg, #43b581, #3ca374);
+        }}
+
+        .match-result.defeat {{
+            background: linear-gradient(135deg, #f04747, #d63838);
+        }}
+
+        .player-section {{
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            margin-bottom: 18px;
+            padding: 14px;
+            background: rgba(255,255,255,0.03);
+            border-radius: 10px;
+        }}
+
+        .avatar {{
+            width: 56px;
+            height: 56px;
+            border-radius: 50%;
+            border: 2px solid #5865f2;
+        }}
+
+        .player-info {{
+            flex: 1;
+        }}
+
+        .player-name {{
+            font-size: 20px;
+            font-weight: bold;
+            color: #ffffff;
+        }}
+
+        .agent-name {{
+            font-size: 14px;
+            color: #b9bbbe;
+            margin-top: 3px;
+        }}
+
+        /* KDA display */
+        .kda-display {{
+            text-align: center;
+            margin-bottom: 18px;
+        }}
+
+        .kda-numbers {{
+            font-size: 44px;
+            font-weight: bold;
+            letter-spacing: 3px;
+        }}
+
+        .kda-kills {{ color: #43b581; }}
+        .kda-slash {{ color: #72767d; }}
+        .kda-deaths {{ color: #f04747; }}
+        .kda-assists {{ color: #faa61a; }}
+
+        .kda-label {{
+            font-size: 12px;
+            color: #b9bbbe;
+            margin-top: 4px;
+        }}
+
+        /* Main stats row */
+        .main-stats {{
+            display: flex;
+            gap: 14px;
+            margin-bottom: 18px;
+        }}
+
+        /* Body model container */
+        .body-model-container {{
+            background: rgba(255,255,255,0.03);
+            border-radius: 10px;
+            padding: 12px;
+            width: 130px;
+            text-align: center;
+        }}
+
+        .body-model-title {{
+            font-size: 12px;
+            color: #b9bbbe;
+            margin-bottom: 8px;
+        }}
+
+        .body-svg {{
+            width: 85px;
+            height: 150px;
+        }}
+
+        .body-stats {{
+            display: flex;
+            flex-direction: column;
+            gap: 3px;
+            margin-top: 8px;
+            font-size: 11px;
+        }}
+
+        .body-stat {{
+            display: flex;
+            justify-content: space-between;
+            padding: 3px 6px;
+            border-radius: 3px;
+        }}
+
+        .body-stat-head {{ background: rgba(255, 77, 77, 0.2); }}
+        .body-stat-body {{ background: rgba(255, 77, 77, 0.15); }}
+        .body-stat-legs {{ background: rgba(255, 77, 77, 0.1); }}
+
+        /* Stats grid */
+        .stats-grid {{
+            flex: 1;
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+        }}
+
+        .stat-card {{
+            background: rgba(255,255,255,0.03);
+            border-radius: 8px;
+            padding: 12px 10px;
+            text-align: center;
+        }}
+
+        .stat-card-value {{
+            font-size: 22px;
+            font-weight: bold;
+            color: #ffffff;
+        }}
+
+        .stat-card-label {{
+            font-size: 11px;
+            color: #b9bbbe;
+            margin-top: 4px;
+        }}
+
+        /* Bottom section - Multi-kills and Actions */
+        .bottom-section {{
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }}
+
+        .section-box {{
+            background: rgba(255,255,255,0.03);
+            border-radius: 10px;
+            padding: 14px;
+        }}
+
+        .section-title {{
+            font-size: 12px;
+            color: #b9bbbe;
+            margin-bottom: 10px;
+        }}
+
+        .multi-kills {{
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }}
+
+        .multi-kill {{
+            background: rgba(255,255,255,0.08);
+            padding: 6px 12px;
+            border-radius: 5px;
+            font-size: 13px;
+        }}
+
+        .multi-kill.highlight {{
+            background: linear-gradient(135deg, #00d4aa, #00a896);
+        }}
+
+        .actions-row {{
+            display: flex;
+            gap: 10px;
+        }}
+
+        .action-item {{
+            flex: 1;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: rgba(255,255,255,0.05);
+            padding: 10px 12px;
+            border-radius: 6px;
+        }}
+
+        .action-icon {{
+            font-size: 16px;
+        }}
+
+        .action-value {{
+            font-size: 20px;
+            font-weight: bold;
+        }}
+
+        .action-label {{
+            font-size: 11px;
+            color: #b9bbbe;
+        }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="map-name">{map_name}</div>
+        <div class="match-result {result_class}">{result_text}</div>
+    </div>
+
+    <div class="player-section">
+        <img class="avatar" src="{avatar_url}" alt="Avatar">
+        <div class="player-info">
+            <div class="player-name">{player_name}</div>
+            <div class="agent-name">{agent}</div>
+        </div>
+    </div>
+
+    <div class="kda-display">
+        <div class="kda-numbers">
+            <span class="kda-kills">{kills}</span>
+            <span class="kda-slash"> / </span>
+            <span class="kda-deaths">{deaths}</span>
+            <span class="kda-slash"> / </span>
+            <span class="kda-assists">{assists}</span>
+        </div>
+        <div class="kda-label">KILLS / DEATHS / ASSISTS</div>
+    </div>
+
+    <div class="main-stats">
+        <div class="body-model-container">
+            <div class="body-model-title">Shot Distribution</div>
+            <svg class="body-svg" viewBox="0 0 60 110" xmlns="http://www.w3.org/2000/svg">
+                <!-- Simple Valorant practice bot style mannequin -->
+                <!-- Head - simple circle -->
+                <circle cx="30" cy="12" r="10" fill="{head_color}" stroke="#555" stroke-width="1"/>
+                <!-- Neck -->
+                <rect x="26" y="22" width="8" height="5" fill="{body_color}"/>
+                <!-- Torso - simple rounded rectangle -->
+                <rect x="16" y="27" width="28" height="36" rx="4" fill="{body_color}" stroke="#555" stroke-width="1"/>
+                <!-- Left Arm -->
+                <rect x="6" y="29" width="8" height="28" rx="4" fill="{body_color}" stroke="#555" stroke-width="1"/>
+                <!-- Right Arm -->
+                <rect x="46" y="29" width="8" height="28" rx="4" fill="{body_color}" stroke="#555" stroke-width="1"/>
+                <!-- Left Leg -->
+                <rect x="17" y="65" width="10" height="40" rx="4" fill="{legs_color}" stroke="#555" stroke-width="1"/>
+                <!-- Right Leg -->
+                <rect x="33" y="65" width="10" height="40" rx="4" fill="{legs_color}" stroke="#555" stroke-width="1"/>
+            </svg>
+            <div class="body-stats">
+                <div class="body-stat body-stat-head"><span>Head</span><span>{hs_percent}%</span></div>
+                <div class="body-stat body-stat-body"><span>Body</span><span>{bs_percent}%</span></div>
+                <div class="body-stat body-stat-legs"><span>Legs</span><span>{ls_percent}%</span></div>
+            </div>
+        </div>
+
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-card-value">{kd_ratio}</div>
+                <div class="stat-card-label">K/D</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-card-value">{adr}</div>
+                <div class="stat-card-label">ADR</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-card-value">{acs}</div>
+                <div class="stat-card-label">ACS</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-card-value">{first_bloods}</div>
+                <div class="stat-card-label">First Bloods</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-card-value">{damage}</div>
+                <div class="stat-card-label">Damage</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-card-value">{econ_rating}</div>
+                <div class="stat-card-label">Avg Loadout</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="bottom-section">
+        <div class="section-box">
+            <div class="section-title">Multi-Kills</div>
+            <div class="multi-kills">
+                {multikills_html}
+            </div>
+        </div>
+        <div class="section-box">
+            <div class="section-title">Objectives</div>
+            <div class="actions-row">
+                <div class="action-item">
+                    <span class="action-value">{plants}</span>
+                    <span class="action-label">Plants</span>
+                </div>
+                <div class="action-item">
+                    <span class="action-value">{defuses}</span>
+                    <span class="action-label">Defuses</span>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

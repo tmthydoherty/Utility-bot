@@ -1,10 +1,12 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-import json, os, asyncio, re
+import json, os, asyncio, re, logging
 from typing import Dict, Any, List, Optional, TYPE_CHECKING, Union, Tuple
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import io
+
+logger = logging.getLogger("ticketing_cog")
 
 # The user must install this library for survey exports: pip install openpyxl
 try:
@@ -21,6 +23,10 @@ DATA_DIR = "data"
 TOPICS_FILE = os.path.join(DATA_DIR, "topics.json")
 PANELS_FILE = os.path.join(DATA_DIR, "panels.json")
 SURVEY_DATA_FILE = os.path.join(DATA_DIR, "survey_data.json")
+SURVEY_SESSIONS_FILE = os.path.join(DATA_DIR, "survey_sessions.json")
+
+# Default cooldowns (in minutes)
+DEFAULT_SURVEY_COOLDOWN_MINUTES = 5  # 5 minutes between submissions of the same survey
 
 # ---------- Data Sanitization ----------
 def _sanitize_for_json(data: Union[Dict, List]) -> Union[Dict, List]:
@@ -44,19 +50,25 @@ async def _load_json(bot: "Bot", file_path: str, lock: asyncio.Lock) -> Dict[str
                 return json.loads(content) if content else {}
         except (json.JSONDecodeError, FileNotFoundError):
             return {}
-    
+
     async with lock:
-        return await asyncio.get_event_loop().run_in_executor(None, sync_load)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, sync_load)
 
 async def _save_json(bot: "Bot", file_path: str, data: Dict[str, Any], lock: asyncio.Lock):
+    """Save JSON with atomic write to prevent corruption."""
     def sync_save():
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
         sanitized_data = _sanitize_for_json(data)
-        with open(file_path, "w", encoding="utf-8") as f:
+        # Atomic write: write to temp file, then rename
+        temp_path = file_path + ".tmp"
+        with open(temp_path, "w", encoding="utf-8") as f:
             json.dump(sanitized_data, f, indent=4)
+        os.replace(temp_path, file_path)  # Atomic on most systems
 
     async with lock:
-        await asyncio.get_event_loop().run_in_executor(None, sync_save)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, sync_save)
 
 # ---------- Default Data Helpers ----------
 def _ensure_topic_defaults(t: Dict[str, Any]) -> Dict[str, Any]:
@@ -72,11 +84,44 @@ def _ensure_topic_defaults(t: Dict[str, Any]) -> Dict[str, Any]:
     t.setdefault("questions", [])
     t.setdefault("approval_mode", False)
     t.setdefault("discussion_mode", False)
+    t.setdefault("application_channel_mode", "dm")
     t.setdefault("button_color", "secondary")
-    # New pre-modal question feature
+    # Pre-modal question feature
     t.setdefault("pre_modal_enabled", False)
     t.setdefault("pre_modal_question", "Do you have your profile link ready?")
     t.setdefault("pre_modal_redirect_url", None)
+    t.setdefault("pre_modal_redirect_channel_id", None)  # Channel redirect as alternative to URL
+    # Pre-modal button labels
+    t.setdefault("pre_modal_yes_label", "Yes, I have it")
+    t.setdefault("pre_modal_no_label", "No, I need to get it")
+    # Pre-modal no-click behavior
+    t.setdefault("pre_modal_no_message", "Please get what you need ready, then click the button below to continue.")
+    t.setdefault("pre_modal_ready_button_enabled", True)
+    t.setdefault("pre_modal_ready_button_label", "I'm ready now")
+    # Pre-modal required answer feature
+    t.setdefault("pre_modal_answer_enabled", False)
+    t.setdefault("pre_modal_answer_question", "Please provide your information:")
+    # Second pre-modal question
+    t.setdefault("pre_modal_2_enabled", False)
+    t.setdefault("pre_modal_2_question", "Do you have your second requirement ready?")
+    t.setdefault("pre_modal_2_redirect_url", None)
+    t.setdefault("pre_modal_2_redirect_channel_id", None)
+    t.setdefault("pre_modal_2_yes_label", "Yes")
+    t.setdefault("pre_modal_2_no_label", "No")
+    t.setdefault("pre_modal_2_no_message", "Please get what you need ready, then click the button below to continue.")
+    t.setdefault("pre_modal_2_ready_button_enabled", True)
+    t.setdefault("pre_modal_2_ready_button_label", "I'm ready now")
+    # Survey-specific settings
+    t.setdefault("survey_cooldown_minutes", DEFAULT_SURVEY_COOLDOWN_MINUTES)
+    # Staff notification settings
+    t.setdefault("ping_staff_on_create", False)  # False = silent add, True = ping roles
+    # Ticket close settings
+    t.setdefault("delete_on_close", True)  # True = delete, False = archive
+    t.setdefault("member_can_close", True)  # True = opener can close, False = only staff
+    # Claim system settings
+    t.setdefault("claim_enabled", False)  # Enable claim alerts for tickets/applications
+    t.setdefault("claim_alerts_channel_id", None)  # Channel to send claim alerts
+    t.setdefault("claim_role_id", None)  # Role that can join via claim button
     return t
 
 def _ensure_panel_defaults(p: Dict[str, Any]) -> Dict[str, Any]:
@@ -92,6 +137,41 @@ def _ensure_panel_defaults(p: Dict[str, Any]) -> Dict[str, Any]:
     return p
 
 # ---------- Pre-Modal Question Views ----------
+class PreModalAnswerModal(discord.ui.Modal):
+    """Modal for collecting required answer before creating ticket or starting application."""
+    def __init__(self, cog: "TicketSystem", topic: Dict[str, Any], question: str):
+        super().__init__(title="Required Information", timeout=300)
+        self.cog = cog
+        self.topic = topic
+        self.answer_input = discord.ui.TextInput(
+            label=question[:45],  # Discord limit for label
+            placeholder="Enter your answer here...",
+            style=discord.TextStyle.paragraph,
+            required=True,
+            max_length=500
+        )
+        self.add_item(self.answer_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        topic_type = self.topic.get('type', 'ticket')
+        user_answer = self.answer_input.value
+
+        if topic_type == 'application':
+            channel_mode = self.topic.get('application_channel_mode', 'dm') == 'channel'
+            if not channel_mode:
+                await interaction.response.send_message("The application is starting in your DMs. Please check your direct messages.", ephemeral=True, delete_after=10)
+            self.topic['_pre_modal_user_answer'] = user_answer
+            asyncio.create_task(self.cog.conduct_survey_flow(interaction, self.topic))
+        else:
+            # For tickets, create the discussion channel
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            ch = await self.cog._create_discussion_channel(interaction, self.topic, interaction.user, is_ticket=True, user_answer=user_answer)
+            if ch:
+                self.cog.cooldowns[interaction.user.id] = datetime.now(timezone.utc)
+                await interaction.followup.send(f"Your ticket has been created: {ch.mention}", ephemeral=True)
+            else:
+                await interaction.followup.send("Failed to create your ticket. The bot may be missing permissions or the parent category is misconfigured.", ephemeral=True)
+
 class PreModalCheckView(discord.ui.View):
     """View shown before opening a modal to ask if user has required info ready."""
     def __init__(self, cog: "TicketSystem", topic: Dict[str, Any], interaction: discord.Interaction):
@@ -99,33 +179,74 @@ class PreModalCheckView(discord.ui.View):
         self.cog = cog
         self.topic = topic
         self.original_interaction = interaction
-    
-    @discord.ui.button(label="Yes, I have it", style=discord.ButtonStyle.success)
-    async def yes_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # User has the info ready, proceed to create ticket
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        ch = await self.cog._create_discussion_channel(interaction, self.topic, interaction.user, is_ticket=True)
-        if ch:
-            self.cog.cooldowns[interaction.user.id] = datetime.now(timezone.utc)
-            await interaction.followup.send(f"✅ Your ticket has been created: {ch.mention}", ephemeral=True)
-        else:
-            await interaction.followup.send("❌ Failed to create your ticket. The bot may be missing permissions or the parent category is misconfigured.", ephemeral=True)
+
+        # Create buttons with custom labels from topic data
+        yes_label = topic.get('pre_modal_yes_label', 'Yes, I have it')
+        no_label = topic.get('pre_modal_no_label', 'No, I need to get it')
+
+        yes_button = discord.ui.Button(label=yes_label, style=discord.ButtonStyle.success)
+        yes_button.callback = self.yes_button_callback
+        self.add_item(yes_button)
+
+        no_button = discord.ui.Button(label=no_label, style=discord.ButtonStyle.secondary)
+        no_button.callback = self.no_button_callback
+        self.add_item(no_button)
+
+    async def yes_button_callback(self, interaction: discord.Interaction):
+        # Check if second pre-question is enabled
+        if self.topic.get('pre_modal_2_enabled', False):
+            pre_question_2 = self.topic.get('pre_modal_2_question', 'Do you have your second requirement ready?')
+            await interaction.response.edit_message(content=pre_question_2, view=PreModalCheckView2(self.cog, self.topic, interaction))
+            self.stop()
+            return
+
+        await self._proceed_after_prequestion(interaction)
         self.stop()
-    
-    @discord.ui.button(label="No, I need to get it", style=discord.ButtonStyle.secondary)
-    async def no_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        redirect_url = self.topic.get("pre_modal_redirect_url")
-        if redirect_url:
-            embed = discord.Embed(
-                description=f"[Click here to get what you need]({redirect_url})\n\nOnce you have it ready, click the button below.",
-                color=discord.Color.blue()
-            )
+
+    async def _proceed_after_prequestion(self, interaction: discord.Interaction):
+        """Common logic to proceed after all pre-questions are answered Yes."""
+        topic_type = self.topic.get('type', 'ticket')
+
+        # Check if required answer is enabled
+        if self.topic.get('pre_modal_answer_enabled', False):
+            question = self.topic.get('pre_modal_answer_question', 'Please provide your information:')
+            await interaction.response.send_modal(PreModalAnswerModal(self.cog, self.topic, question))
+        elif topic_type == 'application':
+            channel_mode = self.topic.get('application_channel_mode', 'dm') == 'channel'
+            if not channel_mode:
+                await interaction.response.send_message("The application is starting in your DMs. Please check your direct messages.", ephemeral=True, delete_after=10)
+            asyncio.create_task(self.cog.conduct_survey_flow(interaction, self.topic))
         else:
-            embed = discord.Embed(
-                description="Please get what you need ready, then click the button below to continue.",
-                color=discord.Color.blue()
-            )
-        await interaction.response.edit_message(embed=embed, view=PreModalReadyView(self.cog, self.topic))
+            # User has the info ready, proceed to create ticket
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            ch = await self.cog._create_discussion_channel(interaction, self.topic, interaction.user, is_ticket=True)
+            if ch:
+                self.cog.cooldowns[interaction.user.id] = datetime.now(timezone.utc)
+                await interaction.followup.send(f"Your ticket has been created: {ch.mention}", ephemeral=True)
+            else:
+                await interaction.followup.send("Failed to create your ticket. The bot may be missing permissions or the parent category is misconfigured.", ephemeral=True)
+
+    async def no_button_callback(self, interaction: discord.Interaction):
+        redirect_url = self.topic.get("pre_modal_redirect_url")
+        redirect_channel_id = self.topic.get("pre_modal_redirect_channel_id")
+        no_message = self.topic.get("pre_modal_no_message", "Please get what you need ready, then click the button below to continue.")
+        ready_button_enabled = self.topic.get("pre_modal_ready_button_enabled", True)
+
+        # Build the message description
+        if redirect_channel_id:
+            description = f"Please check out <#{redirect_channel_id}> for more information.\n\n{no_message}"
+        elif redirect_url:
+            description = f"[Click here to get what you need]({redirect_url})\n\n{no_message}"
+        else:
+            description = no_message
+
+        embed = discord.Embed(description=description, color=discord.Color.blue())
+
+        # Only show ready button view if enabled
+        if ready_button_enabled:
+            await interaction.response.edit_message(embed=embed, view=PreModalReadyView(self.cog, self.topic))
+        else:
+            await interaction.response.edit_message(embed=embed, view=None)
         self.stop()
 
 class PreModalReadyView(discord.ui.View):
@@ -134,20 +255,148 @@ class PreModalReadyView(discord.ui.View):
         super().__init__(timeout=300)
         self.cog = cog
         self.topic = topic
-    
-    @discord.ui.button(label="I'm ready now", style=discord.ButtonStyle.success)
-    async def ready_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        ch = await self.cog._create_discussion_channel(interaction, self.topic, interaction.user, is_ticket=True)
-        if ch:
-            self.cog.cooldowns[interaction.user.id] = datetime.now(timezone.utc)
-            await interaction.followup.send(f"✅ Your ticket has been created: {ch.mention}", ephemeral=True)
-        else:
-            await interaction.followup.send("❌ Failed to create your ticket. The bot may be missing permissions or the parent category is misconfigured.", ephemeral=True)
+
+        # Create button with custom label from topic data
+        ready_label = topic.get('pre_modal_ready_button_label', "I'm ready now")
+        ready_button = discord.ui.Button(label=ready_label, style=discord.ButtonStyle.success)
+        ready_button.callback = self.ready_button_callback
+        self.add_item(ready_button)
+
+    async def ready_button_callback(self, interaction: discord.Interaction):
+        # Check if second pre-question is enabled
+        if self.topic.get('pre_modal_2_enabled', False):
+            pre_question_2 = self.topic.get('pre_modal_2_question', 'Do you have your second requirement ready?')
+            await interaction.response.edit_message(content=pre_question_2, embed=None, view=PreModalCheckView2(self.cog, self.topic, interaction))
+            self.stop()
+            return
+
+        await self._proceed_after_prequestion(interaction)
         self.stop()
 
-# ---------- Pre-Modal Configuration Modal ----------
-class PreModalConfigModal(discord.ui.Modal, title="Configure Pre-Modal Question"):
+    async def _proceed_after_prequestion(self, interaction: discord.Interaction):
+        """Common logic to proceed after all pre-questions are answered Yes."""
+        topic_type = self.topic.get('type', 'ticket')
+
+        # Check if required answer is enabled
+        if self.topic.get('pre_modal_answer_enabled', False):
+            question = self.topic.get('pre_modal_answer_question', 'Please provide your information:')
+            await interaction.response.send_modal(PreModalAnswerModal(self.cog, self.topic, question))
+        elif topic_type == 'application':
+            channel_mode = self.topic.get('application_channel_mode', 'dm') == 'channel'
+            if not channel_mode:
+                await interaction.response.send_message("The application is starting in your DMs. Please check your direct messages.", ephemeral=True, delete_after=10)
+            asyncio.create_task(self.cog.conduct_survey_flow(interaction, self.topic))
+        else:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            ch = await self.cog._create_discussion_channel(interaction, self.topic, interaction.user, is_ticket=True)
+            if ch:
+                self.cog.cooldowns[interaction.user.id] = datetime.now(timezone.utc)
+                await interaction.followup.send(f"Your ticket has been created: {ch.mention}", ephemeral=True)
+            else:
+                await interaction.followup.send("Failed to create your ticket. The bot may be missing permissions or the parent category is misconfigured.", ephemeral=True)
+
+class PreModalCheckView2(discord.ui.View):
+    """View for the second pre-modal question."""
+    def __init__(self, cog: "TicketSystem", topic: Dict[str, Any], interaction: discord.Interaction):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.topic = topic
+        self.original_interaction = interaction
+
+        yes_label = topic.get('pre_modal_2_yes_label', 'Yes')
+        no_label = topic.get('pre_modal_2_no_label', 'No')
+
+        yes_button = discord.ui.Button(label=yes_label, style=discord.ButtonStyle.success)
+        yes_button.callback = self.yes_button_callback
+        self.add_item(yes_button)
+
+        no_button = discord.ui.Button(label=no_label, style=discord.ButtonStyle.secondary)
+        no_button.callback = self.no_button_callback
+        self.add_item(no_button)
+
+    async def yes_button_callback(self, interaction: discord.Interaction):
+        await self._proceed_after_prequestion(interaction)
+        self.stop()
+
+    async def _proceed_after_prequestion(self, interaction: discord.Interaction):
+        """Common logic to proceed after all pre-questions are answered Yes."""
+        topic_type = self.topic.get('type', 'ticket')
+
+        if self.topic.get('pre_modal_answer_enabled', False):
+            question = self.topic.get('pre_modal_answer_question', 'Please provide your information:')
+            await interaction.response.send_modal(PreModalAnswerModal(self.cog, self.topic, question))
+        elif topic_type == 'application':
+            channel_mode = self.topic.get('application_channel_mode', 'dm') == 'channel'
+            if not channel_mode:
+                await interaction.response.send_message("The application is starting in your DMs. Please check your direct messages.", ephemeral=True, delete_after=10)
+            asyncio.create_task(self.cog.conduct_survey_flow(interaction, self.topic))
+        else:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            ch = await self.cog._create_discussion_channel(interaction, self.topic, interaction.user, is_ticket=True)
+            if ch:
+                self.cog.cooldowns[interaction.user.id] = datetime.now(timezone.utc)
+                await interaction.followup.send(f"Your ticket has been created: {ch.mention}", ephemeral=True)
+            else:
+                await interaction.followup.send("Failed to create your ticket. The bot may be missing permissions or the parent category is misconfigured.", ephemeral=True)
+
+    async def no_button_callback(self, interaction: discord.Interaction):
+        redirect_url = self.topic.get("pre_modal_2_redirect_url")
+        redirect_channel_id = self.topic.get("pre_modal_2_redirect_channel_id")
+        no_message = self.topic.get("pre_modal_2_no_message", "Please get what you need ready, then click the button below to continue.")
+
+        if redirect_channel_id:
+            description = f"Please check out <#{redirect_channel_id}> for more information.\n\n{no_message}"
+        elif redirect_url:
+            description = f"[Click here to get what you need]({redirect_url})\n\n{no_message}"
+        else:
+            description = no_message
+
+        embed = discord.Embed(description=description, color=discord.Color.blue())
+        await interaction.response.edit_message(content=None, embed=embed, view=PreModalReadyView2(self.cog, self.topic))
+        self.stop()
+
+class PreModalReadyView2(discord.ui.View):
+    """View shown after user says No on second pre-question."""
+    def __init__(self, cog: "TicketSystem", topic: Dict[str, Any]):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.topic = topic
+
+        # Only add ready button if enabled
+        ready_button_enabled = topic.get('pre_modal_2_ready_button_enabled', True)
+        if ready_button_enabled:
+            ready_label = topic.get('pre_modal_2_ready_button_label', "I'm ready now")
+            ready_button = discord.ui.Button(label=ready_label, style=discord.ButtonStyle.success)
+            ready_button.callback = self.ready_button_callback
+            self.add_item(ready_button)
+
+    async def ready_button_callback(self, interaction: discord.Interaction):
+        await self._proceed_after_prequestion(interaction)
+        self.stop()
+
+    async def _proceed_after_prequestion(self, interaction: discord.Interaction):
+        """Common logic to proceed after all pre-questions are answered Yes."""
+        topic_type = self.topic.get('type', 'ticket')
+
+        if self.topic.get('pre_modal_answer_enabled', False):
+            question = self.topic.get('pre_modal_answer_question', 'Please provide your information:')
+            await interaction.response.send_modal(PreModalAnswerModal(self.cog, self.topic, question))
+        elif topic_type == 'application':
+            channel_mode = self.topic.get('application_channel_mode', 'dm') == 'channel'
+            if not channel_mode:
+                await interaction.response.send_message("The application is starting in your DMs. Please check your direct messages.", ephemeral=True, delete_after=10)
+            asyncio.create_task(self.cog.conduct_survey_flow(interaction, self.topic))
+        else:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            ch = await self.cog._create_discussion_channel(interaction, self.topic, interaction.user, is_ticket=True)
+            if ch:
+                self.cog.cooldowns[interaction.user.id] = datetime.now(timezone.utc)
+                await interaction.followup.send(f"Your ticket has been created: {ch.mention}", ephemeral=True)
+            else:
+                await interaction.followup.send("Failed to create your ticket. The bot may be missing permissions or the parent category is misconfigured.", ephemeral=True)
+
+# ---------- Pre-Modal Configuration Modals ----------
+class PreModalConfigModal(discord.ui.Modal, title="Configure Pre-Question"):
     question = discord.ui.TextInput(
         label="Question to ask",
         placeholder="e.g., Do you have your profile link ready?",
@@ -160,17 +409,164 @@ class PreModalConfigModal(discord.ui.Modal, title="Configure Pre-Modal Question"
         required=False,
         max_length=500
     )
+    yes_label = discord.ui.TextInput(
+        label="Yes button label",
+        placeholder="e.g., Yes, I have it",
+        max_length=80,
+        required=True
+    )
+    no_label = discord.ui.TextInput(
+        label="No button label",
+        placeholder="e.g., No, I need to get it",
+        max_length=80,
+        required=True
+    )
 
     def __init__(self, view: "TopicWizardView"):
         super().__init__()
         self.view = view
         self.question.default = view.topic_data.get("pre_modal_question", "Do you have your profile link ready?")
         self.redirect_url.default = view.topic_data.get("pre_modal_redirect_url") or ""
+        self.yes_label.default = view.topic_data.get("pre_modal_yes_label", "Yes, I have it")
+        self.no_label.default = view.topic_data.get("pre_modal_no_label", "No, I need to get it")
 
     async def on_submit(self, itx: discord.Interaction):
         self.view.topic_data["pre_modal_question"] = self.question.value
         self.view.topic_data["pre_modal_redirect_url"] = self.redirect_url.value.strip() or None
-        await self.view.update_message_state(itx, "✅ Pre-modal question configured.")
+        self.view.topic_data["pre_modal_yes_label"] = self.yes_label.value.strip()
+        self.view.topic_data["pre_modal_no_label"] = self.no_label.value.strip()
+        await self.view.update_message_state(itx, "✅ Pre-question configured.")
+
+
+class PreModalNoResponseConfigModal(discord.ui.Modal, title="Configure No Response"):
+    no_message = discord.ui.TextInput(
+        label="Message when user clicks No",
+        placeholder="e.g., Please get what you need ready...",
+        style=discord.TextStyle.paragraph,
+        max_length=500,
+        required=True
+    )
+    ready_button_label = discord.ui.TextInput(
+        label="Ready button label (leave blank to disable)",
+        placeholder="e.g., I'm ready now (leave empty to hide button)",
+        max_length=80,
+        required=False
+    )
+
+    def __init__(self, view: "TopicWizardView"):
+        super().__init__()
+        self.view = view
+        self.no_message.default = view.topic_data.get("pre_modal_no_message", "Please get what you need ready, then click the button below to continue.")
+        # If ready button is disabled, show empty; otherwise show the label
+        if view.topic_data.get("pre_modal_ready_button_enabled", True):
+            self.ready_button_label.default = view.topic_data.get("pre_modal_ready_button_label", "I'm ready now")
+        else:
+            self.ready_button_label.default = ""
+
+    async def on_submit(self, itx: discord.Interaction):
+        self.view.topic_data["pre_modal_no_message"] = self.no_message.value.strip()
+        ready_label = self.ready_button_label.value.strip()
+        if ready_label:
+            self.view.topic_data["pre_modal_ready_button_enabled"] = True
+            self.view.topic_data["pre_modal_ready_button_label"] = ready_label
+        else:
+            self.view.topic_data["pre_modal_ready_button_enabled"] = False
+        await self.view.update_message_state(itx, "✅ No response configured.")
+
+
+class PreModal2NoResponseConfigModal(discord.ui.Modal, title="Configure Q2 No Response"):
+    no_message = discord.ui.TextInput(
+        label="Message when user clicks No",
+        placeholder="e.g., Please get what you need ready...",
+        style=discord.TextStyle.paragraph,
+        max_length=500,
+        required=True
+    )
+    ready_button_label = discord.ui.TextInput(
+        label="Ready button label (leave blank to disable)",
+        placeholder="e.g., I'm ready now (leave empty to hide button)",
+        max_length=80,
+        required=False
+    )
+
+    def __init__(self, view: "TopicWizardView"):
+        super().__init__()
+        self.view = view
+        self.no_message.default = view.topic_data.get("pre_modal_2_no_message", "Please get what you need ready, then click the button below to continue.")
+        # If ready button is disabled, show empty; otherwise show the label
+        if view.topic_data.get("pre_modal_2_ready_button_enabled", True):
+            self.ready_button_label.default = view.topic_data.get("pre_modal_2_ready_button_label", "I'm ready now")
+        else:
+            self.ready_button_label.default = ""
+
+    async def on_submit(self, itx: discord.Interaction):
+        self.view.topic_data["pre_modal_2_no_message"] = self.no_message.value.strip()
+        ready_label = self.ready_button_label.value.strip()
+        if ready_label:
+            self.view.topic_data["pre_modal_2_ready_button_enabled"] = True
+            self.view.topic_data["pre_modal_2_ready_button_label"] = ready_label
+        else:
+            self.view.topic_data["pre_modal_2_ready_button_enabled"] = False
+        await self.view.update_message_state(itx, "✅ Q2 no response configured.")
+
+
+class PreModalAnswerConfigModal(discord.ui.Modal, title="Configure Required Answer"):
+    question = discord.ui.TextInput(
+        label="Question for required answer",
+        placeholder="e.g., What is your in-game username?",
+        max_length=200,
+        required=True
+    )
+
+    def __init__(self, view: "TopicWizardView"):
+        super().__init__()
+        self.view = view
+        self.question.default = view.topic_data.get("pre_modal_answer_question", "Please provide your information:")
+
+    async def on_submit(self, itx: discord.Interaction):
+        self.view.topic_data["pre_modal_answer_question"] = self.question.value
+        await self.view.update_message_state(itx, "✅ Required answer question configured.")
+
+class PreModalConfig2Modal(discord.ui.Modal, title="Configure Pre-Question 2"):
+    question = discord.ui.TextInput(
+        label="Second question to ask",
+        placeholder="e.g., Do you have your second requirement ready?",
+        max_length=200,
+        required=True
+    )
+    redirect_url = discord.ui.TextInput(
+        label="Redirect URL (if they say No)",
+        placeholder="https://example.com/get-your-link",
+        required=False,
+        max_length=500
+    )
+    yes_label = discord.ui.TextInput(
+        label="Yes button label",
+        placeholder="e.g., Yes",
+        max_length=80,
+        required=True
+    )
+    no_label = discord.ui.TextInput(
+        label="No button label",
+        placeholder="e.g., No",
+        max_length=80,
+        required=True
+    )
+
+    def __init__(self, view: "TopicWizardView"):
+        super().__init__()
+        self.view = view
+        self.question.default = view.topic_data.get("pre_modal_2_question", "Do you have your second requirement ready?")
+        self.redirect_url.default = view.topic_data.get("pre_modal_2_redirect_url") or ""
+        self.yes_label.default = view.topic_data.get("pre_modal_2_yes_label", "Yes")
+        self.no_label.default = view.topic_data.get("pre_modal_2_no_label", "No")
+
+    async def on_submit(self, itx: discord.Interaction):
+        self.view.topic_data["pre_modal_2_question"] = self.question.value
+        self.view.topic_data["pre_modal_2_redirect_url"] = self.redirect_url.value.strip() or None
+        self.view.topic_data["pre_modal_2_yes_label"] = self.yes_label.value.strip()
+        self.view.topic_data["pre_modal_2_no_label"] = self.no_label.value.strip()
+        await self.view.update_message_state(itx, "✅ Pre-question 2 configured.")
 
 # ---------- WIZARD: Topic Creation/Editing ----------
 class TopicWizardView(discord.ui.View):
@@ -207,9 +603,9 @@ class TopicWizardView(discord.ui.View):
         self.add_item(self.create_button("Edit Label/Emoji", discord.ButtonStyle.secondary, self.edit_label_callback, 0))
         self.add_item(self.create_button("Set Button Color", discord.ButtonStyle.secondary, self.set_button_color_callback, 0))
         
-        if topic_type == 'ticket':
+        if topic_type in ['ticket', 'application']:
             self.add_item(self.create_button("Set Welcome Message", discord.ButtonStyle.secondary, self.set_welcome_message_callback, 0))
-        
+
         self.add_item(self.create_button(f"Type: {topic_type.capitalize()}", discord.ButtonStyle.primary, self.toggle_type_callback, 1))
         
         if topic_type != 'survey':
@@ -223,24 +619,63 @@ class TopicWizardView(discord.ui.View):
         
         self.add_item(self.create_button("Manage Staff Roles", discord.ButtonStyle.blurple, self.manage_staff_callback, 2))
         self.add_item(self.create_button("Set Log Channel", discord.ButtonStyle.secondary, self.set_log_callback, 2))
-        
+
+        # Staff ping toggle (only for tickets)
+        if topic_type == 'ticket':
+            ping_enabled = self.topic_data.get('ping_staff_on_create', False)
+            ping_label = "Staff Notify: Ping" if ping_enabled else "Staff Notify: Silent"
+            self.add_item(self.create_button(ping_label, discord.ButtonStyle.primary, self.toggle_staff_ping_callback, 2))
+
         if topic_type in ['application', 'survey']:
-            self.add_item(self.create_button("Manage Questions", discord.ButtonStyle.blurple, self.manage_questions_callback, 3))
-        
+            self.add_item(self.create_button("Manage Questions", discord.ButtonStyle.blurple, self.manage_questions_callback, 2))
+
         if topic_type == 'application':
             approval_label = "Approval Buttons: On" if self.topic_data.get('approval_mode') else "Approval Buttons: Off"
-            self.add_item(self.create_button(approval_label, discord.ButtonStyle.primary, self.toggle_approval_callback, 3))
+            self.add_item(self.create_button(approval_label, discord.ButtonStyle.primary, self.toggle_approval_callback, 2))
             discussion_label = "Auto-Discussion: On" if self.topic_data.get('discussion_mode') else "Auto-Discussion: Off"
             self.add_item(self.create_button(discussion_label, discord.ButtonStyle.primary, self.toggle_discussion_callback, 3))
 
-        # Pre-modal question button (only for tickets)
-        if topic_type == 'ticket':
+            chan_mode = self.topic_data.get('application_channel_mode', 'dm')
+            chan_label = "App Q&A: Channel" if chan_mode == 'channel' else "App Q&A: DMs"
+            self.add_item(self.create_button(chan_label, discord.ButtonStyle.primary, self.toggle_application_channel_mode_callback, 3))
+
+        # Pre-modal question button (for tickets and applications)
+        if topic_type in ['ticket', 'application']:
             pre_modal_enabled = self.topic_data.get('pre_modal_enabled', False)
-            pre_modal_label = "Pre-Question: On" if pre_modal_enabled else "Pre-Question: Off"
+            pre_modal_label = "Pre-Q 1: On" if pre_modal_enabled else "Pre-Q 1: Off"
             self.add_item(self.create_button(pre_modal_label, discord.ButtonStyle.primary, self.toggle_pre_modal_callback, 3))
             if pre_modal_enabled:
-                self.add_item(self.create_button("Configure Pre-Question", discord.ButtonStyle.secondary, self.configure_pre_modal_callback, 3))
+                self.add_item(self.create_button("Config Q1", discord.ButtonStyle.secondary, self.configure_pre_modal_callback, 3))
+                self.add_item(self.create_button("Config Q1 No", discord.ButtonStyle.secondary, self.configure_pre_modal_no_response_callback, 3))
+                # Second pre-question toggle
+                pre_modal_2_enabled = self.topic_data.get('pre_modal_2_enabled', False)
+                pre_modal_2_label = "Pre-Q 2: On" if pre_modal_2_enabled else "Pre-Q 2: Off"
+                self.add_item(self.create_button(pre_modal_2_label, discord.ButtonStyle.primary, self.toggle_pre_modal_2_callback, 3))
+                if pre_modal_2_enabled:
+                    # Q2 config buttons on row 1 to avoid overflow
+                    self.add_item(self.create_button("Config Q2", discord.ButtonStyle.secondary, self.configure_pre_modal_2_callback, 1))
+                    self.add_item(self.create_button("Config Q2 No", discord.ButtonStyle.secondary, self.configure_pre_modal_2_no_response_callback, 1))
 
+        # Ticket close settings (only for tickets) - put on row 3 to save space
+        if topic_type == 'ticket':
+            delete_on_close = self.topic_data.get('delete_on_close', True)
+            delete_label = "On Close: Delete" if delete_on_close else "On Close: Archive"
+            self.add_item(self.create_button(delete_label, discord.ButtonStyle.secondary, self.toggle_delete_on_close_callback, 2))
+
+            member_can_close = self.topic_data.get('member_can_close', True)
+            member_label = "Member Close: Yes" if member_can_close else "Member Close: No"
+            self.add_item(self.create_button(member_label, discord.ButtonStyle.secondary, self.toggle_member_can_close_callback, 2))
+
+        # Claim system settings (for tickets and applications) - on row 0 to avoid overflow
+        if topic_type in ['ticket', 'application']:
+            claim_enabled = self.topic_data.get('claim_enabled', False)
+            claim_label = "Claim: On" if claim_enabled else "Claim: Off"
+            self.add_item(self.create_button(claim_label, discord.ButtonStyle.primary, self.toggle_claim_callback, 0))
+            if claim_enabled:
+                self.add_item(self.create_button("Set Alerts Channel", discord.ButtonStyle.secondary, self.set_claim_alerts_channel_callback, 1))
+                self.add_item(self.create_button("Set Join Role", discord.ButtonStyle.secondary, self.set_claim_role_callback, 1))
+
+        # Row 4 for finish/cancel (Discord max is row 0-4)
         self.add_item(self.create_button("Finish & Save", discord.ButtonStyle.success, self.finish_callback, 4))
         self.add_item(self.create_button("Cancel", discord.ButtonStyle.danger, self.cancel_callback, 4))
 
@@ -281,21 +716,57 @@ class TopicWizardView(discord.ui.View):
         if topic_type == 'application':
             embed.add_field(name="Approval Buttons", value="Enabled" if self.topic_data.get('approval_mode') else "Disabled", inline=True)
             embed.add_field(name="Auto-Discussion", value="Enabled" if self.topic_data.get('discussion_mode') else "Disabled", inline=True)
-        elif topic_type == 'ticket':
+            chan_mode = self.topic_data.get('application_channel_mode', 'dm')
+            embed.add_field(name="Q&A Mode", value="In Channel" if chan_mode == 'channel' else "In DMs", inline=True)
+
+        # Show pre-modal question status (for tickets and applications)
+        if topic_type in ['ticket', 'application']:
             welcome_msg = self.topic_data.get('welcome_message', 'Default Message')
             # Truncate if too long
             if len(welcome_msg) > 1000:
                 welcome_msg = welcome_msg[:997] + "..."
             embed.add_field(name="Welcome Message", value=f"```{welcome_msg}```", inline=False)
-            
-            # Show pre-modal question status
+
             pre_modal_enabled = self.topic_data.get('pre_modal_enabled', False)
             if pre_modal_enabled:
                 pre_q = self.topic_data.get('pre_modal_question', 'Not set')
                 pre_url = self.topic_data.get('pre_modal_redirect_url') or 'None'
-                embed.add_field(name="Pre-Question", value=f"**Question:** {pre_q}\n**Redirect URL:** {pre_url}", inline=False)
+                pre_channel = self.topic_data.get('pre_modal_redirect_channel_id')
+                redirect_text = f"<#{pre_channel}>" if pre_channel else pre_url
+                embed.add_field(name="Pre-Question 1", value=f"**Q:** {pre_q}\n**Redirect:** {redirect_text}", inline=False)
+
+                # Show second pre-question if enabled
+                pre_modal_2_enabled = self.topic_data.get('pre_modal_2_enabled', False)
+                if pre_modal_2_enabled:
+                    pre_q2 = self.topic_data.get('pre_modal_2_question', 'Not set')
+                    pre_url2 = self.topic_data.get('pre_modal_2_redirect_url') or 'None'
+                    pre_channel2 = self.topic_data.get('pre_modal_2_redirect_channel_id')
+                    redirect_text2 = f"<#{pre_channel2}>" if pre_channel2 else pre_url2
+                    embed.add_field(name="Pre-Question 2", value=f"**Q:** {pre_q2}\n**Redirect:** {redirect_text2}", inline=False)
             else:
                 embed.add_field(name="Pre-Question", value="`Disabled`", inline=True)
+
+            if topic_type == 'ticket':
+                # Show staff notification mode
+                ping_staff = self.topic_data.get('ping_staff_on_create', False)
+                embed.add_field(name="Staff Notification", value="Ping roles" if ping_staff else "Silent add", inline=True)
+
+                # Show close settings
+                delete_on_close = self.topic_data.get('delete_on_close', True)
+                member_can_close = self.topic_data.get('member_can_close', True)
+                embed.add_field(name="On Close", value="Delete" if delete_on_close else "Archive", inline=True)
+                embed.add_field(name="Member Can Close", value="Yes" if member_can_close else "No", inline=True)
+
+            # Show claim settings for tickets and applications
+            claim_enabled = self.topic_data.get('claim_enabled', False)
+            if claim_enabled:
+                alerts_channel_id = self.topic_data.get('claim_alerts_channel_id')
+                alerts_text = f"<#{alerts_channel_id}>" if alerts_channel_id else "`Not set`"
+                claim_role_id = self.topic_data.get('claim_role_id')
+                role_text = f"<@&{claim_role_id}>" if claim_role_id else "`Staff roles`"
+                embed.add_field(name="Claim System", value=f"**Alerts:** {alerts_text}\n**Join Role:** {role_text}", inline=False)
+            else:
+                embed.add_field(name="Claim System", value="`Disabled`", inline=True)
 
         return embed
 
@@ -303,8 +774,134 @@ class TopicWizardView(discord.ui.View):
         self.topic_data['pre_modal_enabled'] = not self.topic_data.get('pre_modal_enabled', False)
         await self.update_message_state(interaction)
 
+    async def toggle_staff_ping_callback(self, interaction: discord.Interaction):
+        self.topic_data['ping_staff_on_create'] = not self.topic_data.get('ping_staff_on_create', False)
+        await self.update_message_state(interaction)
+
     async def configure_pre_modal_callback(self, interaction: discord.Interaction):
         await interaction.response.send_modal(PreModalConfigModal(self))
+
+    async def toggle_pre_modal_2_callback(self, interaction: discord.Interaction):
+        self.topic_data['pre_modal_2_enabled'] = not self.topic_data.get('pre_modal_2_enabled', False)
+        await self.update_message_state(interaction)
+
+    async def configure_pre_modal_2_callback(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(PreModalConfig2Modal(self))
+
+    async def configure_pre_modal_no_response_callback(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(PreModalNoResponseConfigModal(self))
+
+    async def configure_pre_modal_2_no_response_callback(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(PreModal2NoResponseConfigModal(self))
+
+    async def toggle_pre_modal_answer_callback(self, interaction: discord.Interaction):
+        self.topic_data['pre_modal_answer_enabled'] = not self.topic_data.get('pre_modal_answer_enabled', False)
+        await self.update_message_state(interaction)
+
+    async def configure_pre_modal_answer_callback(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(PreModalAnswerConfigModal(self))
+
+    async def set_redirect_channel_callback(self, interaction: discord.Interaction):
+        picker_view = discord.ui.View(timeout=180)
+
+        # Add a "Clear" option via a regular select first
+        clear_view = discord.ui.View(timeout=180)
+        clear_select = discord.ui.Select(
+            placeholder="Choose an action...",
+            options=[
+                discord.SelectOption(label="Set a channel", value="set", description="Choose a channel to redirect users to"),
+                discord.SelectOption(label="Clear channel redirect", value="clear", description="Remove the channel redirect (URL will be used if set)")
+            ]
+        )
+
+        original_msg_interaction = interaction
+
+        async def clear_callback(itx: discord.Interaction):
+            action = itx.data['values'][0]
+            if action == "clear":
+                self.topic_data['pre_modal_redirect_channel_id'] = None
+                await self.update_message_state(itx, "Channel redirect cleared.")
+                try:
+                    await original_msg_interaction.delete_original_response()
+                except discord.NotFound:
+                    pass
+            else:
+                # Show channel picker
+                channel_picker_view = discord.ui.View(timeout=180)
+                channel_select = discord.ui.ChannelSelect(placeholder="Select a channel...", channel_types=[discord.ChannelType.text])
+
+                async def channel_callback(ch_itx: discord.Interaction):
+                    self.topic_data['pre_modal_redirect_channel_id'] = int(ch_itx.data['values'][0])
+                    await self.update_message_state(ch_itx, "Redirect channel set.")
+                    try:
+                        await original_msg_interaction.delete_original_response()
+                    except discord.NotFound:
+                        pass
+
+                channel_select.callback = channel_callback
+                channel_picker_view.add_item(channel_select)
+                await itx.response.edit_message(content="Select a channel to redirect users to:", view=channel_picker_view)
+
+        clear_select.callback = clear_callback
+        clear_view.add_item(clear_select)
+
+        current_channel = self.topic_data.get('pre_modal_redirect_channel_id')
+        current_text = f"\nCurrent: <#{current_channel}>" if current_channel else "\nCurrent: None"
+        await interaction.response.send_message(f"Configure redirect channel (takes priority over URL).{current_text}", view=clear_view, ephemeral=True)
+
+    async def toggle_delete_on_close_callback(self, interaction: discord.Interaction):
+        self.topic_data['delete_on_close'] = not self.topic_data.get('delete_on_close', True)
+        await self.update_message_state(interaction)
+
+    async def toggle_member_can_close_callback(self, interaction: discord.Interaction):
+        self.topic_data['member_can_close'] = not self.topic_data.get('member_can_close', True)
+        await self.update_message_state(interaction)
+
+    async def toggle_claim_callback(self, interaction: discord.Interaction):
+        self.topic_data['claim_enabled'] = not self.topic_data.get('claim_enabled', False)
+        await self.update_message_state(interaction)
+
+    async def set_claim_alerts_channel_callback(self, interaction: discord.Interaction):
+        picker_view = discord.ui.View(timeout=180)
+        select = discord.ui.ChannelSelect(placeholder="Select alerts channel...", channel_types=[discord.ChannelType.text])
+        original_msg_interaction = interaction
+
+        async def pick_callback(itx: discord.Interaction):
+            self.topic_data['claim_alerts_channel_id'] = int(itx.data['values'][0])
+            await self.update_message_state(itx, "✅ Alerts channel set.")
+            try:
+                await original_msg_interaction.delete_original_response()
+            except discord.NotFound:
+                pass
+
+        select.callback = pick_callback
+        picker_view.add_item(select)
+        current_channel = self.topic_data.get('claim_alerts_channel_id')
+        current_text = f"\nCurrent: <#{current_channel}>" if current_channel else ""
+        await interaction.response.send_message(f"Select a channel for claim alerts.{current_text}", view=picker_view, ephemeral=True)
+
+    async def set_claim_role_callback(self, interaction: discord.Interaction):
+        picker_view = discord.ui.View(timeout=180)
+        role_select = discord.ui.RoleSelect(placeholder="Select join role...", min_values=0, max_values=1)
+        original_msg_interaction = interaction
+
+        async def pick_callback(itx: discord.Interaction):
+            if role_select.values:
+                self.topic_data['claim_role_id'] = role_select.values[0].id
+                await self.update_message_state(itx, "✅ Join role set.")
+            else:
+                self.topic_data['claim_role_id'] = None
+                await self.update_message_state(itx, "✅ Join role cleared (staff roles will be used).")
+            try:
+                await original_msg_interaction.delete_original_response()
+            except discord.NotFound:
+                pass
+
+        role_select.callback = pick_callback
+        picker_view.add_item(role_select)
+        current_role = self.topic_data.get('claim_role_id')
+        current_text = f"\nCurrent: <@&{current_role}>" if current_role else "\nCurrent: Staff roles (default)"
+        await interaction.response.send_message(f"Select which role can use the Join button on claimed tickets.{current_text}\n\n*Leave empty to allow staff roles.*", view=picker_view, ephemeral=True)
 
     async def set_button_color_callback(self, interaction: discord.Interaction):
         view = discord.ui.View(timeout=180)
@@ -332,6 +929,11 @@ class TopicWizardView(discord.ui.View):
 
     async def toggle_discussion_callback(self, interaction: discord.Interaction):
         self.topic_data['discussion_mode'] = not self.topic_data.get('discussion_mode', False)
+        await self.update_message_state(interaction)
+
+    async def toggle_application_channel_mode_callback(self, interaction: discord.Interaction):
+        current = self.topic_data.get('application_channel_mode', 'dm')
+        self.topic_data['application_channel_mode'] = 'channel' if current == 'dm' else 'dm'
         await self.update_message_state(interaction)
 
     async def edit_label_callback(self, interaction: discord.Interaction):
@@ -374,11 +976,26 @@ class TopicWizardView(discord.ui.View):
     async def finish_callback(self, interaction: discord.Interaction):
         await interaction.response.defer()
         topic_type = self.topic_data.get('type')
-        if topic_type in ['application', 'survey'] and not self.topic_data.get('log_channel_id'):
-            await interaction.followup.send(f"❌ An {topic_type} requires a Log Channel to be set.", ephemeral=True)
+        claim_enabled = self.topic_data.get('claim_enabled', False)
+
+        # For surveys, log channel is always required
+        # For applications, log channel is required unless claim is enabled (Q&A goes to claim alert)
+        if topic_type == 'survey' and not self.topic_data.get('log_channel_id'):
+            await interaction.followup.send("❌ A survey requires a Log Channel to be set.", ephemeral=True)
+            return
+        if topic_type == 'application' and not self.topic_data.get('log_channel_id') and not claim_enabled:
+            await interaction.followup.send("❌ An application requires either a Log Channel or Claim mode enabled.", ephemeral=True)
+            return
+        # If claim is enabled for application, require alerts channel
+        if topic_type == 'application' and claim_enabled and not self.topic_data.get('claim_alerts_channel_id'):
+            await interaction.followup.send("❌ Claim mode requires an Alerts Channel to be set.", ephemeral=True)
+            return
+        # For tickets with claim enabled, also require alerts channel
+        if topic_type == 'ticket' and claim_enabled and not self.topic_data.get('claim_alerts_channel_id'):
+            await interaction.followup.send("❌ Claim mode requires an Alerts Channel to be set.", ephemeral=True)
             return
         if topic_type != 'survey' and not self.topic_data.get('parent_id'):
-            await interaction.followup.send(f"❌ Please set a parent channel/category before saving.", ephemeral=True)
+            await interaction.followup.send("❌ Please set a parent channel/category before saving.", ephemeral=True)
             return
         
         try:
@@ -386,8 +1003,8 @@ class TopicWizardView(discord.ui.View):
             topics[self.topic_data['name']] = self.topic_data
             await _save_json(self.cog.bot, TOPICS_FILE, topics, self.cog.topics_lock)
         except Exception as e:
-            print(f"[TICKETING ERROR] Failed to save topic: {e}")
-            await interaction.followup.send(f"❌ An error occurred: `{e.__class__.__name__}`. Check console.", ephemeral=True)
+            logger.error(f"Failed to save topic: {e}", exc_info=True)
+            await interaction.followup.send(f"❌ An error occurred: `{e.__class__.__name__}`. Check logs.", ephemeral=True)
             return
 
         await self.original_interaction.edit_original_response(content=f"✅ {topic_type.capitalize()} `{self.topic_data['name']}` saved.", embed=None, view=None)
@@ -432,7 +1049,7 @@ class LabelModal(discord.ui.Modal, title="Edit Label & Emoji"):
 
     async def on_error(self, itx: discord.Interaction, error: Exception):
         await itx.response.send_message("An error occurred. Please try again.", ephemeral=True)
-        print(f"[TICKETING ERROR] LabelModal error: {error}")
+        logger.error(f"LabelModal error: {error}", exc_info=True)
 
 class WelcomeMessageModal(discord.ui.Modal, title="Set Welcome Message"):
     message = discord.ui.TextInput(label="Message", style=discord.TextStyle.long, placeholder="Use {user} for user mention and {topic} for topic label.")
@@ -448,7 +1065,7 @@ class WelcomeMessageModal(discord.ui.Modal, title="Set Welcome Message"):
 
     async def on_error(self, itx: discord.Interaction, error: Exception):
         await itx.response.send_message("An error occurred. Please try again.", ephemeral=True)
-        print(f"[TICKETING ERROR] WelcomeMessageModal error: {error}")
+        logger.error(f"WelcomeMessageModal error: {error}", exc_info=True)
 
 class AddQuestionModal(discord.ui.Modal, title="Add a Question"):
     question = discord.ui.TextInput(label="Question Text", style=discord.TextStyle.long, placeholder="Enter the question you want to ask the user.", required=True)
@@ -463,7 +1080,7 @@ class AddQuestionModal(discord.ui.Modal, title="Add a Question"):
 
     async def on_error(self, itx: discord.Interaction, error: Exception):
         await itx.response.send_message("An error occurred. Please try again.", ephemeral=True)
-        print(f"[TICKETING ERROR] AddQuestionModal error: {error}")
+        logger.error(f"AddQuestionModal error: {error}", exc_info=True)
 
 class QuestionManagerView(discord.ui.View):
     def __init__(self, parent_wizard: "TopicWizardView"):
@@ -501,10 +1118,9 @@ class QuestionManagerView(discord.ui.View):
                 if 0 <= index < len(self.parent_wizard.topic_data['questions']):
                     self.parent_wizard.topic_data['questions'].pop(index)
             await self.parent_wizard.update_message_state(itx, "✅ Questions removed.")
-            self.stop()
             try:
                 await original_msg_interaction.delete_original_response()
-            except discord.NotFound:
+            except (discord.NotFound, discord.HTTPException):
                 pass
 
         select.callback = select_callback
@@ -513,11 +1129,10 @@ class QuestionManagerView(discord.ui.View):
 
     @discord.ui.button(label="Done", style=discord.ButtonStyle.secondary, row=1)
     async def done(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
         self.stop()
         try:
-            await interaction.delete_original_response()
-        except discord.NotFound:
+            await interaction.response.edit_message(content="Done managing questions.", view=None)
+        except discord.HTTPException:
             pass
 
 class StaffRoleManagerView(discord.ui.View):
@@ -733,7 +1348,7 @@ class PanelWizardView(discord.ui.View):
             panels[self.panel_data['name']] = self.panel_data
             await _save_json(self.cog.bot, PANELS_FILE, panels, self.cog.panels_lock)
         except Exception as e:
-            print(f"[TICKETING ERROR] Failed to save panel: {e}")
+            logger.error(f"Failed to save panel: {e}", exc_info=True)
             await interaction.followup.send(f"❌ An error occurred: `{e.__class__.__name__}`. Check console.", ephemeral=True)
             return
         await self.original_interaction.edit_original_response(content=f"✅ Panel `{self.panel_data['name']}` saved.", embed=None, view=None)
@@ -760,7 +1375,7 @@ class PanelTextModal(discord.ui.Modal, title="Edit Panel Text"):
 
     async def on_error(self, itx: discord.Interaction, error: Exception):
         await itx.response.send_message("An error occurred. Please try again.", ephemeral=True)
-        print(f"[TICKETING ERROR] PanelTextModal error: {error}")
+        logger.error(f"PanelTextModal error: {error}", exc_info=True)
 
 class ImageUrlModal(discord.ui.Modal, title="Set Image URL"):
     image_url = discord.ui.TextInput(label="Image URL", placeholder="https://example.com/image.png", required=True)
@@ -778,7 +1393,7 @@ class ImageUrlModal(discord.ui.Modal, title="Set Image URL"):
 
     async def on_error(self, itx: discord.Interaction, error: Exception):
         await itx.response.send_message("An error occurred. Please try again.", ephemeral=True)
-        print(f"[TICKETING ERROR] ImageUrlModal error: {error}")
+        logger.error(f"ImageUrlModal error: {error}", exc_info=True)
 
 class ReasonModal(discord.ui.Modal):
     reason = discord.ui.TextInput(label="Reason", style=discord.TextStyle.long, placeholder="Provide a reason for this decision...", required=True, max_length=512)
@@ -794,7 +1409,7 @@ class ReasonModal(discord.ui.Modal):
 
     async def on_error(self, itx: discord.Interaction, error: Exception):
         await itx.response.send_message("An error occurred. Please try again.", ephemeral=True)
-        print(f"[TICKETING ERROR] ReasonModal error: {error}")
+        logger.error(f"ReasonModal error: {error}", exc_info=True)
 
 class ApprovalView(discord.ui.View):
     def __init__(self, bot: "Bot", topic: Dict[str, Any]):
@@ -874,7 +1489,7 @@ class ApprovalView(discord.ui.View):
                     original_embed.add_field(name="Discussion", value=f"Started in {discussion_channel.mention}", inline=False)
                     await interaction.message.edit(embed=original_embed)
             except Exception as e:
-                print(f"[TICKETING] Failed to create post-approval discussion channel: {e}")
+                logger.warning(f"Failed to create post-approval discussion channel: {e}")
 
         try:
             applicant = self.bot.get_user(applicant_id) or await self.bot.fetch_user(applicant_id)
@@ -936,68 +1551,246 @@ class ResponseModal(discord.ui.Modal):
         super().__init__(title=title, timeout=300)
 
     async def on_submit(self, interaction: discord.Interaction):
+        self.modal_interaction = interaction
         await interaction.response.defer()
 
 class CloseTicketView(discord.ui.View):
-    def __init__(self):
+    def __init__(self, topic_name: Optional[str] = None, opener_id: Optional[int] = None):
         super().__init__(timeout=None)
+        self.topic_name = topic_name
+        self.opener_id = opener_id
+        # Update button custom_id to include context if provided
+        if topic_name and opener_id:
+            for item in self.children:
+                if isinstance(item, discord.ui.Button) and item.label == "Close Ticket":
+                    item.custom_id = f"close_ticket_button::{topic_name}::{opener_id}"
+                    break
 
     @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.danger, custom_id="close_ticket_button")
     async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # This callback is mainly for legacy tickets without context in custom_id
+        # New tickets are handled via on_interaction listener
         await interaction.response.defer(ephemeral=True)
-        
+
         cog = interaction.client.get_cog("TicketSystem")
         if not cog:
             return await interaction.followup.send("An internal error occurred (Cog not found).", ephemeral=True)
-        
+
         topic_name, opener_id = await cog._get_ticket_context(interaction.channel)
 
         if opener_id is None or topic_name is None:
             return await interaction.followup.send("Could not identify the ticket context. This ticket may be corrupted.", ephemeral=True)
 
-        user_is_opener = (interaction.user.id == opener_id)
-        user_is_staff = False
+        await cog._handle_close_ticket(interaction, topic_name, opener_id)
 
-        topics = await _load_json(cog.bot, TOPICS_FILE, cog.topics_lock)
-        topic_data = topics.get(topic_name)
-        if topic_data:
-            staff_role_ids = set(topic_data.get("staff_role_ids", []))
-            user_role_ids = {role.id for role in interaction.user.roles}
-            if staff_role_ids.intersection(user_role_ids):
-                user_is_staff = True
-        
-        if not user_is_opener and not user_is_staff:
-            return await interaction.followup.send("You do not have permission to close this ticket.", ephemeral=True)
+class ClaimAlertView(discord.ui.View):
+    """View attached to claim alerts with a Claim button."""
+    def __init__(self, bot: "Bot", topic_name: str, channel_id: int, opener_id: int, qa_embed: Optional[discord.Embed] = None):
+        super().__init__(timeout=None)
+        self.bot = bot
+        self.topic_name = topic_name
+        self.channel_id = channel_id
+        self.opener_id = opener_id
+        self.qa_embed = qa_embed  # For applications with no log channel
+        # Set custom_id for persistence
+        self.children[0].custom_id = f"claim_ticket::{topic_name}::{channel_id}::{opener_id}"
 
-        confirm_view = discord.ui.View(timeout=60)
-        confirm_btn = discord.ui.Button(label="Confirm Close", style=discord.ButtonStyle.danger)
-        cancel_btn = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def claim_callback(self, interaction: discord.Interaction):
+        """Handle claim button press."""
+        await interaction.response.defer()
 
-        async def confirm_callback(itx: discord.Interaction):
-            await itx.response.defer()
-            try:
-                opener = await cog.bot.fetch_user(opener_id)
-                if opener and opener.id != itx.user.id:
-                    await opener.send(f"Your ticket `{itx.channel.name}` in **{itx.guild.name}** has been closed by {itx.user.display_name}.")
-            except (discord.Forbidden, discord.NotFound, discord.HTTPException):
-                pass
+        # Load topic to check claim_role
+        cog = self.bot.get_cog("TicketSystem")
+        if not cog:
+            return await interaction.followup.send("An error occurred.", ephemeral=True)
 
-            try:
-                await itx.channel.delete(reason=f"Ticket closed by {itx.user} ({itx.user.id})")
-            except discord.Forbidden:
-                await itx.followup.send("❌ I don't have permission to delete this channel.", ephemeral=True)
-            except discord.HTTPException as e:
-                await itx.followup.send(f"❌ Failed to delete channel: {e}", ephemeral=True)
+        topics = await _load_json(self.bot, TOPICS_FILE, cog.topics_lock)
+        topic = topics.get(self.topic_name)
+        if not topic:
+            return await interaction.followup.send("Topic no longer exists.", ephemeral=True)
 
-        async def cancel_callback(itx: discord.Interaction):
-            await itx.response.edit_message(content="Ticket closure cancelled.", view=None)
+        # Check if user has permission (staff role or claim role)
+        staff_role_ids = set(topic.get("staff_role_ids", []))
+        claim_role_id = topic.get("claim_role_id")
+        user_role_ids = {role.id for role in interaction.user.roles}
 
-        confirm_btn.callback = confirm_callback
-        cancel_btn.callback = cancel_callback
-        confirm_view.add_item(confirm_btn)
-        confirm_view.add_item(cancel_btn)
+        has_permission = bool(staff_role_ids.intersection(user_role_ids))
+        if claim_role_id and claim_role_id in user_role_ids:
+            has_permission = True
 
-        await interaction.followup.send("Are you sure you want to close this ticket? This action cannot be undone.", view=confirm_view, ephemeral=True)
+        if not has_permission:
+            return await interaction.followup.send("You don't have permission to claim this.", ephemeral=True)
+
+        # Get the channel
+        channel = self.bot.get_channel(self.channel_id)
+        if not channel:
+            return await interaction.followup.send("The ticket channel no longer exists.", ephemeral=True)
+
+        # Add claimer to the channel/thread
+        try:
+            if isinstance(channel, discord.Thread):
+                await channel.add_user(interaction.user)
+            elif isinstance(channel, discord.TextChannel):
+                await channel.set_permissions(interaction.user, view_channel=True, send_messages=True)
+        except discord.Forbidden:
+            return await interaction.followup.send("I don't have permission to add you to the channel.", ephemeral=True)
+
+        # Update the embed footer to show who claimed it
+        original_embed = interaction.message.embeds[0]
+        original_embed.set_footer(text=f"Claimed by {interaction.user.display_name}")
+        original_embed.color = discord.Color.green()
+
+        # Replace with ClaimedTicketView
+        new_view = ClaimedTicketView(self.bot, self.topic_name, self.channel_id, self.opener_id)
+
+        # If there's a Q&A embed, keep it
+        embeds_to_send = [original_embed]
+        if self.qa_embed:
+            embeds_to_send.append(self.qa_embed)
+
+        await interaction.message.edit(embeds=embeds_to_send, view=new_view)
+        await interaction.followup.send(f"You've claimed this ticket: {channel.mention}", ephemeral=True)
+
+    @discord.ui.button(label="Claim", style=discord.ButtonStyle.success, emoji="✋")
+    async def claim_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.claim_callback(interaction)
+
+
+class ClaimedTicketView(discord.ui.View):
+    """View shown after a ticket is claimed - Join and Close buttons."""
+    def __init__(self, bot: "Bot", topic_name: str, channel_id: int, opener_id: int):
+        super().__init__(timeout=None)
+        self.bot = bot
+        self.topic_name = topic_name
+        self.channel_id = channel_id
+        self.opener_id = opener_id
+        # Set custom_ids for persistence
+        for child in self.children:
+            if child.label == "Join":
+                child.custom_id = f"claim_join::{topic_name}::{channel_id}::{opener_id}"
+            elif child.label == "Close":
+                child.custom_id = f"claim_close::{topic_name}::{channel_id}::{opener_id}"
+
+    async def join_callback(self, interaction: discord.Interaction):
+        """Handle join button press."""
+        await interaction.response.defer(ephemeral=True)
+
+        cog = self.bot.get_cog("TicketSystem")
+        if not cog:
+            return await interaction.followup.send("An error occurred.", ephemeral=True)
+
+        topics = await _load_json(self.bot, TOPICS_FILE, cog.topics_lock)
+        topic = topics.get(self.topic_name)
+        if not topic:
+            return await interaction.followup.send("Topic no longer exists.", ephemeral=True)
+
+        # Check if user has claim_role or staff role
+        staff_role_ids = set(topic.get("staff_role_ids", []))
+        claim_role_id = topic.get("claim_role_id")
+        user_role_ids = {role.id for role in interaction.user.roles}
+
+        has_permission = bool(staff_role_ids.intersection(user_role_ids))
+        if claim_role_id and claim_role_id in user_role_ids:
+            has_permission = True
+
+        if not has_permission:
+            return await interaction.followup.send("You don't have the required role to join.", ephemeral=True)
+
+        channel = self.bot.get_channel(self.channel_id)
+        if not channel:
+            return await interaction.followup.send("The ticket channel no longer exists.", ephemeral=True)
+
+        try:
+            if isinstance(channel, discord.Thread):
+                await channel.add_user(interaction.user)
+            elif isinstance(channel, discord.TextChannel):
+                await channel.set_permissions(interaction.user, view_channel=True, send_messages=True)
+            await interaction.followup.send(f"You've been added to {channel.mention}", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.followup.send("I don't have permission to add you.", ephemeral=True)
+
+    async def close_callback(self, interaction: discord.Interaction):
+        """Handle close button press."""
+        await interaction.response.defer(ephemeral=True)
+
+        cog = self.bot.get_cog("TicketSystem")
+        if not cog:
+            return await interaction.followup.send("An error occurred.", ephemeral=True)
+
+        topics = await _load_json(self.bot, TOPICS_FILE, cog.topics_lock)
+        topic = topics.get(self.topic_name)
+        if not topic:
+            return await interaction.followup.send("Topic no longer exists.", ephemeral=True)
+
+        # Check permissions
+        staff_role_ids = set(topic.get("staff_role_ids", []))
+        claim_role_id = topic.get("claim_role_id")
+        user_role_ids = {role.id for role in interaction.user.roles}
+
+        has_permission = bool(staff_role_ids.intersection(user_role_ids))
+        if claim_role_id and claim_role_id in user_role_ids:
+            has_permission = True
+
+        if not has_permission:
+            return await interaction.followup.send("You don't have permission to close this.", ephemeral=True)
+
+        channel = self.bot.get_channel(self.channel_id)
+        if not channel:
+            # Channel already deleted, just update the message
+            original_embed = interaction.message.embeds[0]
+            original_embed.color = discord.Color.dark_grey()
+            footer_text = original_embed.footer.text if original_embed.footer else ""
+            original_embed.set_footer(text=f"{footer_text} | Closed by {interaction.user.display_name}")
+            for item in self.children:
+                item.disabled = True
+            await interaction.message.edit(embed=original_embed, view=self)
+            return await interaction.followup.send("The ticket channel was already deleted.", ephemeral=True)
+
+        delete_on_close = topic.get("delete_on_close", True)
+
+        try:
+            if delete_on_close:
+                await channel.delete(reason=f"Ticket closed via claim by {interaction.user} ({interaction.user.id})")
+            else:
+                if isinstance(channel, discord.Thread):
+                    await channel.edit(archived=True, locked=True, reason=f"Ticket closed via claim by {interaction.user}")
+                else:
+                    await channel.edit(
+                        name=f"closed-{channel.name}"[:100],
+                        overwrites={interaction.guild.default_role: discord.PermissionOverwrite(send_messages=False)},
+                        reason=f"Ticket closed via claim by {interaction.user}"
+                    )
+        except discord.Forbidden:
+            return await interaction.followup.send("I don't have permission to close the channel.", ephemeral=True)
+
+        # Notify opener
+        try:
+            opener = await self.bot.fetch_user(self.opener_id)
+            if opener:
+                await opener.send(f"Your ticket has been closed by {interaction.user.display_name}.")
+        except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+            pass
+
+        # Update the claim embed
+        original_embed = interaction.message.embeds[0]
+        original_embed.color = discord.Color.dark_grey()
+        footer_text = original_embed.footer.text if original_embed.footer else ""
+        original_embed.set_footer(text=f"{footer_text} | Closed by {interaction.user.display_name}")
+        for item in self.children:
+            item.disabled = True
+        await interaction.message.edit(embed=original_embed, view=self)
+
+        close_action = "deleted" if delete_on_close else "archived"
+        await interaction.followup.send(f"Ticket has been {close_action}.", ephemeral=True)
+
+    @discord.ui.button(label="Join", style=discord.ButtonStyle.primary, emoji="➡️")
+    async def join_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.join_callback(interaction)
+
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.danger, emoji="🔒")
+    async def close_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.close_callback(interaction)
+
 
 class StartSurveyView(discord.ui.View):
     def __init__(self, topic: Dict, bot: "Bot"):
@@ -1029,6 +1822,34 @@ class StartSurveyView(discord.ui.View):
 
         asyncio.create_task(cog.conduct_survey_flow(interaction, self.topic))
 
+class ResumeOrRestartView(discord.ui.View):
+    """View shown when a user has an active survey session."""
+    def __init__(self, cog: "TicketSystem", topic: Dict, session: Dict, interaction: discord.Interaction):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.topic = topic
+        self.session = session
+        self.original_interaction = interaction
+        self.choice: Optional[str] = None
+
+    @discord.ui.button(label="Resume", style=discord.ButtonStyle.success, emoji="▶️")
+    async def resume_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.choice = "resume"
+        await interaction.response.defer()
+        self.stop()
+
+    @discord.ui.button(label="Start Over", style=discord.ButtonStyle.danger, emoji="🔄")
+    async def restart_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.choice = "restart"
+        await interaction.response.defer()
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.choice = "cancel"
+        await interaction.response.defer()
+        self.stop()
+
 class PanelAction(discord.ui.Button):
     def __init__(self, bot: "Bot", topic: Dict[str, Any], panel_data: Dict[str, Any]):
         color_name = topic.get("button_color", "secondary")
@@ -1048,7 +1869,15 @@ class PanelAction(discord.ui.Button):
         if not cog:
             return await interaction.response.send_message("An error occurred. Please try again later.", ephemeral=True)
 
-        topic_type = self.topic.get('type')
+        # Load fresh topic data from file so changes take effect without resending panel
+        topic_name = self.topic.get('name')
+        topics = await _load_json(self.bot, TOPICS_FILE, cog.topics_lock)
+        topic = topics.get(topic_name)
+        if not topic:
+            return await interaction.response.send_message("This topic no longer exists.", ephemeral=True)
+        topic = _ensure_topic_defaults(topic)
+
+        topic_type = topic.get('type')
 
         if topic_type == 'ticket':
             user_id = interaction.user.id
@@ -1058,24 +1887,40 @@ class PanelAction(discord.ui.Button):
                 return await interaction.response.send_message(f"You are on cooldown. Please try again {discord.utils.format_dt(remaining, style='R')}.", ephemeral=True)
             
             # Check if pre-modal question is enabled
-            if self.topic.get('pre_modal_enabled', False):
-                pre_question = self.topic.get('pre_modal_question', 'Do you have your profile link ready?')
-                await interaction.response.send_message(pre_question, view=PreModalCheckView(cog, self.topic, interaction), ephemeral=True)
+            if topic.get('pre_modal_enabled', False):
+                pre_question = topic.get('pre_modal_question', 'Do you have your profile link ready?')
+                await interaction.response.send_message(pre_question, view=PreModalCheckView(cog, topic, interaction), ephemeral=True)
             else:
                 await interaction.response.defer(ephemeral=True, thinking=True)
-                ch = await cog._create_discussion_channel(interaction, self.topic, interaction.user, is_ticket=True)
+                ch = await cog._create_discussion_channel(interaction, topic, interaction.user, is_ticket=True)
                 if ch:
                     cog.cooldowns[user_id] = datetime.now(timezone.utc)
                     await interaction.followup.send(f"✅ Your ticket has been created: {ch.mention}", ephemeral=True)
                 else:
                     await interaction.followup.send("❌ Failed to create your ticket. The bot may be missing permissions or the parent category is misconfigured.", ephemeral=True)
-        
-        elif topic_type in ['application', 'survey']:
-            if not self.topic.get('questions'):
-                return await interaction.response.send_message(f"❌ This {topic_type} has no questions configured.", ephemeral=True)
-            
-            await interaction.response.send_message(f"The {topic_type} is starting in your DMs. Please check your direct messages.", ephemeral=True, delete_after=10)
-            asyncio.create_task(cog.conduct_survey_flow(interaction, self.topic))
+
+        elif topic_type == 'application':
+            if not topic.get('questions'):
+                return await interaction.response.send_message("❌ This application has no questions configured.", ephemeral=True)
+
+            # Check if pre-modal question is enabled for applications
+            # Store guild_id for claim system to create discussion channels
+            topic['_guild_id'] = interaction.guild.id
+            if topic.get('pre_modal_enabled', False):
+                pre_question = topic.get('pre_modal_question', 'Do you have your profile link ready?')
+                await interaction.response.send_message(pre_question, view=PreModalCheckView(cog, topic, interaction), ephemeral=True)
+            else:
+                channel_mode = topic.get('application_channel_mode', 'dm') == 'channel'
+                if not channel_mode:
+                    await interaction.response.send_message("The application is starting in your DMs. Please check your direct messages.", ephemeral=True, delete_after=10)
+                asyncio.create_task(cog.conduct_survey_flow(interaction, topic))
+
+        elif topic_type == 'survey':
+            if not topic.get('questions'):
+                return await interaction.response.send_message("❌ This survey has no questions configured.", ephemeral=True)
+
+            await interaction.response.send_message("The survey is starting in your DMs. Please check your direct messages.", ephemeral=True, delete_after=10)
+            asyncio.create_task(cog.conduct_survey_flow(interaction, topic))
 
 # ---------- SURVEY ADMIN PANEL AND RELATED CLASSES ----------
 class CreateSurveyNameModal(discord.ui.Modal, title="Create New Survey"):
@@ -1100,7 +1945,7 @@ class CreateSurveyNameModal(discord.ui.Modal, title="Create New Survey"):
 
     async def on_error(self, itx: discord.Interaction, error: Exception):
         await itx.response.send_message("An error occurred. Please try again.", ephemeral=True)
-        print(f"[TICKETING ERROR] CreateSurveyNameModal error: {error}")
+        logger.error(f"CreateSurveyNameModal error: {error}", exc_info=True)
 
 class SurveyTargetView(discord.ui.View):
     def __init__(self, cog: "TicketSystem", topic_data: Dict):
@@ -1325,9 +2170,112 @@ class TicketSystem(commands.Cog):
         self.topics_lock = asyncio.Lock()
         self.panels_lock = asyncio.Lock()
         self.survey_data_lock = asyncio.Lock()
+        self.survey_sessions_lock = asyncio.Lock()
         self.cooldowns: Dict[int, datetime] = {}
+        # Survey cooldowns: {user_id: {survey_name: last_submission_time}}
+        self.survey_cooldowns: Dict[int, Dict[str, datetime]] = {}
+        # Active survey sessions: {user_id: session_data}
+        self.active_survey_sessions: Dict[int, Dict[str, Any]] = {}
+        self._cooldown_cleanup_task: Optional[asyncio.Task] = None
 
-    async def _create_discussion_channel(self, interaction: discord.Interaction, topic: Dict[str, Any], member: Union[discord.Member, discord.User], is_ticket: bool = False):
+    async def cog_load(self):
+        """Called when the cog is loaded."""
+        self._cooldown_cleanup_task = asyncio.create_task(self._cleanup_cooldowns_loop())
+        # Restore survey sessions from file
+        await self._restore_survey_sessions()
+
+    async def cog_unload(self):
+        """Called when the cog is unloaded."""
+        if self._cooldown_cleanup_task:
+            self._cooldown_cleanup_task.cancel()
+            try:
+                await self._cooldown_cleanup_task
+            except asyncio.CancelledError:
+                pass
+        # Save active survey sessions to file for persistence across restarts
+        await self._save_survey_sessions()
+
+    async def _restore_survey_sessions(self):
+        """Restore survey sessions from file on cog load."""
+        try:
+            sessions = await _load_json(self.bot, SURVEY_SESSIONS_FILE, self.survey_sessions_lock)
+            now = datetime.now(timezone.utc)
+            restored_count = 0
+            for user_id_str, session in list(sessions.items()):
+                try:
+                    user_id = int(user_id_str)
+                    # Check if session is not too old (24 hours max)
+                    session_time = datetime.fromisoformat(session.get("started_at", ""))
+                    if (now - session_time) < timedelta(hours=24):
+                        self.active_survey_sessions[user_id] = session
+                        restored_count += 1
+                except (ValueError, KeyError):
+                    continue
+            if restored_count > 0:
+                logger.info(f"Restored {restored_count} active survey sessions from file.")
+        except Exception as e:
+            logger.error(f"Failed to restore survey sessions: {e}", exc_info=True)
+
+    async def _save_survey_sessions(self):
+        """Save active survey sessions to file."""
+        try:
+            # Convert keys to strings for JSON
+            sessions_to_save = {str(k): v for k, v in self.active_survey_sessions.items()}
+            await _save_json(self.bot, SURVEY_SESSIONS_FILE, sessions_to_save, self.survey_sessions_lock)
+            if sessions_to_save:
+                logger.info(f"Saved {len(sessions_to_save)} active survey sessions to file.")
+        except Exception as e:
+            logger.error(f"Failed to save survey sessions: {e}", exc_info=True)
+
+    async def _cleanup_cooldowns_loop(self):
+        """Background task to clean up expired cooldowns every 10 minutes."""
+        await self.bot.wait_until_ready()
+        while True:
+            try:
+                await asyncio.sleep(600)  # 10 minutes
+                now = datetime.now(timezone.utc)
+
+                # Cleanup ticket cooldowns
+                expired = [
+                    uid for uid, ts in self.cooldowns.items()
+                    if (now - ts.replace(tzinfo=timezone.utc)) > timedelta(minutes=10)
+                ]
+                for uid in expired:
+                    del self.cooldowns[uid]
+                if expired:
+                    logger.debug(f"Cleaned up {len(expired)} expired ticket cooldowns.")
+
+                # Cleanup survey cooldowns (remove entries older than 24 hours)
+                survey_expired_users = []
+                for uid, surveys in self.survey_cooldowns.items():
+                    expired_surveys = [
+                        sname for sname, ts in surveys.items()
+                        if (now - ts.replace(tzinfo=timezone.utc)) > timedelta(hours=24)
+                    ]
+                    for sname in expired_surveys:
+                        del surveys[sname]
+                    if not surveys:
+                        survey_expired_users.append(uid)
+                for uid in survey_expired_users:
+                    del self.survey_cooldowns[uid]
+
+                # Cleanup expired survey sessions (older than 24 hours)
+                expired_sessions = [
+                    uid for uid, session in self.active_survey_sessions.items()
+                    if (now - datetime.fromisoformat(session.get("started_at", now.isoformat())).replace(tzinfo=timezone.utc)) > timedelta(hours=24)
+                ]
+                for uid in expired_sessions:
+                    del self.active_survey_sessions[uid]
+                if expired_sessions:
+                    logger.debug(f"Cleaned up {len(expired_sessions)} expired survey sessions.")
+                    await self._save_survey_sessions()
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Cooldown cleanup error: {e}", exc_info=True)
+
+    async def _create_discussion_channel(self, interaction: discord.Interaction, topic: Dict[str, Any], member: Union[discord.Member, discord.User], is_ticket: bool = False, user_answer: Optional[str] = None):
         try:
             guild = interaction.guild
             channel_name = f"{topic.get('name', 'ticket')}-{member.name}".replace(" ", "-").lower()[:100]
@@ -1338,9 +2286,13 @@ class TicketSystem(commands.Cog):
             if not parent:
                 raise ValueError(f"Parent {parent_id} not found.")
 
-            channel_topic_str = f"Ticket Topic: {topic.get('name', 'unknown')} | Opener: {member.id}"
+            topic_name = topic.get('name', 'unknown')
+            channel_topic_str = f"Ticket Topic: {topic_name} | Opener: {member.id}"
             welcome_template = topic.get("welcome_message", "Welcome {user}! A staff member will be with you shortly.\nTopic: **{topic}**")
             welcome_message = welcome_template.format(user=member.mention, topic=topic.get('label', 'N/A'))
+
+            # Create CloseTicketView with context
+            close_view = CloseTicketView(topic_name=topic_name, opener_id=member.id)
 
             if topic.get('mode') == 'channel':
                 if not isinstance(parent, discord.CategoryChannel):
@@ -1349,9 +2301,9 @@ class TicketSystem(commands.Cog):
                     existing = discord.utils.get(parent.text_channels, name=channel_name)
                     if existing:
                         if interaction.response.is_done():
-                            await interaction.followup.send(f"⚠️ You already have a ticket: {existing.mention}", ephemeral=True)
+                            await interaction.followup.send(f"You already have a ticket: {existing.mention}", ephemeral=True)
                         else:
-                            await interaction.response.send_message(f"⚠️ You already have a ticket: {existing.mention}", ephemeral=True)
+                            await interaction.response.send_message(f"You already have a ticket: {existing.mention}", ephemeral=True)
                         return None
                 overwrites = {guild.default_role: discord.PermissionOverwrite(view_channel=False)}
                 if is_ticket:
@@ -1363,9 +2315,30 @@ class TicketSystem(commands.Cog):
                     role = guild.get_role(rid)
                     if role:
                         overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
-                
+
                 new_channel = await parent.create_text_channel(name=channel_name, overwrites=overwrites, topic=channel_topic_str)
-                await new_channel.send(welcome_message, view=CloseTicketView())
+
+                # For channel mode, send as embed with optional answer field
+                embed = discord.Embed(description=welcome_message, color=discord.Color.dark_grey())
+                if user_answer:
+                    answer_question = topic.get('pre_modal_answer_question', 'Response')
+                    embed.add_field(name=answer_question, value=user_answer, inline=False)
+                await new_channel.send(embed=embed, view=close_view)
+
+                # Ping staff roles if enabled (only for tickets)
+                if is_ticket and topic.get('ping_staff_on_create', False):
+                    staff_mentions = []
+                    for rid in topic.get("staff_role_ids", []):
+                        role = guild.get_role(rid)
+                        if role:
+                            staff_mentions.append(role.mention)
+                    if staff_mentions:
+                        await new_channel.send(f"{' '.join(staff_mentions)} - New ticket opened!", delete_after=5)
+
+                # Send claim alert if enabled (for tickets)
+                if is_ticket and topic.get('claim_enabled', False):
+                    await self._send_claim_alert(topic, new_channel, member)
+
                 return new_channel
 
             else:  # Thread mode
@@ -1383,18 +2356,23 @@ class TicketSystem(commands.Cog):
                     existing = discord.utils.get(all_threads, name=channel_name)
                     if existing:
                         if interaction.response.is_done():
-                            await interaction.followup.send(f"⚠️ You already have a ticket: {existing.mention}", ephemeral=True)
+                            await interaction.followup.send(f"You already have a ticket: {existing.mention}", ephemeral=True)
                         else:
-                            await interaction.response.send_message(f"⚠️ You already have a ticket: {existing.mention}", ephemeral=True)
+                            await interaction.response.send_message(f"You already have a ticket: {existing.mention}", ephemeral=True)
                         return None
 
                 ch = await parent.create_thread(name=channel_name, type=discord.ChannelType.private_thread)
-                if is_ticket: 
+                if is_ticket:
                     await ch.add_user(member)
                     embed = discord.Embed(description=welcome_message, color=discord.Color.dark_grey())
-                    embed.set_footer(text=channel_topic_str)
-                    await ch.send(embed=embed, view=CloseTicketView())
+                    # Add user answer field if provided
+                    if user_answer:
+                        answer_question = topic.get('pre_modal_answer_question', 'Response')
+                        embed.add_field(name=answer_question, value=user_answer, inline=False)
+                    # No footer - context is stored in the close button custom_id
+                    await ch.send(embed=embed, view=close_view)
 
+                # Add staff members to thread (silently)
                 for rid in topic.get("staff_role_ids", []):
                     role = guild.get_role(rid)
                     if role:
@@ -1403,10 +2381,133 @@ class TicketSystem(commands.Cog):
                                 await ch.add_user(m)
                             except discord.HTTPException:
                                 pass
+
+                # Ping staff roles if enabled (only for tickets)
+                if is_ticket and topic.get('ping_staff_on_create', False):
+                    staff_mentions = []
+                    for rid in topic.get("staff_role_ids", []):
+                        role = guild.get_role(rid)
+                        if role:
+                            staff_mentions.append(role.mention)
+                    if staff_mentions:
+                        await ch.send(f"{' '.join(staff_mentions)} - New ticket opened!", delete_after=5)
+
+                # Send claim alert if enabled (for tickets)
+                if is_ticket and topic.get('claim_enabled', False):
+                    await self._send_claim_alert(topic, ch, member)
+
                 return ch
         except Exception as e:
             error_msg = f"Error in _create_discussion_channel: {e}"
-            print(f"[TICKETING ERROR] {error_msg}")
+            logger.error(error_msg)
+            return None
+
+    async def _send_claim_alert(self, topic: Dict[str, Any], channel: Union[discord.TextChannel, discord.Thread], opener: Union[discord.Member, discord.User], qa_embed: Optional[discord.Embed] = None):
+        """Send a claim alert to the configured alerts channel."""
+        alerts_channel_id = topic.get('claim_alerts_channel_id')
+        if not alerts_channel_id:
+            return
+
+        alerts_channel = self.bot.get_channel(alerts_channel_id)
+        if not alerts_channel:
+            logger.warning(f"Claim alerts channel {alerts_channel_id} not found.")
+            return
+
+        topic_type = topic.get('type', 'ticket')
+        topic_name = topic.get('name', 'unknown')
+        topic_label = topic.get('label', 'Unknown Topic')
+
+        # Create a brief claim alert embed
+        alert_embed = discord.Embed(
+            title=f"New {topic_type.capitalize()} Awaiting Claim",
+            color=discord.Color.orange()
+        )
+        alert_embed.add_field(name="From", value=f"{opener.mention} ({opener.name})", inline=True)
+        alert_embed.add_field(name="Topic", value=topic_label, inline=True)
+        alert_embed.add_field(name="Link", value=channel.mention, inline=True)
+        alert_embed.set_footer(text="Click Claim to handle this ticket")
+        alert_embed.timestamp = discord.utils.utcnow()
+
+        # Create the claim view
+        view = ClaimAlertView(self.bot, topic_name, channel.id, opener.id, qa_embed=qa_embed)
+
+        try:
+            embeds_to_send = [alert_embed]
+            if qa_embed:
+                embeds_to_send.append(qa_embed)
+            await alerts_channel.send(embeds=embeds_to_send, view=view)
+        except discord.Forbidden:
+            logger.warning(f"Missing permissions to send claim alert to {alerts_channel_id}")
+        except discord.HTTPException as e:
+            logger.error(f"Failed to send claim alert: {e}")
+
+    async def _create_application_discussion(self, topic: Dict[str, Any], member: discord.Member, guild: discord.Guild) -> Optional[Union[discord.TextChannel, discord.Thread]]:
+        """Create a discussion channel for an application (used when claim is enabled)."""
+        try:
+            channel_name = f"{topic.get('name', 'app')}-{member.name}".replace(" ", "-").lower()[:100]
+            parent_id = topic.get('parent_id')
+            if not parent_id:
+                return None
+
+            parent = guild.get_channel(parent_id)
+            if not parent:
+                return None
+
+            topic_name = topic.get('name', 'unknown')
+            channel_topic_str = f"Application Topic: {topic_name} | Applicant: {member.id}"
+            welcome_template = topic.get("welcome_message", "Welcome {user}! A staff member will be with you shortly.\nTopic: **{topic}**")
+            welcome_message = welcome_template.format(user=member.mention, topic=topic.get('label', 'N/A'))
+
+            if topic.get('mode') == 'channel':
+                if not isinstance(parent, discord.CategoryChannel):
+                    return None
+
+                overwrites = {guild.default_role: discord.PermissionOverwrite(view_channel=False)}
+                overwrites[member] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+                overwrites[guild.me] = discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True)
+                for rid in topic.get("staff_role_ids", []):
+                    role = guild.get_role(rid)
+                    if role:
+                        overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+
+                new_channel = await parent.create_text_channel(name=channel_name, overwrites=overwrites, topic=channel_topic_str)
+
+                welcome_embed = discord.Embed(description=welcome_message, color=discord.Color.dark_grey())
+                close_view = CloseTicketView(topic_name=topic_name, opener_id=member.id)
+                await new_channel.send(content=member.mention, embed=welcome_embed, view=close_view)
+
+                return new_channel
+
+            else:  # Thread mode
+                if not isinstance(parent, discord.TextChannel):
+                    return None
+
+                ch = await parent.create_thread(name=channel_name, type=discord.ChannelType.private_thread)
+
+                # Add applicant to thread
+                try:
+                    await ch.add_user(member)
+                except discord.HTTPException:
+                    pass
+
+                # Add staff members to thread
+                for rid in topic.get("staff_role_ids", []):
+                    role = guild.get_role(rid)
+                    if role:
+                        for m in role.members:
+                            try:
+                                await ch.add_user(m)
+                            except discord.HTTPException:
+                                pass
+
+                welcome_embed = discord.Embed(description=welcome_message, color=discord.Color.dark_grey())
+                close_view = CloseTicketView(topic_name=topic_name, opener_id=member.id)
+                await ch.send(content=member.mention, embed=welcome_embed, view=close_view)
+
+                return ch
+
+        except Exception as e:
+            logger.error(f"Error in _create_application_discussion: {e}")
             return None
 
     @commands.Cog.listener()
@@ -1419,7 +2520,47 @@ class TicketSystem(commands.Cog):
         if not interaction.data or "custom_id" not in interaction.data:
             return
         custom_id = interaction.data["custom_id"]
-        
+
+        # Handle close ticket buttons with context in custom_id
+        if custom_id.startswith("close_ticket_button::"):
+            await interaction.response.defer(ephemeral=True)
+            parts = custom_id.split("::")
+            if len(parts) >= 3:
+                topic_name = parts[1]
+                try:
+                    opener_id = int(parts[2])
+                except ValueError:
+                    return await interaction.followup.send("Invalid ticket context.", ephemeral=True)
+                await self._handle_close_ticket(interaction, topic_name, opener_id)
+            return
+
+        # Handle claim buttons
+        if custom_id.startswith("claim_ticket::") or custom_id.startswith("claim_join::") or custom_id.startswith("claim_close::"):
+            parts = custom_id.split("::")
+            if len(parts) >= 4:
+                topic_name = parts[1]
+                try:
+                    channel_id = int(parts[2])
+                    opener_id = int(parts[3])
+                except ValueError:
+                    return await interaction.response.send_message("Invalid claim context.", ephemeral=True)
+
+                # Get Q&A embed if present (for applications)
+                qa_embed = None
+                if interaction.message and len(interaction.message.embeds) > 1:
+                    qa_embed = interaction.message.embeds[1]
+
+                if custom_id.startswith("claim_ticket::"):
+                    view = ClaimAlertView(self.bot, topic_name, channel_id, opener_id, qa_embed=qa_embed)
+                    await view.claim_callback(interaction)
+                elif custom_id.startswith("claim_join::"):
+                    view = ClaimedTicketView(self.bot, topic_name, channel_id, opener_id)
+                    await view.join_callback(interaction)
+                elif custom_id.startswith("claim_close::"):
+                    view = ClaimedTicketView(self.bot, topic_name, channel_id, opener_id)
+                    await view.close_callback(interaction)
+            return
+
         if custom_id.startswith("approve_") or custom_id.startswith("deny_") or custom_id.startswith("start_discussion_"):
             if not interaction.message or not interaction.message.embeds:
                 return
@@ -1468,7 +2609,7 @@ class TicketSystem(commands.Cog):
                 self.bot.add_view(StartSurveyView(t_data, self.bot))
 
         self.persistent_views_added = True
-        print("✅ Persistent ticket, survey, and action views have been loaded.")
+        logger.info("Persistent ticket, survey, and action views have been loaded.")
 
     def create_panel_view(self, panel_data: Dict[str, Any], all_topics: Dict[str, Any]) -> Optional[discord.ui.View]:
         view = discord.ui.View(timeout=None)
@@ -1525,42 +2666,48 @@ class TicketSystem(commands.Cog):
         if action in ["create", "edit", "delete"] and not name:
             return await interaction.response.send_message(f"❌ You must provide a name to {action} a topic.", ephemeral=True)
         await interaction.response.defer(ephemeral=True)
-        if action == "create":
-            name = name.lower().strip().replace(" ", "-")
-            topics = await _load_json(self.bot, TOPICS_FILE, self.topics_lock)
-            if name in topics:
-                return await interaction.followup.send("❌ A topic or survey with this name already exists.", ephemeral=True)
-            topic_data = _ensure_topic_defaults({"name": name, "label": name.replace("-", " ").title()})
-            view = TopicWizardView(self, interaction, topic_data, is_new=True)
-            await interaction.followup.send(embed=view.generate_embed(), view=view, ephemeral=True)
-        elif action == "edit":
-            topics = await _load_json(self.bot, TOPICS_FILE, self.topics_lock)
-            if name not in topics or topics[name].get('type') == 'survey':
-                return await interaction.followup.send("❌ Topic not found.", ephemeral=True)
-            view = TopicWizardView(self, interaction, topics[name], is_new=False)
-            await interaction.followup.send(embed=view.generate_embed(), view=view, ephemeral=True)
-        elif action == "delete":
-            topics = await _load_json(self.bot, TOPICS_FILE, self.topics_lock)
-            if name not in topics or topics[name].get('type') == 'survey':
-                return await interaction.followup.send("❌ Topic not found.", ephemeral=True)
-            del topics[name]
-            await _save_json(self.bot, TOPICS_FILE, topics, self.topics_lock)
-            panels = await _load_json(self.bot, PANELS_FILE, self.panels_lock)
-            updated = False
-            for p_data in panels.values():
-                if name in p_data.get('topic_names', []):
-                    p_data['topic_names'].remove(name)
-                    updated = True
-            if updated:
-                await _save_json(self.bot, PANELS_FILE, panels, self.panels_lock)
-            await interaction.followup.send(f"🗑️ Topic `{name}` deleted.", ephemeral=True)
-        elif action == "list":
-            topics = await _load_json(self.bot, TOPICS_FILE, self.topics_lock)
-            ticket_topics = {k: v for k, v in topics.items() if v.get('type') != 'survey'}
-            if not ticket_topics:
-                return await interaction.followup.send("No topics have been created yet.", ephemeral=True)
-            lines = [f"• `{name}` - {t.get('emoji') or ''} **{t.get('label')}** ({t.get('type')})" for name, t in ticket_topics.items()]
-            await interaction.followup.send("**Available Topics:**\n" + "\n".join(lines), ephemeral=True)
+        try:
+            if action == "create":
+                name = name.lower().strip().replace(" ", "-")
+                topics = await _load_json(self.bot, TOPICS_FILE, self.topics_lock)
+                if name in topics:
+                    return await interaction.followup.send("❌ A topic or survey with this name already exists.", ephemeral=True)
+                topic_data = _ensure_topic_defaults({"name": name, "label": name.replace("-", " ").title()})
+                view = TopicWizardView(self, interaction, topic_data, is_new=True)
+                await interaction.followup.send(embed=view.generate_embed(), view=view, ephemeral=True)
+            elif action == "edit":
+                topics = await _load_json(self.bot, TOPICS_FILE, self.topics_lock)
+                if name not in topics or topics[name].get('type') == 'survey':
+                    return await interaction.followup.send("❌ Topic not found.", ephemeral=True)
+                # Ensure topic has all default fields before editing
+                topic_data = _ensure_topic_defaults(topics[name])
+                view = TopicWizardView(self, interaction, topic_data, is_new=False)
+                await interaction.followup.send(embed=view.generate_embed(), view=view, ephemeral=True)
+            elif action == "delete":
+                topics = await _load_json(self.bot, TOPICS_FILE, self.topics_lock)
+                if name not in topics or topics[name].get('type') == 'survey':
+                    return await interaction.followup.send("❌ Topic not found.", ephemeral=True)
+                del topics[name]
+                await _save_json(self.bot, TOPICS_FILE, topics, self.topics_lock)
+                panels = await _load_json(self.bot, PANELS_FILE, self.panels_lock)
+                updated = False
+                for p_data in panels.values():
+                    if name in p_data.get('topic_names', []):
+                        p_data['topic_names'].remove(name)
+                        updated = True
+                if updated:
+                    await _save_json(self.bot, PANELS_FILE, panels, self.panels_lock)
+                await interaction.followup.send(f"🗑️ Topic `{name}` deleted.", ephemeral=True)
+            elif action == "list":
+                topics = await _load_json(self.bot, TOPICS_FILE, self.topics_lock)
+                ticket_topics = {k: v for k, v in topics.items() if v.get('type') != 'survey'}
+                if not ticket_topics:
+                    return await interaction.followup.send("No topics have been created yet.", ephemeral=True)
+                lines = [f"• `{name}` - {t.get('emoji') or ''} **{t.get('label')}** ({t.get('type')})" for name, t in ticket_topics.items()]
+                await interaction.followup.send("**Available Topics:**\n" + "\n".join(lines), ephemeral=True)
+        except Exception as e:
+            logger.error(f"Error in topic command: {e}", exc_info=True)
+            await interaction.followup.send(f"❌ An error occurred: {e}", ephemeral=True)
 
     @ticket_group.command(name="panel", description="Manage ticket panels.")
     @app_commands.describe(action="The action to perform on a panel.", name="The unique name for the panel (e.g., 'main-support').")
@@ -1633,7 +2780,7 @@ class TicketSystem(commands.Cog):
                 await _save_json(self.bot, PANELS_FILE, panels, self.panels_lock)
                 await interaction.followup.send(f"✅ Panel `{name}` sent to {channel.mention}.", ephemeral=True)
             except Exception as e:
-                print(f"[TICKETING ERROR] Failed to send panel: {e}")
+                logger.error(f"Failed to send panel: {e}", exc_info=True)
                 await interaction.followup.send(f"❌ An error occurred: {e}", ephemeral=True)
 
     @survey_group.command(name="admin", description="Opens the survey administration panel.")
@@ -1644,6 +2791,173 @@ class TicketSystem(commands.Cog):
             color=discord.Color.teal()
         )
         await interaction.response.send_message(embed=embed, view=SurveyAdminPanelView(self), ephemeral=True)
+
+    @ticket_group.command(name="export", description="Export application responses to Excel.")
+    async def ticket_export(self, interaction: discord.Interaction):
+        if openpyxl is None:
+            await interaction.response.send_message("The `openpyxl` library is not installed on the bot. Please contact the bot owner.", ephemeral=True)
+            return
+
+        # Get all application topics
+        topics = await _load_json(self.bot, TOPICS_FILE, self.topics_lock)
+        application_topics = {name: data for name, data in topics.items() if data.get('type') == 'application'}
+
+        if not application_topics:
+            return await interaction.response.send_message("No application topics exist.", ephemeral=True, delete_after=10)
+
+        options = [discord.SelectOption(label=data.get('label', name)[:100], value=name[:100]) for name, data in application_topics.items()][:25]
+
+        view = discord.ui.View(timeout=180)
+        select = discord.ui.Select(placeholder="Select an application to export...", options=options)
+
+        async def select_callback(itx: discord.Interaction):
+            app_name = select.values[0]
+            await itx.response.defer(ephemeral=True, thinking=True)
+
+            all_data = await _load_json(self.bot, SURVEY_DATA_FILE, self.survey_data_lock)
+            responses = all_data.get(app_name)
+
+            if not responses:
+                await itx.followup.send("No responses found for this application.", ephemeral=True)
+                return
+
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = app_name[:30]
+            headers = ["Timestamp", "User ID", "User Name"]
+
+            all_questions = set()
+            for response in responses:
+                all_questions.update(response.get("answers", {}).keys())
+
+            sorted_questions = sorted(list(all_questions))
+            headers.extend(sorted_questions)
+            ws.append(headers)
+
+            for response in responses:
+                row = [response.get("timestamp"), response.get("user_id"), response.get("user_name")]
+                for question in sorted_questions:
+                    row.append(response.get("answers", {}).get(question, ""))
+                ws.append(row)
+
+            virtual_file = io.BytesIO()
+            wb.save(virtual_file)
+            virtual_file.seek(0)
+
+            file_name = f"application_{app_name}_{datetime.now(timezone.utc).strftime('%Y-%m-%d')}.xlsx"
+            await itx.followup.send("Here is your application data export:", file=discord.File(virtual_file, filename=file_name), ephemeral=True)
+
+        select.callback = select_callback
+        view.add_item(select)
+        await interaction.response.send_message("Select an application to export responses:", view=view, ephemeral=True)
+
+    @ticket_group.command(name="responses", description="View and delete application/survey responses.")
+    async def ticket_responses(self, interaction: discord.Interaction):
+        # Get all application and survey topics
+        topics = await _load_json(self.bot, TOPICS_FILE, self.topics_lock)
+        app_survey_topics = {name: data for name, data in topics.items() if data.get('type') in ['application', 'survey']}
+
+        if not app_survey_topics:
+            return await interaction.response.send_message("No application or survey topics exist.", ephemeral=True)
+
+        options = [discord.SelectOption(label=f"{data.get('label', name)[:90]} ({data.get('type')})", value=name[:100]) for name, data in app_survey_topics.items()][:25]
+
+        view = discord.ui.View(timeout=300)
+        select = discord.ui.Select(placeholder="Select a topic to manage responses...", options=options)
+
+        async def topic_select_callback(itx: discord.Interaction):
+            topic_name = select.values[0]
+            await itx.response.defer(ephemeral=True)
+
+            all_data = await _load_json(self.bot, SURVEY_DATA_FILE, self.survey_data_lock)
+            responses = all_data.get(topic_name, [])
+
+            if not responses:
+                await itx.followup.send("No responses found for this topic.", ephemeral=True)
+                return
+
+            # Show responses with delete options
+            embed = discord.Embed(title=f"Responses for {topic_name}", description=f"Total: {len(responses)} responses", color=discord.Color.blue())
+
+            # Create options for each response (max 25)
+            response_options = []
+            for i, resp in enumerate(responses[:25]):
+                user_name = resp.get('user_name', 'Unknown')
+                timestamp = resp.get('timestamp', 'Unknown')[:10]  # Just date
+                response_options.append(discord.SelectOption(
+                    label=f"{user_name[:50]} - {timestamp}",
+                    value=str(i),
+                    description=f"User ID: {resp.get('user_id', 'N/A')}"
+                ))
+
+            if not response_options:
+                await itx.followup.send("No responses to display.", ephemeral=True)
+                return
+
+            delete_view = discord.ui.View(timeout=300)
+            delete_select = discord.ui.Select(
+                placeholder="Select responses to delete...",
+                options=response_options,
+                min_values=1,
+                max_values=len(response_options)
+            )
+
+            async def delete_callback(del_itx: discord.Interaction):
+                await del_itx.response.defer(ephemeral=True)
+                indices_to_remove = sorted([int(v) for v in delete_select.values], reverse=True)
+
+                # Reload data to ensure we have latest
+                current_data = await _load_json(self.bot, SURVEY_DATA_FILE, self.survey_data_lock)
+                current_responses = current_data.get(topic_name, [])
+
+                removed_count = 0
+                for idx in indices_to_remove:
+                    if 0 <= idx < len(current_responses):
+                        current_responses.pop(idx)
+                        removed_count += 1
+
+                current_data[topic_name] = current_responses
+                await _save_json(self.bot, SURVEY_DATA_FILE, current_data, self.survey_data_lock)
+
+                await del_itx.followup.send(f"Deleted {removed_count} response(s). {len(current_responses)} remaining.", ephemeral=True)
+
+            delete_select.callback = delete_callback
+            delete_view.add_item(delete_select)
+
+            # Add a "Delete All" button
+            delete_all_btn = discord.ui.Button(label="Delete All Responses", style=discord.ButtonStyle.danger, row=1)
+
+            async def delete_all_callback(del_all_itx: discord.Interaction):
+                # Confirmation
+                confirm_view = discord.ui.View(timeout=60)
+                confirm_btn = discord.ui.Button(label="Confirm Delete All", style=discord.ButtonStyle.danger)
+                cancel_btn = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.secondary)
+
+                async def confirm_del_all(c_itx: discord.Interaction):
+                    await c_itx.response.defer(ephemeral=True)
+                    current_data = await _load_json(self.bot, SURVEY_DATA_FILE, self.survey_data_lock)
+                    current_data[topic_name] = []
+                    await _save_json(self.bot, SURVEY_DATA_FILE, current_data, self.survey_data_lock)
+                    await c_itx.followup.send(f"All responses for {topic_name} have been deleted.", ephemeral=True)
+
+                async def cancel_del_all(c_itx: discord.Interaction):
+                    await c_itx.response.edit_message(content="Deletion cancelled.", view=None)
+
+                confirm_btn.callback = confirm_del_all
+                cancel_btn.callback = cancel_del_all
+                confirm_view.add_item(confirm_btn)
+                confirm_view.add_item(cancel_btn)
+
+                await del_all_itx.response.send_message(f"Are you sure you want to delete ALL {len(responses)} responses?", view=confirm_view, ephemeral=True)
+
+            delete_all_btn.callback = delete_all_callback
+            delete_view.add_item(delete_all_btn)
+
+            await itx.followup.send(f"**{topic_name}** - {len(responses)} responses\nSelect responses to delete:", view=delete_view, ephemeral=True)
+
+        select.callback = topic_select_callback
+        view.add_item(select)
+        await interaction.response.send_message("Select a topic to manage responses:", view=view, ephemeral=True)
 
     async def _get_ticket_context(self, channel: Union[discord.TextChannel, discord.Thread]) -> Tuple[Optional[str], Optional[int]]:
         topic_str = ""
@@ -1666,68 +2980,374 @@ class TicketSystem(commands.Cog):
         
         return topic_name, opener_id
 
+    async def _handle_close_ticket(self, interaction: discord.Interaction, topic_name: str, opener_id: int):
+        """Handle the close ticket logic with permission checks and close behavior."""
+        topics = await _load_json(self.bot, TOPICS_FILE, self.topics_lock)
+        topic_data = topics.get(topic_name)
+
+        user_is_opener = (interaction.user.id == opener_id)
+        user_is_staff = False
+
+        if topic_data:
+            staff_role_ids = set(topic_data.get("staff_role_ids", []))
+            user_role_ids = {role.id for role in interaction.user.roles}
+            if staff_role_ids.intersection(user_role_ids):
+                user_is_staff = True
+
+        # Check member_can_close permission
+        member_can_close = topic_data.get("member_can_close", True) if topic_data else True
+
+        if user_is_opener and not member_can_close and not user_is_staff:
+            return await interaction.followup.send("Members cannot close their own tickets for this topic. Please wait for staff.", ephemeral=True)
+
+        if not user_is_opener and not user_is_staff:
+            return await interaction.followup.send("You do not have permission to close this ticket.", ephemeral=True)
+
+        delete_on_close = topic_data.get("delete_on_close", True) if topic_data else True
+
+        confirm_view = discord.ui.View(timeout=60)
+        confirm_btn = discord.ui.Button(label="Confirm Close", style=discord.ButtonStyle.danger)
+        cancel_btn = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.secondary)
+
+        async def confirm_callback(itx: discord.Interaction):
+            await itx.response.defer()
+            try:
+                opener = await self.bot.fetch_user(opener_id)
+                if opener and opener.id != itx.user.id:
+                    await opener.send(f"Your ticket `{itx.channel.name}` in **{itx.guild.name}** has been closed by {itx.user.display_name}.")
+            except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+                pass
+
+            try:
+                if delete_on_close:
+                    await itx.channel.delete(reason=f"Ticket closed by {itx.user} ({itx.user.id})")
+                else:
+                    # Archive the thread/channel instead of deleting
+                    if isinstance(itx.channel, discord.Thread):
+                        await itx.channel.edit(archived=True, locked=True, reason=f"Ticket closed by {itx.user} ({itx.user.id})")
+                        await itx.followup.send("Ticket has been closed and archived.", ephemeral=True)
+                    else:
+                        # For text channels, we can't archive, so rename and lock
+                        await itx.channel.edit(
+                            name=f"closed-{itx.channel.name}"[:100],
+                            overwrites={itx.guild.default_role: discord.PermissionOverwrite(send_messages=False)},
+                            reason=f"Ticket closed by {itx.user} ({itx.user.id})"
+                        )
+                        await itx.followup.send("Ticket has been closed.", ephemeral=True)
+            except discord.Forbidden:
+                await itx.followup.send("I don't have permission to close this channel.", ephemeral=True)
+            except discord.HTTPException as e:
+                await itx.followup.send(f"Failed to close channel: {e}", ephemeral=True)
+
+        async def cancel_callback(itx: discord.Interaction):
+            await itx.response.edit_message(content="Ticket closure cancelled.", view=None)
+
+        confirm_btn.callback = confirm_callback
+        cancel_btn.callback = cancel_callback
+        confirm_view.add_item(confirm_btn)
+        confirm_view.add_item(cancel_btn)
+
+        close_action = "deleted" if delete_on_close else "archived"
+        await interaction.followup.send(f"Are you sure you want to close this ticket? The ticket will be {close_action}.", view=confirm_view, ephemeral=True)
+
     async def conduct_survey_flow(self, interaction: discord.Interaction, topic: Dict):
         user = interaction.user
-        # Increase question limit to 25
-        questions = topic.get('questions', [])[:25]
-        answers = {}
+        survey_name = topic.get('name', 'unknown')
+        topic_type = topic.get('type', 'survey')
 
-        try:
-            target_channel = user.dm_channel or await user.create_dm()
-        except (discord.Forbidden, discord.HTTPException):
-            if not isinstance(interaction.channel, discord.DMChannel):
+        # --- Rate Limit Check ---
+        cooldown_minutes = topic.get('survey_cooldown_minutes', DEFAULT_SURVEY_COOLDOWN_MINUTES)
+        user_survey_cooldowns = self.survey_cooldowns.get(user.id, {})
+        last_submission = user_survey_cooldowns.get(survey_name)
+
+        if last_submission:
+            now = datetime.now(timezone.utc)
+            time_since = now - last_submission.replace(tzinfo=timezone.utc)
+            if time_since < timedelta(minutes=cooldown_minutes):
+                remaining = last_submission.replace(tzinfo=timezone.utc) + timedelta(minutes=cooldown_minutes)
+                cooldown_msg = f"You recently submitted this {topic_type}. Please try again {discord.utils.format_dt(remaining, style='R')}."
                 try:
-                    await interaction.followup.send("I couldn't send you a DM. Please check your privacy settings.", ephemeral=True)
+                    if interaction.response.is_done():
+                        await interaction.followup.send(cooldown_msg, ephemeral=True)
+                    else:
+                        await interaction.response.send_message(cooldown_msg, ephemeral=True)
                 except discord.HTTPException:
                     pass
-            return
+                return
 
-        embed = discord.Embed(title=f"Starting: {topic.get('label')}", description="Please wait...", color=discord.Color.light_grey())
-        try:
-            flow_message = await target_channel.send(embed=embed)
-        except (discord.Forbidden, discord.HTTPException):
-            return
+        # --- Check for existing session ---
+        existing_session = self.active_survey_sessions.get(user.id)
+        start_index = 0
+        answers = {}
 
-        for i, question_text in enumerate(questions):
-            answer_view = discord.ui.View(timeout=300)
-            future = asyncio.get_event_loop().create_future()
+        # Include pre-modal answer if provided (from PreModalAnswerModal)
+        pre_modal_answer = topic.pop('_pre_modal_user_answer', None)
+        if pre_modal_answer:
+            pre_modal_question = topic.get('pre_modal_answer_question', 'Pre-Question Response')
+            answers[pre_modal_question] = pre_modal_answer
 
-            async def answer_callback(button_interaction: discord.Interaction, idx=i, total=len(questions)):
-                modal = ResponseModal(title=f"Question {idx+1}/{total}")
-                await button_interaction.response.send_modal(modal)
-                await modal.wait()
-                if not future.done():
-                    future.set_result(modal.answer.value)
+        # --- Channel mode: ephemeral Q&A in the same channel ---
+        is_channel_mode = topic_type == 'application' and topic.get('application_channel_mode', 'dm') == 'channel'
 
-            answer_button = discord.ui.Button(label="Answer", style=discord.ButtonStyle.primary)
-            answer_button.callback = answer_callback
-            answer_view.add_item(answer_button)
-            
-            embed = discord.Embed(title=f"{topic.get('label')} ({i+1}/{len(questions)})", description=question_text, color=discord.Color.blue())
+        if is_channel_mode:
+            # Clear any existing session (no resume for ephemeral)
+            if user.id in self.active_survey_sessions:
+                del self.active_survey_sessions[user.id]
+                await self._save_survey_sessions()
+
+            questions = topic.get('questions', [])[:25]
+            if not questions:
+                return
+
+            # Q1: open modal directly from the interaction (no Answer button needed)
+            first_modal = ResponseModal(title=f"Question 1/{len(questions)}")
+            first_modal.answer.label = questions[0][:45]
             try:
-                await flow_message.edit(embed=embed, view=answer_view)
+                await interaction.response.send_modal(first_modal)
             except discord.HTTPException:
                 return
 
-            try:
-                answer = await asyncio.wait_for(future, timeout=300)
-            except asyncio.TimeoutError:
-                answer = None
+            timed_out = await first_modal.wait()
+            if timed_out or first_modal.answer.value is None:
+                return
 
-            if answer is None:
-                embed.color = discord.Color.red()
-                embed.set_footer(text="Form cancelled due to inactivity.")
-                for item in answer_view.children:
-                    item.disabled = True
+            answers[questions[0]] = first_modal.answer.value
+            latest_interaction = first_modal.modal_interaction
+
+            # Q2+: ephemeral followup with Answer button → modal
+            for i in range(1, len(questions)):
+                question_text = questions[i]
+                answer_view = discord.ui.View(timeout=300)
+                future = asyncio.get_running_loop().create_future()
+
+                async def channel_answer_callback(button_interaction: discord.Interaction, idx=i, total=len(questions), fut=future):
+                    modal = ResponseModal(title=f"Question {idx+1}/{total}")
+                    await button_interaction.response.send_modal(modal)
+                    await modal.wait()
+                    if not fut.done():
+                        fut.set_result(modal)
+
+                answer_button = discord.ui.Button(label="Answer", style=discord.ButtonStyle.primary)
+                answer_button.callback = channel_answer_callback
+                answer_view.add_item(answer_button)
+
+                embed = discord.Embed(
+                    title=f"{topic.get('label')} ({i+1}/{len(questions)})",
+                    description=question_text,
+                    color=discord.Color.blue()
+                )
+
+                try:
+                    await latest_interaction.followup.send(embed=embed, view=answer_view, ephemeral=True)
+                except discord.HTTPException:
+                    return
+
+                try:
+                    modal = await asyncio.wait_for(future, timeout=300)
+                except asyncio.TimeoutError:
+                    try:
+                        await latest_interaction.followup.send("Application timed out. Please try again.", ephemeral=True)
+                    except discord.HTTPException:
+                        pass
+                    return
+
+                answers[question_text] = modal.answer.value
+                latest_interaction = modal.modal_interaction
+
+            # Send success as ephemeral followup
+            success_embed = discord.Embed(
+                title="Application Completed",
+                description="Thank you for completing the application! Your responses have been submitted.",
+                color=discord.Color.green()
+            )
+            try:
+                await latest_interaction.followup.send(embed=success_embed, ephemeral=True)
+            except discord.HTTPException:
+                pass
+
+        else:
+            # --- DM mode (existing logic) ---
+            if existing_session:
+                existing_survey_name = existing_session.get('survey_name')
+
+                # If user has a session for a DIFFERENT survey, warn them
+                if existing_survey_name != survey_name:
+                    try:
+                        target_channel = user.dm_channel or await user.create_dm()
+                        topics = await _load_json(self.bot, TOPICS_FILE, self.topics_lock)
+                        old_topic = topics.get(existing_survey_name, {})
+                        old_label = old_topic.get('label', existing_survey_name)
+
+                        warn_embed = discord.Embed(
+                            title="Abandon Previous Session?",
+                            description=f"You have an incomplete **{old_label}** session.\n\nStarting **{topic.get('label')}** will abandon that session. Continue?",
+                            color=discord.Color.orange()
+                        )
+                        warn_view = discord.ui.View(timeout=60)
+                        continue_btn = discord.ui.Button(label="Continue", style=discord.ButtonStyle.danger)
+                        cancel_btn = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.secondary)
+
+                        user_choice = {"choice": None}
+
+                        async def continue_cb(itx: discord.Interaction):
+                            user_choice["choice"] = "continue"
+                            await itx.response.defer()
+                            warn_view.stop()
+
+                        async def cancel_cb(itx: discord.Interaction):
+                            user_choice["choice"] = "cancel"
+                            await itx.response.defer()
+                            warn_view.stop()
+
+                        continue_btn.callback = continue_cb
+                        cancel_btn.callback = cancel_cb
+                        warn_view.add_item(continue_btn)
+                        warn_view.add_item(cancel_btn)
+
+                        warn_msg = await target_channel.send(embed=warn_embed, view=warn_view)
+                        await warn_view.wait()
+
+                        if user_choice["choice"] != "continue":
+                            await warn_msg.edit(
+                                embed=discord.Embed(title="Cancelled", description="No changes made to your sessions.", color=discord.Color.red()),
+                                view=None
+                            )
+                            return
+
+                        # Clear old session
+                        del self.active_survey_sessions[user.id]
+                        await self._save_survey_sessions()
+                        await warn_msg.delete()
+                        existing_session = None  # Treat as no session
+
+                    except (discord.Forbidden, discord.HTTPException):
+                        pass
+
+            if existing_session and existing_session.get('survey_name') == survey_name:
+                # User has an active session for this survey
+                try:
+                    target_channel = user.dm_channel or await user.create_dm()
+                    progress = existing_session.get('current_question', 0)
+                    total = len(topic.get('questions', []))
+
+                    resume_embed = discord.Embed(
+                        title=f"Resume {topic.get('label')}?",
+                        description=f"You have an incomplete session (Question {progress + 1}/{total}).\n\nWould you like to **resume** where you left off, or **start over**?",
+                        color=discord.Color.gold()
+                    )
+                    resume_view = ResumeOrRestartView(self, topic, existing_session, interaction)
+                    resume_msg = await target_channel.send(embed=resume_embed, view=resume_view)
+
+                    await resume_view.wait()
+
+                    if resume_view.choice == "resume":
+                        start_index = existing_session.get('current_question', 0)
+                        answers = existing_session.get('answers', {})
+                    elif resume_view.choice == "restart":
+                        start_index = 0
+                        answers = {}
+                    else:  # cancel or timeout
+                        await resume_msg.edit(
+                            embed=discord.Embed(title="Cancelled", description="Survey cancelled.", color=discord.Color.red()),
+                            view=None
+                        )
+                        return
+
+                    await resume_msg.delete()
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+
+            # --- Setup DM channel ---
+            questions = topic.get('questions', [])[:25]
+
+            try:
+                target_channel = user.dm_channel or await user.create_dm()
+            except (discord.Forbidden, discord.HTTPException):
+                if not isinstance(interaction.channel, discord.DMChannel):
+                    try:
+                        await interaction.followup.send("I couldn't send you a DM. Please check your privacy settings.", ephemeral=True)
+                    except discord.HTTPException:
+                        pass
+                return
+
+            embed = discord.Embed(title=f"Starting: {topic.get('label')}", description="Please wait...", color=discord.Color.light_grey())
+            try:
+                flow_message = await target_channel.send(embed=embed)
+            except (discord.Forbidden, discord.HTTPException):
+                return
+
+            # --- Create/update session ---
+            session_data = {
+                "survey_name": survey_name,
+                "started_at": existing_session.get('started_at') if existing_session else datetime.now(timezone.utc).isoformat(),
+                "current_question": start_index,
+                "answers": answers,
+                "flow_message_id": flow_message.id,
+                "channel_id": target_channel.id
+            }
+            self.active_survey_sessions[user.id] = session_data
+            await self._save_survey_sessions()
+
+            # --- Question loop ---
+            for i in range(start_index, len(questions)):
+                question_text = questions[i]
+                answer_view = discord.ui.View(timeout=300)
+                future = asyncio.get_running_loop().create_future()
+
+                async def answer_callback(button_interaction: discord.Interaction, idx=i, total=len(questions)):
+                    modal = ResponseModal(title=f"Question {idx+1}/{total}")
+                    await button_interaction.response.send_modal(modal)
+                    await modal.wait()
+                    if not future.done():
+                        future.set_result(modal.answer.value)
+
+                answer_button = discord.ui.Button(label="Answer", style=discord.ButtonStyle.primary)
+                answer_button.callback = answer_callback
+                answer_view.add_item(answer_button)
+
+                embed = discord.Embed(
+                    title=f"{topic.get('label')} ({i+1}/{len(questions)})",
+                    description=question_text,
+                    color=discord.Color.blue()
+                )
+                embed.set_footer(text="Your progress is saved. You can resume later if needed.")
+
                 try:
                     await flow_message.edit(embed=embed, view=answer_view)
                 except discord.HTTPException:
-                    pass
-                return
+                    return
 
-            answers[question_text] = answer
+                try:
+                    answer = await asyncio.wait_for(future, timeout=300)
+                except asyncio.TimeoutError:
+                    answer = None
 
-        # Finalize and save
+                if answer is None:
+                    # Session is preserved for resume
+                    embed.color = discord.Color.orange()
+                    embed.set_footer(text="Session paused. You can resume this survey later.")
+                    for item in answer_view.children:
+                        item.disabled = True
+                    try:
+                        await flow_message.edit(embed=embed, view=answer_view)
+                    except discord.HTTPException:
+                        pass
+                    return
+
+                answers[question_text] = answer
+
+                # Update session after each answer
+                self.active_survey_sessions[user.id] = {
+                    "survey_name": survey_name,
+                    "started_at": session_data["started_at"],
+                    "current_question": i + 1,
+                    "answers": answers,
+                    "flow_message_id": flow_message.id,
+                    "channel_id": target_channel.id
+                }
+                await self._save_survey_sessions()
+
+        # --- Finalize and save ---
         results_embed = discord.Embed(
             title=f"New Response: {topic.get('label')}",
             description=f"Submitted by {user.mention} ({user.id})",
@@ -1736,45 +3356,95 @@ class TicketSystem(commands.Cog):
         )
         for question, answer in answers.items():
             results_embed.add_field(name=question[:256], value=answer[:1024], inline=False)
-        
+
+        # Add footer with topic name for ApprovalView to identify
+        results_embed.set_footer(text=f"Topic: {survey_name}")
+
         all_survey_data = await _load_json(self.bot, SURVEY_DATA_FILE, self.survey_data_lock)
-        survey_responses = all_survey_data.get(topic['name'], [])
+        survey_responses = all_survey_data.get(survey_name, [])
         survey_responses.append({
             "user_id": user.id, "user_name": str(user),
             "timestamp": datetime.now(timezone.utc).isoformat(), "answers": answers
         })
-        all_survey_data[topic['name']] = survey_responses
+        all_survey_data[survey_name] = survey_responses
         await _save_json(self.bot, SURVEY_DATA_FILE, all_survey_data, self.survey_data_lock)
 
         log_channel_id = topic.get('log_channel_id')
-        if log_channel_id:
+        claim_enabled = topic.get('claim_enabled', False)
+
+        if topic_type == 'application':
+            # --- Application finalization: always create discussion thread ---
+            guild_id = topic.get('_guild_id')
+            guild = self.bot.get_guild(guild_id) if guild_id else None
+            member = guild.get_member(user.id) if guild else None
+            discussion_channel = None
+
+            if member and guild:
+                discussion_channel = await self._create_application_discussion(topic, member, guild)
+
+            # Add thread link to the results embed
+            if discussion_channel:
+                results_embed.add_field(name="Discussion", value=discussion_channel.mention, inline=True)
+
+            # Determine where to send and which view to attach
+            alerts_channel_id = topic.get('claim_alerts_channel_id') if claim_enabled else None
+            target_channel_id = alerts_channel_id or log_channel_id
+
+            if claim_enabled and discussion_channel and member:
+                topic_name = topic.get('name', 'unknown')
+                view = ClaimAlertView(self.bot, topic_name, discussion_channel.id, member.id)
+            elif topic.get('approval_mode'):
+                view = ApprovalView(self.bot, topic)
+            else:
+                view = None
+
+            if target_channel_id:
+                target_channel = self.bot.get_channel(target_channel_id)
+                if target_channel:
+                    try:
+                        await target_channel.send(embed=results_embed, view=view)
+                    except discord.Forbidden:
+                        logger.warning(f"Missing permissions for channel {target_channel_id}")
+
+        elif log_channel_id:
             log_channel = self.bot.get_channel(log_channel_id)
             if log_channel:
                 try:
                     await log_channel.send(embed=results_embed)
                 except discord.Forbidden:
-                    print(f"[SURVEY ERROR] Missing permissions for log channel {log_channel_id}")
+                    logger.warning(f"Missing permissions for survey log channel {log_channel_id}")
             else:
-                print(f"[SURVEY ERROR] Log channel {log_channel_id} not found.")
+                logger.warning(f"Survey log channel {log_channel_id} not found.")
 
-        success_embed = discord.Embed(
-            title=f"✅ {topic.get('label')} Completed",
-            description="Thank you for completing the form! Your responses have been submitted.",
-            color=discord.Color.green()
-        )
-        try:
-            await flow_message.edit(embed=success_embed, view=None)
-        except discord.HTTPException:
-            pass
-        
-        if isinstance(interaction.channel, discord.DMChannel):
+        # --- Clear session and set cooldown ---
+        if user.id in self.active_survey_sessions:
+            del self.active_survey_sessions[user.id]
+            await self._save_survey_sessions()
+
+        # Set cooldown for this survey
+        if user.id not in self.survey_cooldowns:
+            self.survey_cooldowns[user.id] = {}
+        self.survey_cooldowns[user.id][survey_name] = datetime.now(timezone.utc)
+
+        if not is_channel_mode:
+            success_embed = discord.Embed(
+                title=f"✅ {topic.get('label')} Completed",
+                description="Thank you for completing the form! Your responses have been submitted.",
+                color=discord.Color.green()
+            )
             try:
-                view = StartSurveyView(topic, self.bot)
-                for item in view.children:
-                    item.disabled = True
-                await interaction.message.edit(view=view)
-            except (discord.HTTPException, AttributeError):
+                await flow_message.edit(embed=success_embed, view=None)
+            except discord.HTTPException:
                 pass
+
+            if isinstance(interaction.channel, discord.DMChannel):
+                try:
+                    view = StartSurveyView(topic, self.bot)
+                    for item in view.children:
+                        item.disabled = True
+                    await interaction.message.edit(view=view)
+                except (discord.HTTPException, AttributeError):
+                    pass
 
 
 async def setup(bot: commands.Bot):

@@ -11,12 +11,15 @@ import os
 
 # --- CONFIGURATION ---
 DB_NAME = "intro_system.db"
-# Font paths - DejaVu Bold for clean look
-FONT_PATH_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+# Font paths - Noto Sans for broad Unicode coverage
+FONT_PATH_BOLD = "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf"
+FONT_PATH_REG = "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf"
 
 # Fallback
 if not os.path.exists(FONT_PATH_BOLD):
-    FONT_PATH_BOLD = "arialbd.ttf"
+    FONT_PATH_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+if not os.path.exists(FONT_PATH_REG):
+    FONT_PATH_REG = FONT_PATH_BOLD
 
 # Soft pastel accent colors for intro images (rotates sequentially)
 ACCENT_COLORS = [
@@ -36,7 +39,7 @@ class IntroCog(commands.Cog):
         self.bot = bot
         self.db_path = DB_NAME
         self.bot.loop.create_task(self.init_db())
-        self.monthly_reset.start()
+        self.decay_task.start()
 
     async def init_db(self):
         async with aiosqlite.connect(self.db_path) as db:
@@ -87,6 +90,18 @@ class IntroCog(commands.Cog):
                 )
             ''')
             await db.execute('CREATE TABLE IF NOT EXISTS blacklist (user_id INTEGER PRIMARY KEY)')
+
+            # Point decay ledger: each row is a point grant that expires after 30 days
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS point_ledger (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    points INTEGER,
+                    earned_at TEXT,
+                    expires_at TEXT,
+                    decayed INTEGER DEFAULT 0
+                )
+            ''')
             
             # New Table: Metadata for threads to handle deletion
             await db.execute('''
@@ -422,6 +437,13 @@ class IntroCog(commands.Cog):
 
             if points_to_add > 0:
                 await db.execute("INSERT INTO user_points (user_id, points) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET points = points + ?", (user_id, points_to_add, points_to_add))
+                # Record in decay ledger
+                earned_at = datetime.date.today().isoformat()
+                expires_at = (datetime.date.today() + datetime.timedelta(days=30)).isoformat()
+                await db.execute(
+                    "INSERT INTO point_ledger (user_id, points, earned_at, expires_at) VALUES (?, ?, ?, ?)",
+                    (user_id, points_to_add, earned_at, expires_at)
+                )
                 # Track hourly points
                 await db.execute("INSERT INTO hourly_points (user_id, hour_key, points_earned) VALUES (?, ?, ?) ON CONFLICT(user_id, hour_key) DO UPDATE SET points_earned = points_earned + ?", (user_id, hour_key, points_to_add, points_to_add))
                 await db.commit()
@@ -479,65 +501,73 @@ class IntroCog(commands.Cog):
             # Clean up other user data from this cog
             await db.execute("DELETE FROM thread_logs WHERE user_id = ?", (member.id,))
             await db.execute("DELETE FROM user_points WHERE user_id = ?", (member.id,))
+            await db.execute("DELETE FROM point_ledger WHERE user_id = ?", (member.id,))
             await db.execute("DELETE FROM hourly_points WHERE user_id = ?", (member.id,))
             await db.execute("DELETE FROM blacklist WHERE user_id = ?", (member.id,))
             await db.commit()
 
             logger.info(f"Cleaned up intro data for departed member {member.name} ({member.id})")
 
-    async def check_role_upgrade(self, member, db):
+    async def sync_tier_role(self, member, db):
+        """Set the correct tier role based on current points. Handles upgrades and downgrades."""
         cursor = await db.execute("SELECT points FROM user_points WHERE user_id = ?", (member.id,))
         row = await cursor.fetchone()
         points = row[0] if row else 0
 
-        thresholds = {} 
+        thresholds = {}
         cursor = await db.execute("SELECT tier, points_required FROM point_config")
-        async for row in cursor: thresholds[row[0]] = row[1]
-        
-        if not thresholds: return
+        async for row in cursor:
+            thresholds[row[0]] = row[1]
+
+        if not thresholds:
+            return
 
         target_tier = 0
         if points >= thresholds.get(3, 9999): target_tier = 3
         elif points >= thresholds.get(2, 9999): target_tier = 2
         elif points >= thresholds.get(1, 9999): target_tier = 1
-        
-        if target_tier == 0: return
 
-        base_map = {} 
+        base_map = {}
         cursor = await db.execute("SELECT base_rank, role_id FROM base_roles")
-        async for row in cursor: base_map[row[0]] = row[1]
-        
+        async for row in cursor:
+            base_map[row[0]] = row[1]
+
         user_base_rank = 0
         for rank in range(5, 0, -1):
             r_id = base_map.get(rank)
             if r_id and member.get_role(r_id):
                 user_base_rank = rank
                 break
-        
-        if user_base_rank == 0: return 
-            
-        cursor = await db.execute("SELECT role_id FROM role_config WHERE base_rank = ? AND tier = ?", (user_base_rank, target_tier))
-        reward = await cursor.fetchone()
 
-        if reward:
-            reward_role = member.guild.get_role(reward[0])
-            if reward_role and reward_role not in member.roles:
-                try:
-                    # Remove previous tier role if upgrading (1->2 or 2->3)
-                    if target_tier > 1:
-                        prev_tier = target_tier - 1
-                        cursor = await db.execute("SELECT role_id FROM role_config WHERE base_rank = ? AND tier = ?", (user_base_rank, prev_tier))
-                        prev_reward = await cursor.fetchone()
-                        if prev_reward:
-                            prev_role = member.guild.get_role(prev_reward[0])
-                            if prev_role and prev_role in member.roles:
-                                await member.remove_roles(prev_role)
-                                logger.info(f"Removed Tier {prev_tier} role from {member.name}")
+        if user_base_rank == 0:
+            return
 
-                    await member.add_roles(reward_role)
-                    logger.info(f"Upgraded {member.name} to Tier {target_tier}")
-                except Exception as e:
-                    logger.error(f"Failed to assign role: {e}")
+        cursor = await db.execute("SELECT tier, role_id FROM role_config WHERE base_rank = ?", (user_base_rank,))
+        tier_role_map = dict(await cursor.fetchall())
+
+        target_role_id = tier_role_map.get(target_tier)
+        target_role = member.guild.get_role(target_role_id) if target_role_id else None
+
+        try:
+            # Remove any tier roles the member has that aren't the target
+            roles_to_remove = [
+                member.guild.get_role(rid)
+                for t, rid in tier_role_map.items()
+                if member.guild.get_role(rid) and member.guild.get_role(rid) in member.roles
+                and member.guild.get_role(rid) != target_role
+            ]
+            if roles_to_remove:
+                await member.remove_roles(*roles_to_remove)
+                logger.info(f"Removed stale tier role(s) from {member.name}")
+
+            if target_role and target_role not in member.roles:
+                await member.add_roles(target_role)
+                logger.info(f"Set {member.name} to Tier {target_tier}")
+        except Exception as e:
+            logger.error(f"Failed to sync tier role for {member.name}: {e}")
+
+    async def check_role_upgrade(self, member, db):
+        await self.sync_tier_role(member, db)
 
     async def repost_sticky_button(self, channel, db=None):
         """Delete old button message and repost at bottom"""
@@ -566,41 +596,50 @@ class IntroCog(commands.Cog):
             if close_db:
                 await db.close()
 
-    @tasks.loop(hours=24)
-    async def monthly_reset(self):
-        now = datetime.datetime.now()
-        if now.day == 1:
-            async with aiosqlite.connect(self.db_path) as db:
-                month_str = now.strftime("%Y-%m")
-                cursor = await db.execute("SELECT 1 FROM point_history WHERE month_str = ? LIMIT 1", (month_str,))
-                if await cursor.fetchone(): return
+    @tasks.loop(hours=1)
+    async def decay_task(self):
+        """Runs hourly. Expires point grants whose 30-day window has passed."""
+        today = datetime.date.today().isoformat()
 
-                await db.execute("INSERT INTO point_history (user_id, month_str, points) SELECT user_id, ?, points FROM user_points WHERE points > 0", (month_str,))
-                await db.execute("DELETE FROM user_points")
-                await db.execute("DELETE FROM thread_logs")
-                await db.execute("DELETE FROM hourly_points")  # Clear hourly tracking on reset
+        async with aiosqlite.connect(self.db_path) as db:
+            # Find all expired, undecayed ledger entries grouped by user
+            cursor = await db.execute(
+                "SELECT user_id, SUM(points) FROM point_ledger WHERE expires_at <= ? AND decayed = 0 GROUP BY user_id",
+                (today,)
+            )
+            decay_rows = await cursor.fetchall()
 
-                # Delete point history older than 3 months
-                cutoff_year = now.year
-                cutoff_month = now.month - 3
-                while cutoff_month <= 0:
-                    cutoff_month += 12
-                    cutoff_year -= 1
-                cutoff_str = f"{cutoff_year:04d}-{cutoff_month:02d}"
-                await db.execute("DELETE FROM point_history WHERE month_str < ?", (cutoff_str,))
+            if decay_rows:
+                # Mark those entries as decayed
+                await db.execute(
+                    "UPDATE point_ledger SET decayed = 1 WHERE expires_at <= ? AND decayed = 0",
+                    (today,)
+                )
+                # Subtract expired points from user totals (floor at 0)
+                for user_id, pts_to_remove in decay_rows:
+                    await db.execute(
+                        "UPDATE user_points SET points = MAX(0, points - ?) WHERE user_id = ?",
+                        (pts_to_remove, user_id)
+                    )
 
-                await db.commit()
+            # Clean up hourly_points rows older than 2 days
+            cutoff_key = (datetime.datetime.now() - datetime.timedelta(days=2)).strftime("%Y-%m-%d-%H")
+            await db.execute("DELETE FROM hourly_points WHERE hour_key < ?", (cutoff_key,))
 
-                # Role strip logic (simplified)
-                cursor = await db.execute("SELECT role_id FROM role_config")
-                all_tier_roles = [r[0] for r in await cursor.fetchall()]
-                for guild in self.bot.guilds:
-                    for member in guild.members:
-                        to_remove = [r for r in member.roles if r.id in all_tier_roles]
-                        if to_remove:
-                            try: await member.remove_roles(*to_remove)
-                            except Exception: pass
-            logger.info("Monthly Reset Completed.")
+            await db.commit()
+
+        if not decay_rows:
+            return
+
+        logger.info(f"Decay task: expired points for {len(decay_rows)} user(s).")
+
+        # Sync tier roles for every affected user (may downgrade)
+        for guild in self.bot.guilds:
+            for user_id, _ in decay_rows:
+                member = guild.get_member(user_id)
+                if member:
+                    async with aiosqlite.connect(self.db_path) as db:
+                        await self.sync_tier_role(member, db)
 
 # --- UI CLASSES ---
 
@@ -1201,9 +1240,10 @@ class WipeAllConfirmView(ui.View):
     async def confirm(self, interaction: discord.Interaction, button: ui.Button):
         async with aiosqlite.connect(self.cog.db_path) as db:
             await db.execute("DELETE FROM user_points")
+            await db.execute("DELETE FROM point_ledger")
             await db.execute("DELETE FROM thread_logs")
             await db.commit()
-        await interaction.response.edit_message(content="All points and thread logs wiped for this month.", view=None)
+        await interaction.response.edit_message(content="All points, decay ledger, and thread logs wiped.", view=None)
 
     @ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: ui.Button):
@@ -1253,10 +1293,11 @@ class WipeMemberActionView(ui.View):
     async def wipe_btn(self, interaction: discord.Interaction, button: ui.Button):
         async with aiosqlite.connect(self.cog.db_path) as db:
             await db.execute("DELETE FROM user_points WHERE user_id = ?", (self.user.id,))
+            await db.execute("DELETE FROM point_ledger WHERE user_id = ?", (self.user.id,))
             await db.execute("DELETE FROM thread_logs WHERE user_id = ?", (self.user.id,))
             await db.commit()
         await interaction.response.edit_message(
-            content=f"Wiped all points and thread logs for **{self.user.display_name}**.",
+            content=f"Wiped all points, decay ledger, and thread logs for **{self.user.display_name}**.",
             view=None
         )
 
@@ -1277,13 +1318,20 @@ class PointAmountModal(ui.Modal, title="Enter Amount"):
         except ValueError:
             return await interaction.response.send_message("Must be a positive number.", ephemeral=True)
 
+        earned_at = datetime.date.today().isoformat()
+        expires_at = (datetime.date.today() + datetime.timedelta(days=30)).isoformat()
+
         async with aiosqlite.connect(self.cog.db_path) as db:
             if self.action == "add":
                 await db.execute(
                     "INSERT INTO user_points (user_id, points) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET points = points + ?",
                     (self.user.id, pts, pts)
                 )
-                msg = f"Added **{pts}** points to **{self.user.display_name}**."
+                await db.execute(
+                    "INSERT INTO point_ledger (user_id, points, earned_at, expires_at) VALUES (?, ?, ?, ?)",
+                    (self.user.id, pts, earned_at, expires_at)
+                )
+                msg = f"Added **{pts}** points to **{self.user.display_name}** (expire in 30 days)."
             elif self.action == "remove":
                 await db.execute(
                     "UPDATE user_points SET points = MAX(0, points - ?) WHERE user_id = ?",
@@ -1291,11 +1339,18 @@ class PointAmountModal(ui.Modal, title="Enter Amount"):
                 )
                 msg = f"Removed **{pts}** points from **{self.user.display_name}**."
             else:  # set
+                # Clear existing ledger and replace with a single entry for the new total
+                await db.execute("DELETE FROM point_ledger WHERE user_id = ?", (self.user.id,))
                 await db.execute(
                     "INSERT INTO user_points (user_id, points) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET points = ?",
                     (self.user.id, pts, pts)
                 )
-                msg = f"Set **{self.user.display_name}**'s points to **{pts}**."
+                if pts > 0:
+                    await db.execute(
+                        "INSERT INTO point_ledger (user_id, points, earned_at, expires_at) VALUES (?, ?, ?, ?)",
+                        (self.user.id, pts, earned_at, expires_at)
+                    )
+                msg = f"Set **{self.user.display_name}**'s points to **{pts}** (expire in 30 days)."
             await db.commit()
 
         await interaction.response.send_message(msg, ephemeral=True)

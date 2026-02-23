@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        @font-face {{
+            font-family: 'Cinzel';
+            src: url('file://{font_path}/Cinzel-Regular.ttf') format('truetype');
+            font-weight: normal;
+        }}
+        @font-face {{
+            font-family: 'Cinzel';
+            src: url('file://{font_path}/Cinzel-Bold.ttf') format('truetype');
+            font-weight: bold;
+        }}
+
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+
+        body {{
+            width: 560px;
+            min-height: 300px;
+            font-family: 'Cinzel', 'Segoe UI', sans-serif;
+            font-weight: bold;
+            background: linear-gradient(135deg, #0f1012 0%, #1e1f22 100%);
+            color: #ffffff;
+            padding: 20px;
+        }}
+
+        .header {{
+            display: flex;
+            align-items: center;
+            margin-bottom: 16px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }}
+
+        .avatar {{
+            width: 56px;
+            height: 56px;
+            border-radius: 50%;
+            margin-right: 14px;
+            border: 2px solid #5865f2;
+        }}
+
+        .player-info {{
+            flex: 1;
+        }}
+
+        .player-name {{
+            font-size: 22px;
+            font-weight: bold;
+            color: #ffffff;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            max-width: 300px;
+        }}
+
+        .period-title {{
+            font-size: 12px;
+            color: #b9bbbe;
+            margin-top: 2px;
+        }}
+
+        .winrate-badge {{
+            background: linear-gradient(135deg, #5865f2, #7289da);
+            padding: 6px 14px;
+            border-radius: 12px;
+            font-size: 14px;
+            font-weight: bold;
+        }}
+
+        /* Top summary: W / L / Win% in one row */
+        .summary-row {{
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 14px;
+        }}
+
+        .stat-box {{
+            background: rgba(255,255,255,0.03);
+            border-radius: 8px;
+            padding: 12px 10px;
+            text-align: center;
+        }}
+
+        .stat-label {{
+            font-size: 10px;
+            color: #b9bbbe;
+            margin-bottom: 4px;
+        }}
+
+        .stat-value {{
+            font-size: 22px;
+            font-weight: bold;
+            color: #ffffff;
+        }}
+
+        .stat-value.wins {{ color: #43b581; }}
+        .stat-value.losses {{ color: #f04747; }}
+
+        /* W/L split bar */
+        .split-bar {{
+            background: rgba(255,255,255,0.03);
+            border-radius: 8px;
+            padding: 10px;
+            margin-bottom: 14px;
+        }}
+
+        .split-bar-label {{
+            font-size: 10px;
+            color: #b9bbbe;
+            margin-bottom: 6px;
+            display: flex;
+            justify-content: space-between;
+        }}
+
+        .split-bar-container {{
+            display: flex;
+            height: 22px;
+            border-radius: 4px;
+            overflow: hidden;
+            background: rgba(255,255,255,0.1);
+        }}
+
+        .bar-wins {{
+            background: linear-gradient(90deg, #43b581, #3ca374);
+            display: flex; align-items: center; justify-content: center;
+            font-size: 10px; color: #fff;
+        }}
+
+        .bar-losses {{
+            background: linear-gradient(90deg, #f04747, #d63838);
+            display: flex; align-items: center; justify-content: center;
+            font-size: 10px; color: #fff;
+        }}
+
+        /* Teammates section */
+        .teammates-section {{
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 14px;
+        }}
+
+        .teammates-col {{
+            background: rgba(255,255,255,0.03);
+            border-radius: 8px;
+            padding: 10px;
+        }}
+
+        .section-title {{
+            font-size: 11px;
+            color: #b9bbbe;
+            margin-bottom: 8px;
+        }}
+
+        .cursed-title {{ color: #f04747; }}
+
+        .teammate-item {{
+            background: rgba(67, 181, 129, 0.15);
+            padding: 5px 8px;
+            border-radius: 4px;
+            font-size: 10px;
+            border-left: 3px solid #43b581;
+            margin-bottom: 4px;
+        }}
+
+        .teammate-item.cursed {{
+            background: rgba(240, 71, 71, 0.15);
+            border-left: 3px solid #f04747;
+        }}
+
+        /* Maps section */
+        .maps-section {{
+            background: rgba(255,255,255,0.03);
+            border-radius: 8px;
+            padding: 10px;
+            margin-bottom: 14px;
+        }}
+
+        .maps-grid {{
+            display: flex;
+            flex-wrap: wrap;
+            gap: 5px;
+        }}
+
+        .map-chip {{
+            background: rgba(255,255,255,0.08);
+            padding: 4px 9px;
+            border-radius: 4px;
+            font-size: 10px;
+        }}
+
+        /* Recent matches */
+        .recent-section {{
+            background: rgba(255,255,255,0.03);
+            border-radius: 8px;
+            padding: 10px;
+        }}
+
+        .match-list {{
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }}
+
+        .match-row {{
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 5px 8px;
+            border-radius: 4px;
+            background: rgba(255,255,255,0.04);
+            font-size: 10px;
+        }}
+
+        .result-badge {{
+            width: 18px;
+            height: 18px;
+            border-radius: 3px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+            font-weight: bold;
+            flex-shrink: 0;
+        }}
+
+        .result-badge.win {{ background: #43b581; }}
+        .result-badge.loss {{ background: #f04747; }}
+
+        .match-map {{ color: #dcddde; flex: 1; }}
+
+        .no-data {{
+            color: #72767d;
+            font-size: 10px;
+            padding: 4px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <img class="avatar" src="{avatar_url}" alt="Avatar">
+        <div class="player-info">
+            <div class="player-name">{player_name}</div>
+            <div class="period-title">{game_name} · {period_title}</div>
+        </div>
+        <div class="winrate-badge">{winrate}% WR</div>
+    </div>
+
+    <div class="summary-row">
+        <div class="stat-box">
+            <div class="stat-label">Wins</div>
+            <div class="stat-value wins">{wins}</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-label">Losses</div>
+            <div class="stat-value losses">{losses}</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-label">Win Rate</div>
+            <div class="stat-value">{winrate}%</div>
+        </div>
+    </div>
+
+    <div class="split-bar">
+        <div class="split-bar-label">
+            <span>W: {wins}</span>
+            <span>L: {losses}</span>
+        </div>
+        <div class="split-bar-container">
+            <div class="bar-wins" style="width: {win_width}%">{wins}W</div>
+            <div class="bar-losses" style="width: {loss_width}%">{losses}L</div>
+        </div>
+    </div>
+
+    <div class="teammates-section">
+        <div class="teammates-col">
+            <div class="section-title">Best Teammates</div>
+            {best_teammates_html}
+        </div>
+        <div class="teammates-col">
+            <div class="section-title cursed-title">Cursed Teammates</div>
+            {worst_teammates_html}
+        </div>
+    </div>
+
+    <div class="maps-section">
+        <div class="section-title">Maps</div>
+        <div class="maps-grid">
+            {maps_html}
+        </div>
+    </div>
+
+    <div class="recent-section">
+        <div class="section-title">Recent Matches</div>
+        <div class="match-list">
+            {recent_matches_html}
+        </div>
+    </div>
+</body>
+</html>

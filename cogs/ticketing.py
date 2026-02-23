@@ -633,7 +633,7 @@ class TopicWizardView(discord.ui.View):
             approval_label = "Approval Buttons: On" if self.topic_data.get('approval_mode') else "Approval Buttons: Off"
             self.add_item(self.create_button(approval_label, discord.ButtonStyle.primary, self.toggle_approval_callback, 2))
             discussion_label = "Auto-Discussion: On" if self.topic_data.get('discussion_mode') else "Auto-Discussion: Off"
-            self.add_item(self.create_button(discussion_label, discord.ButtonStyle.primary, self.toggle_discussion_callback, 3))
+            self.add_item(self.create_button(discussion_label, discord.ButtonStyle.primary, self.toggle_discussion_callback, 2))
 
             chan_mode = self.topic_data.get('application_channel_mode', 'dm')
             chan_label = "App Q&A: Channel" if chan_mode == 'channel' else "App Q&A: DMs"
@@ -653,8 +653,8 @@ class TopicWizardView(discord.ui.View):
                 self.add_item(self.create_button(pre_modal_2_label, discord.ButtonStyle.primary, self.toggle_pre_modal_2_callback, 3))
                 if pre_modal_2_enabled:
                     # Q2 config buttons on row 1 to avoid overflow
-                    self.add_item(self.create_button("Config Q2", discord.ButtonStyle.secondary, self.configure_pre_modal_2_callback, 1))
-                    self.add_item(self.create_button("Config Q2 No", discord.ButtonStyle.secondary, self.configure_pre_modal_2_no_response_callback, 1))
+                    self.add_item(self.create_button("Config Q2", discord.ButtonStyle.secondary, self.configure_pre_modal_2_callback, 4))
+                    self.add_item(self.create_button("Config Q2 No", discord.ButtonStyle.secondary, self.configure_pre_modal_2_no_response_callback, 4))
 
         # Ticket close settings (only for tickets) - put on row 3 to save space
         if topic_type == 'ticket':
@@ -2372,25 +2372,19 @@ class TicketSystem(commands.Cog):
                     # No footer - context is stored in the close button custom_id
                     await ch.send(embed=embed, view=close_view)
 
-                # Add staff members to thread (silently)
+                # Add staff to thread by mentioning their roles
+                staff_mentions = []
                 for rid in topic.get("staff_role_ids", []):
                     role = guild.get_role(rid)
                     if role:
-                        for m in role.members:
-                            try:
-                                await ch.add_user(m)
-                            except discord.HTTPException:
-                                pass
-
-                # Ping staff roles if enabled (only for tickets)
-                if is_ticket and topic.get('ping_staff_on_create', False):
-                    staff_mentions = []
-                    for rid in topic.get("staff_role_ids", []):
-                        role = guild.get_role(rid)
-                        if role:
-                            staff_mentions.append(role.mention)
-                    if staff_mentions:
-                        await ch.send(f"{' '.join(staff_mentions)} - New ticket opened!", delete_after=5)
+                        staff_mentions.append(role.mention)
+                if staff_mentions:
+                    mention_text = ' '.join(staff_mentions)
+                    if is_ticket and topic.get('ping_staff_on_create', False):
+                        await ch.send(f"{mention_text} - New ticket opened!", delete_after=5)
+                    else:
+                        # Mention roles to add staff, then delete to keep it clean
+                        await ch.send(mention_text, delete_after=2)
 
                 # Send claim alert if enabled (for tickets)
                 if is_ticket and topic.get('claim_enabled', False):
@@ -2490,15 +2484,14 @@ class TicketSystem(commands.Cog):
                 except discord.HTTPException:
                     pass
 
-                # Add staff members to thread
+                # Add staff to thread by mentioning their roles
+                staff_mentions = []
                 for rid in topic.get("staff_role_ids", []):
                     role = guild.get_role(rid)
                     if role:
-                        for m in role.members:
-                            try:
-                                await ch.add_user(m)
-                            except discord.HTTPException:
-                                pass
+                        staff_mentions.append(role.mention)
+                if staff_mentions:
+                    await ch.send(' '.join(staff_mentions), delete_after=2)
 
                 welcome_embed = discord.Embed(description=welcome_message, color=discord.Color.dark_grey())
                 close_view = CloseTicketView(topic_name=topic_name, opener_id=member.id)
@@ -3373,14 +3366,16 @@ class TicketSystem(commands.Cog):
         claim_enabled = topic.get('claim_enabled', False)
 
         if topic_type == 'application':
-            # --- Application finalization: always create discussion thread ---
-            guild_id = topic.get('_guild_id')
-            guild = self.bot.get_guild(guild_id) if guild_id else None
-            member = guild.get_member(user.id) if guild else None
+            # --- Application finalization: create discussion thread if enabled ---
             discussion_channel = None
 
-            if member and guild:
-                discussion_channel = await self._create_application_discussion(topic, member, guild)
+            if topic.get('discussion_mode') or topic.get('claim_enabled', False):
+                guild_id = topic.get('_guild_id')
+                guild = self.bot.get_guild(guild_id) if guild_id else None
+                member = guild.get_member(user.id) if guild else None
+
+                if member and guild:
+                    discussion_channel = await self._create_application_discussion(topic, member, guild)
 
             # Add thread link to the results embed
             if discussion_channel:

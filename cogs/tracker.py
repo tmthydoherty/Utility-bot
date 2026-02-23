@@ -47,6 +47,11 @@ COLOR_ACCENT_RED = "#da373c"
 COLOR_BORDER = "#1e1f22"
 
 logger = logging.getLogger('betting_bot.tracker')
+if not logger.handlers:
+    _h = logging.StreamHandler()
+    _h.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+    logger.addHandler(_h)
+    logger.setLevel(logging.INFO)
 
 # --- RADAR CHART SETUP ---
 class RadarAxes(PolarAxes):
@@ -169,11 +174,11 @@ class StatsImageGenerator:
     def __init__(self):
         try:
             # BOLD FONTS FOR ALL TEXT SIZES
-            self.font_bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 26)
-            self.font_reg = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 22) 
-            self.font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 18) 
-            self.font_header = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 40)
-            self.font_stat = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 60)
+            self.font_bold = ImageFont.truetype("/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf", 26)
+            self.font_reg = ImageFont.truetype("/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf", 22)
+            self.font_small = ImageFont.truetype("/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf", 18)
+            self.font_header = ImageFont.truetype("/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf", 40)
+            self.font_stat = ImageFont.truetype("/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf", 60)
         except:
             self.font_bold = ImageFont.load_default()
             self.font_reg = ImageFont.load_default()
@@ -333,7 +338,7 @@ class InactivityAlertView(ui.View):
             return False
         return True
 
-    @ui.button(label="Kick User", style=discord.ButtonStyle.danger, emoji="👢")
+    @ui.button(label="Kick User", style=discord.ButtonStyle.danger)
     async def kick_btn(self, interaction, button):
         member = interaction.guild.get_member(self.user_id)
         if member:
@@ -343,7 +348,7 @@ class InactivityAlertView(ui.View):
             
             try:
                 await member.kick(reason="Inactivity Monitor Auto-Kick")
-                await interaction.response.send_message(f"👢 Kicked {member.mention}.", ephemeral=False)
+                await interaction.response.send_message(f"Kicked {member.mention}.", ephemeral=False)
                 await self.cog.db.execute("DELETE FROM user_inactivity_status WHERE guild_id = ? AND user_id = ?", (interaction.guild.id, self.user_id))
                 self.stop()
             except Exception as e:
@@ -351,19 +356,19 @@ class InactivityAlertView(ui.View):
         else:
             await interaction.response.send_message("User no longer in server.", ephemeral=True)
 
-    @ui.button(label="Snooze (Reset)", style=discord.ButtonStyle.primary, emoji="💤")
+    @ui.button(label="Snooze (Reset)", style=discord.ButtonStyle.primary)
     async def snooze_btn(self, interaction, button):
         row = await self.cog.db.fetch_one("SELECT period_days FROM inactivity_config WHERE guild_id = ?", (interaction.guild.id,))
         days = row['period_days'] if row else 30
         snooze_until = int((datetime.now(timezone.utc) + timedelta(days=days)).timestamp())
         await self.cog.db.execute("INSERT OR REPLACE INTO user_inactivity_status (guild_id, user_id, status, snooze_until) VALUES (?, ?, 'snoozed', ?)", (interaction.guild.id, self.user_id, snooze_until))
-        await interaction.response.send_message(f"💤 Snoozed tracking for <@{self.user_id}> for {days} days.", ephemeral=False)
+        await interaction.response.send_message(f"Snoozed tracking for <@{self.user_id}> for {days} days.", ephemeral=False)
         self.stop()
 
-    @ui.button(label="Forget User", style=discord.ButtonStyle.secondary, emoji="❌")
+    @ui.button(label="Forget User", style=discord.ButtonStyle.secondary)
     async def forget_btn(self, interaction, button):
         await self.cog.db.execute("INSERT OR REPLACE INTO user_inactivity_status (guild_id, user_id, status, snooze_until) VALUES (?, ?, 'forgotten', 0)", (interaction.guild.id, self.user_id))
-        await interaction.response.send_message(f"❌ Permanently ignoring inactivity for <@{self.user_id}>.", ephemeral=False)
+        await interaction.response.send_message(f"Permanently ignoring inactivity for <@{self.user_id}>.", ephemeral=False)
         self.stop()
 
 # --- DASHBOARD VIEW ---
@@ -432,7 +437,7 @@ class DashboardView(ui.View):
                 return
 
             row = await self.cog.db.fetch_one("SELECT * FROM inactivity_config WHERE guild_id = ?", (self.guild.id,))
-            desc = "### ⚙️ Inactivity Settings\n\n"
+            desc = "### Inactivity Settings\n\n"
             if row:
                 chan = self.guild.get_channel(row['log_channel_id'])
                 role = self.guild.get_role(row['highlight_role_id'])
@@ -536,7 +541,7 @@ class DashboardView(ui.View):
                 discord.SelectOption(label="User Overview", value="user"),
                 discord.SelectOption(label="Channel Overview", value="channel"),
                 discord.SelectOption(label="Emoji Overview", value="emoji"),
-                discord.SelectOption(label="Inactivity Settings ⚙️", value="config")
+                discord.SelectOption(label="Inactivity Settings", value="config")
             ]
             for opt in options:
                 if opt.value == current_mode: opt.default = True
@@ -582,19 +587,19 @@ class DashboardView(ui.View):
             await interaction.response.send_modal(DashboardView.ConfigModal(interaction.client.get_cog("UserTracker"), self.mode, self.view))
 
     class TestButton(ui.Button):
-        def __init__(self): super().__init__(label="Test Alert", style=discord.ButtonStyle.success, emoji="🧪", row=3)
+        def __init__(self): super().__init__(label="Test Alert", style=discord.ButtonStyle.success, row=3)
         async def callback(self, interaction):
             row = await self.view.cog.db.fetch_one("SELECT * FROM inactivity_config WHERE guild_id = ?", (interaction.guild.id,))
-            if not row or not row['log_channel_id']: return await interaction.response.send_message("❌ Configure Log Channel first.", ephemeral=True)
+            if not row or not row['log_channel_id']: return await interaction.response.send_message("Configure a Log Channel first.", ephemeral=True)
             log_channel = interaction.guild.get_channel(row['log_channel_id'])
             
             member = interaction.user
             embed = discord.Embed(title="TEST: Inactivity Alert", description=f"{member.mention} has 0 messages.", color=discord.Color.orange())
             try:
                 await log_channel.send(embed=embed, view=InactivityAlertView(self.view.cog, member.id))
-                await interaction.response.send_message(f"✅ Sent test to {log_channel.mention}.", ephemeral=True)
+                await interaction.response.send_message(f"Sent test to {log_channel.mention}.", ephemeral=True)
             except:
-                await interaction.response.send_message("❌ Failed to send. Check bot permissions.", ephemeral=True)
+                await interaction.response.send_message("Failed to send. Check bot permissions.", ephemeral=True)
 
     # --- CONFIG MODAL (Inside DashboardView) ---
     class ConfigModal(ui.Modal):
@@ -614,7 +619,7 @@ class DashboardView(ui.View):
                 
                 # Manually rebuild config embed
                 row = await self.cog.db.fetch_one("SELECT * FROM inactivity_config WHERE guild_id = ?", (interaction.guild.id,))
-                desc = "### ⚙️ Inactivity Settings\n\n"
+                desc = "### Inactivity Settings\n\n"
                 if row:
                     chan = interaction.guild.get_channel(row['log_channel_id'])
                     role = interaction.guild.get_role(row['highlight_role_id'])
@@ -646,12 +651,7 @@ class UserTracker(commands.Cog):
         await self.bot.wait_until_ready()
         await self.db.connect()
         self.data_retention_task.start()
-        
-        # Only start inactivity monitoring if configured (Prevents useless load)
-        configured = await self.db.fetch_one("SELECT COUNT(*) FROM inactivity_config WHERE log_channel_id IS NOT NULL")
-        if configured and configured[0] > 0:
-            await asyncio.sleep(60)
-            self.check_inactivity_task.start()
+        self.check_inactivity_task.start()
 
     async def cog_unload(self):
         if self.session: await self.session.close()
@@ -846,12 +846,17 @@ class UserTracker(commands.Cog):
     @tasks.loop(hours=24)
     async def check_inactivity_task(self):
         await self.bot.wait_until_ready()
+        logger.info("Inactivity check task started.")
         for guild in self.bot.guilds:
             try:
                 row = await self.db.fetch_one("SELECT * FROM inactivity_config WHERE guild_id = ?", (guild.id,))
-                if not row or not row['log_channel_id']: continue
+                if not row or not row['log_channel_id']:
+                    logger.info(f"[Inactivity] Guild '{guild.name}': no config, skipping.")
+                    continue
                 log_channel = guild.get_channel(row['log_channel_id'])
-                if not log_channel: continue
+                if not log_channel:
+                    logger.warning(f"[Inactivity] Guild '{guild.name}': log channel {row['log_channel_id']} not found.")
+                    continue
                 highlight_role = guild.get_role(row['highlight_role_id']) if row['highlight_role_id'] else None
                 cutoff_ts = int((datetime.now(timezone.utc) - timedelta(days=row['period_days'])).timestamp())
                 status_rows = await self.db.fetch_all("SELECT user_id, status, snooze_until FROM user_inactivity_status WHERE guild_id = ?", (guild.id,))
@@ -860,6 +865,8 @@ class UserTracker(commands.Cog):
                 msg_counts = {r['user_id']: r['c'] for r in count_rows}
                 updates_to_clear = []
                 alerts_to_send = []
+                logger.info(f"[Inactivity] Guild '{guild.name}': checking {len(guild.members)} members (threshold={row['msg_threshold']}, period={row['period_days']}d).")
+                skip_too_new = skip_threshold = skip_status = 0
                 for member in guild.members:
                     if member.bot: continue
                     if not member.joined_at: continue
@@ -867,29 +874,41 @@ class UserTracker(commands.Cog):
                     if count >= row['msg_threshold']:
                         if member.id in statuses and statuses[member.id]['status'] in ('alerted', 'snoozed'):
                             updates_to_clear.append(member.id)
+                        skip_threshold += 1
                         continue
                     join_ts = int(member.joined_at.timestamp())
-                    if join_ts > cutoff_ts: continue
+                    if join_ts > cutoff_ts:
+                        skip_too_new += 1
+                        continue
                     status_info = statuses.get(member.id)
                     if status_info:
-                        if status_info['status'] == 'forgotten': continue
-                        if status_info['status'] == 'snoozed' and datetime.now(timezone.utc).timestamp() < status_info['snooze_until']: continue
-                        if status_info['status'] == 'alerted': continue
+                        if status_info['status'] == 'forgotten':
+                            skip_status += 1
+                            continue
+                        if status_info['status'] == 'snoozed' and datetime.now(timezone.utc).timestamp() < status_info['snooze_until']:
+                            skip_status += 1
+                            continue
+                        if status_info['status'] == 'alerted':
+                            skip_status += 1
+                            continue
                     alerts_to_send.append((member, count))
+                logger.info(f"[Inactivity] Guild '{guild.name}': skipped {skip_threshold} (met threshold), {skip_too_new} (joined too recently), {skip_status} (status).")
                 if updates_to_clear:
                     async with self.db.transaction() as conn:
                         for uid in updates_to_clear:
                             await conn.execute("DELETE FROM user_inactivity_status WHERE guild_id = ? AND user_id = ?", (guild.id, uid))
+                logger.info(f"[Inactivity] Guild '{guild.name}': {len(alerts_to_send)} alerts to send, {len(updates_to_clear)} statuses to clear.")
                 for member, count in alerts_to_send:
                     color = discord.Color.red() if (highlight_role and highlight_role in member.roles) else discord.Color.orange()
-                    title = "⚠️ VIP Inactivity Alert" if (highlight_role and highlight_role in member.roles) else "Inactivity Alert"
+                    title = "VIP Inactivity Alert" if (highlight_role and highlight_role in member.roles) else "Inactivity Alert"
                     embed = discord.Embed(title=title, description=f"{member.mention} has sent **{count}** messages in the last **{row['period_days']}** days (Threshold: {row['msg_threshold']}).", color=color)
                     embed.set_thumbnail(url=member.display_avatar.url)
                     embed.add_field(name="Joined", value=member.joined_at.strftime("%Y-%m-%d"), inline=True)
                     await log_channel.send(embed=embed, view=InactivityAlertView(self, member.id))
                     await self.db.execute("INSERT OR REPLACE INTO user_inactivity_status (guild_id, user_id, status, snooze_until) VALUES (?, ?, 'alerted', 0)", (guild.id, member.id))
                     await asyncio.sleep(2)
-            except Exception as e: logger.error(f"Inactivity check failed: {e}")
+            except Exception as e:
+                logger.exception(f"[Inactivity] Guild '{guild.name}' check failed: {e}")
             await asyncio.sleep(1)
 
 async def setup(bot):

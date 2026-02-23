@@ -69,8 +69,8 @@ class FM(commands.Cog):
         self.spotify_token_expires: float = 0
         
         # Image generation settings
-        self.font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-        self.font_bold_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+        self.font_path = "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf"
+        self.font_bold_path = "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf"
         self._font_available = self._check_fonts()
         
         # Color scheme - Modern dark theme

@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        @font-face {{
+            font-family: 'Cinzel';
+            src: url('file://{font_path}/Cinzel-Regular.ttf') format('truetype');
+            font-weight: normal;
+        }}
+        @font-face {{
+            font-family: 'Cinzel';
+            src: url('file://{font_path}/Cinzel-Bold.ttf') format('truetype');
+            font-weight: bold;
+        }}
+
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+
+        body {{
+            width: 900px;
+            font-family: 'Cinzel', 'Segoe UI', sans-serif;
+            font-weight: bold;
+            background: #0a0b0d;
+            color: #ffffff;
+            padding: 0;
+        }}
+
+        .card {{
+            background: linear-gradient(160deg, #12141a 0%, #0d0e12 50%, #111318 100%);
+            border: 1px solid rgba(88, 101, 242, 0.15);
+            border-radius: 16px;
+            overflow: hidden;
+            margin: 12px;
+        }}
+
+        /* --- HEADER --- */
+        .header {{
+            background: linear-gradient(135deg, rgba(88, 101, 242, 0.12) 0%, rgba(88, 101, 242, 0.03) 100%);
+            padding: 28px 32px 22px;
+            text-align: center;
+            border-bottom: 1px solid rgba(88, 101, 242, 0.12);
+            position: relative;
+        }}
+
+        .header::before {{
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 200px;
+            height: 2px;
+            background: linear-gradient(90deg, transparent, #5865f2, transparent);
+        }}
+
+        .title {{
+            font-size: 30px;
+            font-weight: bold;
+            color: #ffffff;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            margin-bottom: 4px;
+        }}
+
+        .subtitle {{
+            font-size: 15px;
+            color: #6d7085;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }}
+
+        /* --- OVERVIEW STATS --- */
+        .overview {{
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+        }}
+
+        .overview-item {{
+            padding: 18px 12px;
+            text-align: center;
+            border-right: 1px solid rgba(255, 255, 255, 0.04);
+        }}
+
+        .overview-item:last-child {{
+            border-right: none;
+        }}
+
+        .overview-item .ov-value {{
+            font-size: 26px;
+            font-weight: bold;
+            color: #ffffff;
+            line-height: 1;
+            margin-bottom: 4px;
+        }}
+
+        .overview-item .ov-label {{
+            font-size: 12px;
+            color: #8890a4;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }}
+
+        .overview-item.accent .ov-value {{
+            color: #7c8cf8;
+        }}
+
+        /* --- COMBAT STATS ROW --- */
+        .combat-row {{
+            display: flex;
+            justify-content: center;
+            gap: 32px;
+            padding: 14px 32px;
+            background: rgba(255, 255, 255, 0.015);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+        }}
+
+        .combat-stat {{
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }}
+
+        .combat-stat .cs-value {{
+            font-size: 17px;
+            font-weight: bold;
+            color: #b9bcc6;
+        }}
+
+        .combat-stat .cs-label {{
+            font-size: 12px;
+            color: #8890a4;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }}
+
+        .combat-stat .cs-dot {{
+            width: 3px;
+            height: 3px;
+            border-radius: 50%;
+            background: #333548;
+        }}
+
+        /* --- CONTENT BODY --- */
+        .content {{
+            padding: 20px 28px 24px;
+        }}
+
+        /* --- SECTION HEADERS --- */
+        .section {{
+            margin-bottom: 20px;
+        }}
+
+        .section-header {{
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 12px;
+        }}
+
+        .section-header .sh-line {{
+            flex: 1;
+            height: 1px;
+            background: rgba(255, 255, 255, 0.06);
+        }}
+
+        .section-header .sh-title {{
+            font-size: 13px;
+            color: #7c8cf8;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            white-space: nowrap;
+        }}
+
+        /* --- MAP BARS --- */
+        .bar-row {{
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 6px;
+        }}
+
+        .bar-label {{
+            width: 80px;
+            font-size: 13px;
+            color: #b9bcc6;
+            text-align: right;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }}
+
+        .bar-track {{
+            flex: 1;
+            height: 6px;
+            background: rgba(255, 255, 255, 0.04);
+            border-radius: 3px;
+            overflow: hidden;
+        }}
+
+        .bar-fill {{
+            height: 100%;
+            background: linear-gradient(90deg, #5865f2, #7289da);
+            border-radius: 3px;
+            min-width: 4px;
+        }}
+
+        .bar-value {{
+            width: 70px;
+            font-size: 12px;
+            color: #8890a4;
+        }}
+
+        /* --- AGENT CHIPS --- */
+        .agents-wrap {{
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }}
+
+        .agent-chip {{
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 20px;
+            padding: 5px 12px;
+        }}
+
+        .agent-name {{
+            font-size: 13px;
+            color: #b9bcc6;
+        }}
+
+        .agent-count {{
+            font-size: 12px;
+            color: #7c8cf8;
+            font-weight: bold;
+        }}
+
+        /* --- LEADERBOARD GRID --- */
+        .leaders-grid {{
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 8px;
+        }}
+
+        .leader-card {{
+            background: rgba(255, 255, 255, 0.025);
+            border: 1px solid rgba(255, 255, 255, 0.04);
+            border-radius: 10px;
+            padding: 14px 12px 12px;
+            text-align: center;
+            position: relative;
+            overflow: hidden;
+        }}
+
+        .leader-card::before {{
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 40px;
+            height: 2px;
+            background: linear-gradient(90deg, transparent, #5865f2, transparent);
+            border-radius: 1px;
+        }}
+
+        .leader-label {{
+            font-size: 11px;
+            color: #8890a4;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            margin-bottom: 6px;
+        }}
+
+        .leader-player {{
+            font-size: 15px;
+            color: #ffffff;
+            margin-bottom: 3px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }}
+
+        .leader-value {{
+            font-size: 20px;
+            font-weight: bold;
+            color: #7c8cf8;
+        }}
+
+        /* --- UTILITIES --- */
+        .no-data {{
+            color: #3a3c4e;
+            font-size: 14px;
+            text-align: center;
+            padding: 16px;
+        }}
+
+        .divider {{
+            width: 100%;
+            height: 1px;
+            background: rgba(255, 255, 255, 0.04);
+            margin: 4px 0;
+        }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="header">
+            <div class="title">{period_title}</div>
+            <div class="subtitle">{game_name} Server Stats</div>
+        </div>
+
+        <div class="overview">
+            <div class="overview-item">
+                <div class="ov-value">{total_matches}</div>
+                <div class="ov-label">Matches</div>
+            </div>
+            <div class="overview-item">
+                <div class="ov-value">{total_players}</div>
+                <div class="ov-label">Players</div>
+            </div>
+            <div class="overview-item accent">
+                <div class="ov-value">{total_kills}</div>
+                <div class="ov-label">Total Kills</div>
+            </div>
+            <div class="overview-item">
+                <div class="ov-value">{hs_pct}%</div>
+                <div class="ov-label">Headshot %</div>
+            </div>
+        </div>
+
+        <div class="combat-row">
+            <div class="combat-stat">
+                <span class="cs-value">{total_deaths}</span>
+                <span class="cs-label">Deaths</span>
+            </div>
+            <div class="cs-dot"></div>
+            <div class="combat-stat">
+                <span class="cs-value">{total_assists}</span>
+                <span class="cs-label">Assists</span>
+            </div>
+            <div class="cs-dot"></div>
+            <div class="combat-stat">
+                <span class="cs-value">{total_damage}</span>
+                <span class="cs-label">Damage</span>
+            </div>
+            <div class="cs-dot"></div>
+            <div class="combat-stat">
+                <span class="cs-value">{total_aces}</span>
+                <span class="cs-label">Aces</span>
+            </div>
+        </div>
+
+        <div class="content">
+            <div class="section">
+                <div class="section-header">
+                    <div class="sh-line"></div>
+                    <div class="sh-title">Leaderboards</div>
+                    <div class="sh-line"></div>
+                </div>
+                <div class="leaders-grid">{leaders_html}</div>
+            </div>
+
+            <div class="section">
+                <div class="section-header">
+                    <div class="sh-line"></div>
+                    <div class="sh-title">Maps</div>
+                    <div class="sh-line"></div>
+                </div>
+                {maps_html}
+            </div>
+
+            <div class="section" style="margin-bottom: 0;">
+                <div class="section-header">
+                    <div class="sh-line"></div>
+                    <div class="sh-title">Top Agents</div>
+                    <div class="sh-line"></div>
+                </div>
+                <div class="agents-wrap">{agents_html}</div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

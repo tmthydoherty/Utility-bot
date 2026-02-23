@@ -7,6 +7,8 @@ import random
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Tuple, Any
+import traceback
+import re
 from io import BytesIO
 from pathlib import Path
 import aiohttp
@@ -32,6 +34,7 @@ COLOR_SUCCESS = 0x57F287      # Green
 COLOR_DANGER = 0xED4245       # Red
 COLOR_WARNING = 0xFEE75C      # Yellow
 COLOR_NEUTRAL = 0x99AAB5      # Grey
+COLOR_PROTECT = 0x57F287      # Green
 
 # Default settings
 DEFAULT_TURN_TIMEOUT = 120    # 2 minutes in seconds
@@ -56,9 +59,9 @@ PREFIX_AGENT_SELECT = "mapban_agent_"
 
 # Agent roles for Valorant
 AGENT_ROLES = {
-    "Duelist": ["Iso", "Jett", "Neon", "Phoenix", "Raze", "Reyna", "Yoru"],
+    "Duelist": ["Iso", "Jett", "Neon", "Phoenix", "Raze", "Reyna", "Waylay", "Yoru"],
     "Controller": ["Astra", "Brimstone", "Clove", "Harbor", "Omen", "Viper"],
-    "Sentinel": ["Chamber", "Cypher", "Deadlock", "Killjoy", "Sage", "Vyse"],
+    "Sentinel": ["Chamber", "Cypher", "Deadlock", "Killjoy", "Sage", "Veto", "Vyse"],
     "Initiator": ["Breach", "Fade", "Gekko", "KAY/O", "Skye", "Sova", "Tejo"],
 }
 
@@ -67,42 +70,8 @@ AGENT_ROLES = {
 # PERSISTENT VIEWS (work after bot restart)
 # =============================================================================
 
-class PersistentReadyView(discord.ui.View):
-    """Persistent view for ready button - survives bot restart."""
-
-    def __init__(self, cog: "MapBanCog" = None):
-        super().__init__(timeout=None)
-        self.cog = cog
-
-    @discord.ui.button(label="Ready", style=discord.ButtonStyle.success, custom_id="mapban_ready_persistent")
-    async def ready_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self.cog:
-            await interaction.response.send_message("Bot is restarting, please wait...", ephemeral=True)
-            return
-
-        # Find the session for this user in this channel
-        session = await self._find_session_for_user(interaction)
-        if not session:
-            await interaction.response.send_message("Session not found or already completed.", ephemeral=True)
-            return
-
-        captain_id = interaction.user.id
-        if captain_id not in (session["captain1_id"], session["captain2_id"]):
-            await interaction.response.send_message("You are not a captain in this session.", ephemeral=True)
-            return
-
-        await self.cog.handle_ready(interaction, session["session_id"], captain_id)
-
-    async def _find_session_for_user(self, interaction: discord.Interaction) -> Optional[Dict]:
-        """Find the session where this user is a captain in this thread."""
-        channel_id = interaction.channel_id
-        for session_id, session in self.cog.active_sessions.items():
-            if session.get("status") != "active":
-                continue
-            if channel_id in (session.get("thread1_id"), session.get("thread2_id")):
-                if interaction.user.id in (session["captain1_id"], session["captain2_id"]):
-                    return session
-        return None
+# PersistentReadyView removed - all button interactions now handled via on_interaction listener
+# to avoid custom_id conflicts when the same static ID is used across multiple threads.
 
 
 class PersistentMapSelectView(discord.ui.View):
@@ -153,120 +122,25 @@ class PersistentMapSelectView(discord.ui.View):
         phase = session.get("current_phase")
         action_type = "ban" if phase == "banning" else "pick"
 
-        # Show confirmation
+        # Show confirmation inline by editing the captain message
         embed = discord.Embed(
             title=f"Confirm {action_type.title()}",
             description=f"Are you sure you want to **{action_type}** **{map_name}**?",
             color=COLOR_WARNING
         )
-        await interaction.response.send_message(
+        await interaction.response.edit_message(
             embed=embed,
             view=ConfirmMapSelectView(
                 self.cog, session_id, captain_id, map_name, action_type
-            ),
-            ephemeral=True
+            )
         )
         return True
 
 
-class PersistentSideSelectView(discord.ui.View):
-    """Persistent view for side selection."""
-
-    def __init__(self, cog: "MapBanCog" = None):
-        super().__init__(timeout=None)
-        self.cog = cog
-
-    async def _handle_side(self, interaction: discord.Interaction, side: str):
-        if not self.cog:
-            await interaction.response.send_message("Bot is restarting, please wait...", ephemeral=True)
-            return
-
-        # Find session for this channel
-        session = await self._find_session(interaction)
-        if not session:
-            await interaction.response.send_message("Session not found.", ephemeral=True)
-            return
-
-        captain_id = interaction.user.id
-        if captain_id != session["current_turn"]:
-            await interaction.response.send_message("It's not your turn.", ephemeral=True)
-            return
-
-        current_map = session.get("current_side_select_map", "")
-
-        embed = discord.Embed(
-            title="Confirm Side Selection",
-            description=f"Start on **{side}** for **{current_map}**?",
-            color=COLOR_WARNING
-        )
-        await interaction.response.send_message(
-            embed=embed,
-            view=ConfirmSideSelectView(
-                self.cog, session["session_id"], captain_id, current_map, side
-            ),
-            ephemeral=True
-        )
-
-    async def _find_session(self, interaction: discord.Interaction) -> Optional[Dict]:
-        channel_id = interaction.channel_id
-        for session_id, session in self.cog.active_sessions.items():
-            if session.get("status") != "active":
-                continue
-            if channel_id in (session.get("thread1_id"), session.get("thread2_id")):
-                return session
-        return None
-
-    @discord.ui.button(label="Attack", style=discord.ButtonStyle.primary, custom_id="mapban_side_attack")
-    async def attack(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._handle_side(interaction, "Attack")
-
-    @discord.ui.button(label="Defense", style=discord.ButtonStyle.primary, custom_id="mapban_side_defense")
-    async def defense(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._handle_side(interaction, "Defense")
+# PersistentSideSelectView removed - handled via on_interaction listener.
 
 
-class PersistentAgentSelectView(discord.ui.View):
-    """Persistent view for agent selection - shows role buttons."""
-
-    def __init__(self, cog: "MapBanCog" = None):
-        super().__init__(timeout=None)
-        self.cog = cog
-
-    @discord.ui.button(label="Select Agent", style=discord.ButtonStyle.primary, custom_id="mapban_agent_select")
-    async def select_agent(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self.cog:
-            await interaction.response.send_message("Bot is restarting, please wait...", ephemeral=True)
-            return
-
-        session = await self._find_session(interaction)
-        if not session:
-            await interaction.response.send_message("Session not found.", ephemeral=True)
-            return
-
-        captain_id = interaction.user.id
-        if captain_id != session["current_turn"]:
-            await interaction.response.send_message("It's not your turn.", ephemeral=True)
-            return
-
-        phase = session.get("current_phase")
-        action_type = "protect" if phase == "agent_protect" else "ban"
-        available_agents = self.cog.get_available_agents(session, captain_id, action_type)
-
-        # Show role selection view
-        await interaction.response.send_message(
-            f"Select a role to {action_type} an agent:",
-            view=AgentRoleSelectView(self.cog, session["session_id"], captain_id, action_type, available_agents),
-            ephemeral=True
-        )
-
-    async def _find_session(self, interaction: discord.Interaction) -> Optional[Dict]:
-        channel_id = interaction.channel_id
-        for session_id, session in self.cog.active_sessions.items():
-            if session.get("status") != "active":
-                continue
-            if channel_id in (session.get("thread1_id"), session.get("thread2_id")):
-                return session
-        return None
+# PersistentAgentSelectView removed - handled via on_interaction listener.
 
 
 class ObserveSessionView(discord.ui.View):
@@ -446,19 +320,28 @@ class AgentRoleSelectView(discord.ui.View):
 
 
 class AgentButtonsView(discord.ui.View):
-    """Buttons for each agent in a role."""
+    """Buttons for each agent in a role, with pagination for large categories."""
 
-    def __init__(self, cog: "MapBanCog", session_id: str, captain_id: int, action_type: str, agents: List[str], all_available: List[str]):
+    AGENTS_PER_PAGE = 8  # 4 rows x 2 per row, leaving row 4 for nav
+
+    def __init__(self, cog: "MapBanCog", session_id: str, captain_id: int, action_type: str, agents: List[str], all_available: List[str], page: int = 0):
         super().__init__(timeout=60)
         self.cog = cog
         self.session_id = session_id
         self.captain_id = captain_id
         self.action_type = action_type
         self.all_available = all_available
+        self.agents = sorted(agents)
+        self.page = page
+        self.total_pages = max(1, (len(self.agents) + self.AGENTS_PER_PAGE - 1) // self.AGENTS_PER_PAGE)
+
+        # Get agents for current page
+        start = page * self.AGENTS_PER_PAGE
+        end = start + self.AGENTS_PER_PAGE
+        page_agents = self.agents[start:end]
 
         # Add agent buttons - 2 per row for clean mobile look
-        sorted_agents = sorted(agents)
-        for i, agent in enumerate(sorted_agents):
+        for i, agent in enumerate(page_agents):
             btn = discord.ui.Button(
                 label=agent,
                 style=discord.ButtonStyle.success if action_type == "protect" else discord.ButtonStyle.danger,
@@ -467,20 +350,87 @@ class AgentButtonsView(discord.ui.View):
             btn.callback = self._make_agent_callback(agent)
             self.add_item(btn)
 
-        # Add back button on last row
+        # Row 4: navigation buttons
+        if self.total_pages > 1 and page > 0:
+            prev_btn = discord.ui.Button(label="← Prev Page", style=discord.ButtonStyle.secondary, row=4)
+            prev_btn.callback = self._prev_page_callback
+            self.add_item(prev_btn)
+
         back_btn = discord.ui.Button(label="← Back", style=discord.ButtonStyle.secondary, row=4)
         back_btn.callback = self._back_callback
         self.add_item(back_btn)
 
+        if self.total_pages > 1 and page < self.total_pages - 1:
+            next_btn = discord.ui.Button(label="Next Page →", style=discord.ButtonStyle.secondary, row=4)
+            next_btn.callback = self._next_page_callback
+            self.add_item(next_btn)
+
     def _make_agent_callback(self, agent_name: str):
         async def callback(interaction: discord.Interaction):
-            await interaction.response.edit_message(content=f"Selected **{agent_name}**!", view=None)
-            await self.cog.handle_agent_selection(
-                interaction, self.session_id, self.captain_id, agent_name, self.action_type
+            action_label = "Protect" if self.action_type == "protect" else "Ban"
+            await interaction.response.edit_message(
+                content=f"**{action_label} {agent_name}?**",
+                view=ConfirmAgentSelectView(
+                    self.cog, self.session_id, self.captain_id, agent_name,
+                    self.action_type, self.agents, self.all_available, self.page
+                )
             )
         return callback
 
     async def _back_callback(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(
+            content=f"Select a role to {self.action_type} an agent:",
+            view=AgentRoleSelectView(self.cog, self.session_id, self.captain_id, self.action_type, self.all_available)
+        )
+
+    async def _prev_page_callback(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(
+            view=AgentButtonsView(self.cog, self.session_id, self.captain_id, self.action_type, self.agents, self.all_available, self.page - 1)
+        )
+
+    async def _next_page_callback(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(
+            view=AgentButtonsView(self.cog, self.session_id, self.captain_id, self.action_type, self.agents, self.all_available, self.page + 1)
+        )
+
+
+class ConfirmAgentSelectView(discord.ui.View):
+    """Confirmation view for agent protect/ban selection."""
+
+    def __init__(self, cog: "MapBanCog", session_id: str, captain_id: int,
+                 agent_name: str, action_type: str, agents: List[str],
+                 all_available: List[str], page: int):
+        super().__init__(timeout=30)
+        self.cog = cog
+        self.session_id = session_id
+        self.captain_id = captain_id
+        self.agent_name = agent_name
+        self.action_type = action_type
+        self.agents = agents
+        self.all_available = all_available
+        self.page = page
+
+        confirm_btn = discord.ui.Button(
+            label=f"Confirm {action_type.title()}",
+            style=discord.ButtonStyle.success if action_type == "protect" else discord.ButtonStyle.danger,
+        )
+        confirm_btn.callback = self._confirm_callback
+        self.add_item(confirm_btn)
+
+        cancel_btn = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.secondary)
+        cancel_btn.callback = self._cancel_callback
+        self.add_item(cancel_btn)
+
+    async def _confirm_callback(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(
+            content=f"✅ {self.action_type.title()}ed **{self.agent_name}**",
+            view=None
+        )
+        await self.cog.handle_agent_selection(
+            interaction, self.session_id, self.captain_id, self.agent_name, self.action_type
+        )
+
+    async def _cancel_callback(self, interaction: discord.Interaction):
         await interaction.response.edit_message(
             content=f"Select a role to {self.action_type} an agent:",
             view=AgentRoleSelectView(self.cog, self.session_id, self.captain_id, self.action_type, self.all_available)
@@ -568,24 +518,6 @@ async def init_database():
             )
         """)
         
-        # Scheduled sessions table (for sessions not yet started)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS scheduled_sessions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id INTEGER NOT NULL,
-                matchup_name TEXT NOT NULL,
-                format TEXT NOT NULL,
-                captain1_id INTEGER NOT NULL,
-                captain2_id INTEGER NOT NULL,
-                admin_id INTEGER NOT NULL,
-                first_ban TEXT NOT NULL,
-                decider_side TEXT DEFAULT 'opponent',
-                scheduled_time TIMESTAMP NOT NULL,
-                created INTEGER DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-
         # Agents table
         await db.execute("""
             CREATE TABLE IF NOT EXISTS agents (
@@ -612,6 +544,32 @@ async def init_database():
             await db.execute("ALTER TABLE guild_settings ADD COLUMN alert_channel_id INTEGER")
         except Exception:
             pass  # Column already exists
+        try:
+            await db.execute("ALTER TABLE sessions ADD COLUMN team1_name TEXT")
+        except Exception:
+            pass  # Column already exists
+        try:
+            await db.execute("ALTER TABLE sessions ADD COLUMN team2_name TEXT")
+        except Exception:
+            pass  # Column already exists
+
+        # One-time cleanup: split corrupted agent entries containing newlines
+        async with db.execute(
+            "SELECT id, guild_id, agent_name FROM agents WHERE agent_name LIKE '%' || char(10) || '%'"
+        ) as cursor:
+            corrupted = await cursor.fetchall()
+        for row in corrupted:
+            row_id, guild_id, agent_name = row
+            individual_names = [n.strip() for n in agent_name.split('\n') if n.strip()]
+            for name in individual_names:
+                try:
+                    await db.execute(
+                        "INSERT OR IGNORE INTO agents (guild_id, agent_name) VALUES (?, ?)",
+                        (guild_id, name)
+                    )
+                except Exception:
+                    pass
+            await db.execute("DELETE FROM agents WHERE id = ?", (row_id,))
 
         await db.commit()
 
@@ -654,20 +612,41 @@ def get_remaining_maps(map_pool: List[str], actions: List[Dict]) -> List[str]:
     return [m for m in map_pool if m not in used_maps]
 
 
-def calculate_total_moves(format_type: str, map_count: int) -> int:
-    """Calculate total moves needed for a format."""
+def calculate_total_moves(format_type: str, map_count: int, session: Dict = None) -> int:
+    """Calculate total moves needed for a format, including agent phases."""
     if format_type == "bo1":
         # All maps banned except 1, then side selection
-        return (map_count - 1) + 1  # bans + side select
+        total = (map_count - 1) + 1  # bans + side select
     else:  # bo3
         # 2 bans, 2 picks, then bans until 1 remains, then 3 side selections
         # Total bans = map_count - 3, picks = 2, side selects = 3
-        return (map_count - 3) + 2 + 3
+        total = (map_count - 3) + 2 + 3
+
+    # Add agent phase counts if agents are configured
+    if session:
+        agent_pool = json.loads(session.get("agent_pool", "[]")) if isinstance(session.get("agent_pool"), str) else session.get("agent_pool", [])
+        if agent_pool:
+            if format_type == "bo1":
+                total += 4  # 2 protects + 2 bans for 1 map
+            else:  # bo3
+                total += 12  # 4 agent actions per map x 3 maps
+
+    return total
 
 
-def calculate_current_move(actions: List[Dict], side_selections: Dict) -> int:
-    """Calculate current move number."""
-    return len(actions) + len(side_selections)
+def calculate_current_move(actions: List[Dict], side_selections: Dict, session: Dict = None) -> int:
+    """Calculate current move number, including completed agent actions."""
+    move = len(actions) + len(side_selections)
+
+    if session:
+        agent_protects = json.loads(session.get("agent_protects", "{}")) if isinstance(session.get("agent_protects"), str) else session.get("agent_protects", {})
+        agent_bans = json.loads(session.get("agent_bans", "{}")) if isinstance(session.get("agent_bans"), str) else session.get("agent_bans", {})
+        for map_protects in agent_protects.values():
+            move += len(map_protects)
+        for map_bans in agent_bans.values():
+            move += len(map_bans)
+
+    return move
 
 
 def format_time_remaining(seconds: int) -> str:
@@ -818,11 +797,30 @@ def _parse_summary_data(session: Dict) -> Dict:
             for cid, agent_name in captains.items():
                 all_agent_names.add(agent_name)
 
+    # Use team names if set, otherwise fall back to captain display names
+    display_name1 = session.get("team1_name") or session.get("captain1_name", "Captain 1")
+    display_name2 = session.get("team2_name") or session.get("captain2_name", "Captain 2")
+
+    # Substitute display names (team names) throughout bans and played_maps
+    name_map = {captain1_id: display_name1, captain2_id: display_name2}
+    old_name1 = session.get("captain1_name", "")
+    old_name2 = session.get("captain2_name", "")
+    old_name_map = {old_name1: display_name1, old_name2: display_name2}
+    all_bans = [
+        {**ban, "captain_name": name_map.get(ban.get("captain_id"), ban["captain_name"])}
+        for ban in all_bans
+    ]
+    for pm in played_maps:
+        if pm.get("picked_by") in name_map:
+            pm["picked_by_name"] = name_map[pm["picked_by"]]
+        if pm.get("side_chosen_by") and pm["side_chosen_by"] in old_name_map:
+            pm["side_chosen_by"] = old_name_map[pm["side_chosen_by"]]
+
     return {
         "matchup_name": session["matchup_name"],
         "format": session["format"],
-        "captain1_name": session.get("captain1_name", "Captain 1"),
-        "captain2_name": session.get("captain2_name", "Captain 2"),
+        "captain1_name": display_name1,
+        "captain2_name": display_name2,
         "captain1_id": captain1_id,
         "captain2_id": captain2_id,
         "all_bans": all_bans,
@@ -974,8 +972,6 @@ def _build_summary_html(template: str, data: Dict, map_urls: Dict, agent_urls: D
     return template.format(
         font_path=FONT_DIR,
         title=_escape_html(data["matchup_name"]),
-        captain1_name=_escape_html(data["captain1_name"]).upper(),
-        captain2_name=_escape_html(data["captain2_name"]).upper(),
         bans_html=bans_html,
         played_maps_html=played_maps_html,
         agents_html=agents_html,
@@ -1028,42 +1024,48 @@ async def generate_summary_card(session: Dict, guild_id: int, cog) -> Optional[B
 # EMBED BUILDERS
 # =============================================================================
 
-def build_picks_bans_text(actions: List[Dict], remaining_maps: List[str], 
-                          side_selections: Dict, show_arrow: bool = True) -> str:
+def build_picks_bans_text(actions: List[Dict], remaining_maps: List[str],
+                          side_selections: Dict, show_arrow: bool = True,
+                          map_pool: List[str] = None) -> str:
     """Build the picks/bans section text for embeds."""
     lines = []
-    
+
     # Add completed actions
     for i, action in enumerate(actions):
         map_name = action["map"]
         captain_name = truncate_name(action["captain_name"])
         action_type = action["type"]
-        is_last = (i == len(actions) - 1) and show_arrow and not side_selections
-        
+        is_last = (i == len(actions) - 1) and show_arrow and len(remaining_maps) != 1
+
         # Check for side selection on this map
         side_info = ""
-        if map_name in side_selections:
-            side = side_selections[map_name]["side"]
-            side_info = f" ({side[:3].title()})"
-        
+        if map_name in side_selections and action_type == "pick":
+            chooser_side = side_selections[map_name]["side"]
+            # Picker starts on opposite side of what chooser chose
+            picker_side = "Defense" if chooser_side.lower() == "attack" else "Attack"
+            side_info = f" ({picker_side[:3].title()})"
+
         arrow = "➡️ " if is_last else ""
-        
+
         if action_type == "ban":
             lines.append(f"{arrow}~~{map_name}~~ {captain_name}")
         else:  # pick
             lines.append(f"{arrow}**{map_name}** {captain_name}{side_info}")
-    
-    # If we have side selections being made, show arrow on last one
-    if side_selections and show_arrow:
-        # Find the last action that has a side selection
-        for i in range(len(actions) - 1, -1, -1):
-            if actions[i]["map"] in side_selections:
-                # Already handled above
-                break
-    
+
+    # Show decider map when exactly 1 map remains (all bans/picks done)
+    if len(remaining_maps) == 1:
+        decider = remaining_maps[0]
+        side_info = ""
+        if decider in side_selections:
+            side = side_selections[decider]["side"]
+            chosen_by = side_selections[decider].get("chosen_by_name", "")
+            side_info = f" ({side[:3].title()} - {truncate_name(chosen_by)})" if chosen_by else f" ({side[:3].title()})"
+        arrow = "➡️ " if show_arrow else ""
+        lines.append(f"{arrow}**{decider}** (Decider){side_info}")
+
     if not lines:
         lines.append("*No picks or bans yet*")
-    
+
     return "\n".join(lines)
 
 
@@ -1074,13 +1076,27 @@ def build_remaining_pool_text(remaining_maps: List[str]) -> str:
     return " • ".join(remaining_maps)
 
 
-def build_captain_embed(session: Dict, is_captain1: bool, 
+def build_captain_embed(session: Dict, is_captain1: bool,
                         time_remaining: Optional[int] = None) -> discord.Embed:
     """Build the embed for a captain's private thread."""
     format_display = "Bo1" if session["format"] == "bo1" else "Bo3"
+    phase = session["current_phase"]
+
+    # Phase-specific embed color
+    if phase in ("banning", "agent_ban"):
+        embed_color = COLOR_DANGER
+    elif phase == "picking":
+        embed_color = COLOR_SUCCESS
+    elif phase == "side_select":
+        embed_color = COLOR_PRIMARY
+    elif phase == "agent_protect":
+        embed_color = COLOR_PROTECT
+    else:
+        embed_color = COLOR_PRIMARY
+
     embed = discord.Embed(
         title=f"{session['matchup_name']} ({format_display})",
-        color=COLOR_PRIMARY
+        color=embed_color
     )
 
     actions = json.loads(session["actions"]) if isinstance(session["actions"], str) else session["actions"]
@@ -1089,153 +1105,162 @@ def build_captain_embed(session: Dict, is_captain1: bool,
     remaining = get_remaining_maps(map_pool, actions)
 
     # Picks/Bans section
-    picks_bans = build_picks_bans_text(actions, remaining, side_selections)
+    picks_bans = build_picks_bans_text(actions, remaining, side_selections, map_pool=map_pool)
     embed.add_field(name="**Picks/Bans**", value=picks_bans, inline=False)
 
     # Remaining pool
-    if remaining:
+    if len(remaining) > 1:
         pool_text = build_remaining_pool_text(remaining)
         embed.add_field(name="**Remaining Pool**", value=pool_text, inline=False)
 
-    # Status section based on phase
-    phase = session["current_phase"]
+    # Agent selection history - ordered by map pick order, not alphabetically
+    agent_protects_all = json.loads(session.get("agent_protects", "{}")) if isinstance(session.get("agent_protects"), str) else session.get("agent_protects", {})
+    agent_bans_all = json.loads(session.get("agent_bans", "{}")) if isinstance(session.get("agent_bans"), str) else session.get("agent_bans", {})
+
+    if agent_protects_all or agent_bans_all:
+        picked_in_order = [a["map"] for a in actions if a.get("type") == "pick"]
+        decider_map = remaining[0] if remaining else None
+        maps_in_order = picked_in_order + ([decider_map] if decider_map else [])
+        all_agent_maps_set = set(list(agent_protects_all.keys()) + list(agent_bans_all.keys()))
+        all_agent_maps = [m for m in maps_in_order if m in all_agent_maps_set]
+        all_agent_maps += [m for m in all_agent_maps_set if m not in all_agent_maps]
+
+        if all_agent_maps:
+            history_lines = []
+            for map_name in all_agent_maps:
+                map_protects_hist = agent_protects_all.get(map_name, {})
+                map_bans_hist = agent_bans_all.get(map_name, {})
+                if map_protects_hist or map_bans_hist:
+                    history_lines.append(f"**{map_name}:**")
+                    for cid, agent in map_protects_hist.items():
+                        cname = truncate_name(session.get("captain1_name" if int(cid) == session["captain1_id"] else "captain2_name", "Captain"))
+                        history_lines.append(f"🟢{agent} ({cname})")
+                    for cid, agent in map_bans_hist.items():
+                        cname = truncate_name(session.get("captain1_name" if int(cid) == session["captain1_id"] else "captain2_name", "Captain"))
+                        history_lines.append(f"🔴{agent} ({cname})")
+
+            if history_lines:
+                embed.add_field(
+                    name="**Agent Selection**",
+                    value="\n".join(history_lines),
+                    inline=False
+                )
+
+    # Status section - always last, just above footer
     current_turn = session["current_turn"]
     captain_id = session["captain1_id"] if is_captain1 else session["captain2_id"]
     is_my_turn = current_turn == captain_id
-    
+    other_name = truncate_name(session.get("captain2_name" if is_captain1 else "captain1_name", "opponent"))
+
     if phase == "ready":
         c1_ready = "✅" if session["captain1_ready"] else "⏳"
         c2_ready = "✅" if session["captain2_ready"] else "⏳"
         c1_name = truncate_name(session.get("captain1_name", "Captain 1"))
         c2_name = truncate_name(session.get("captain2_name", "Captain 2"))
-        
+
         status = f"{c1_name}: {c1_ready}\n{c2_name}: {c2_ready}"
         embed.add_field(name="**Ready Up**", value=status, inline=False)
-        
+
     elif phase == "complete":
         embed.add_field(name="**Status**", value="✅ Map ban complete!", inline=False)
-        
+
     elif phase in ("banning", "picking"):
         if is_my_turn:
-            action_word = "ban" if phase == "banning" else "pick"
-            if time_remaining is not None:
-                time_str = format_time_remaining(time_remaining)
+            time_text = f"\n⏱️ {format_time_remaining(time_remaining)} remaining" if time_remaining is not None else ""
+            if phase == "banning":
                 embed.add_field(
-                    name="**Your Turn!**", 
-                    value=f"⏱️ Select a map to {action_word}! {time_str} remaining",
+                    name="\U0001f534 YOUR TURN \u2014 BAN A MAP",
+                    value=f"Select a map to ban!{time_text}",
                     inline=False
                 )
             else:
                 embed.add_field(
-                    name="**Your Turn!**",
-                    value=f"Select a map to {action_word}!",
+                    name="\U0001f7e2 YOUR TURN \u2014 PICK A MAP",
+                    value=f"Select a map to pick!{time_text}",
                     inline=False
                 )
         else:
-            other_name = truncate_name(session.get("captain2_name" if is_captain1 else "captain1_name", "opponent"))
-            action_word = "ban" if phase == "banning" else "pick"
+            action_word = "banning" if phase == "banning" else "picking"
             embed.add_field(
                 name="**Waiting**",
-                value=f"⏳ Waiting for {other_name} to {action_word}...",
+                value=f"⏳ Waiting \u2014 {other_name} is {action_word}...",
                 inline=False
             )
-            
+
     elif phase == "side_select":
+        current_map = session.get("current_side_select_map", "the map")
         if is_my_turn:
-            # Find which map needs side selection
-            current_map = session.get("current_side_select_map", "the map")
-            if time_remaining is not None:
-                time_str = format_time_remaining(time_remaining)
-                embed.add_field(
-                    name="**Choose Starting Side**",
-                    value=f"Select Attack or Defense for **{current_map}**\n{time_str} remaining",
-                    inline=False
-                )
-            else:
-                embed.add_field(
-                    name="**Choose Starting Side**",
-                    value=f"Select Attack or Defense for **{current_map}**",
-                    inline=False
-                )
+            time_text = f"\n⏱️ {format_time_remaining(time_remaining)} remaining" if time_remaining is not None else ""
+            embed.add_field(
+                name="\U0001f535 YOUR TURN \u2014 CHOOSE STARTING SIDE",
+                value=f"Select Attack or Defense for **{current_map}**{time_text}",
+                inline=False
+            )
         else:
-            other_name = truncate_name(session.get("captain2_name" if is_captain1 else "captain1_name", "opponent"))
             embed.add_field(
                 name="**Waiting**",
-                value=f"Waiting for {other_name} to choose side...",
+                value=f"⏳ Waiting \u2014 {other_name} is choosing a side...",
                 inline=False
             )
 
     elif phase in ("agent_protect", "agent_ban"):
-        # Show agent selection info
-        agent_protects = json.loads(session.get("agent_protects", "{}")) if isinstance(session.get("agent_protects"), str) else session.get("agent_protects", {})
-        agent_bans = json.loads(session.get("agent_bans", "{}")) if isinstance(session.get("agent_bans"), str) else session.get("agent_bans", {})
-
-        # Get current map index and map list
         current_index = session.get("current_agent_map_index", 0)
         picked = [a["map"] for a in actions if a.get("type") == "pick"]
         decider = remaining[0] if remaining else ""
         maps_to_play = picked + ([decider] if decider else [])
         current_map = maps_to_play[current_index] if current_index < len(maps_to_play) else ""
 
-        action_type = "protect" if phase == "agent_protect" else "ban"
-
         if is_my_turn:
-            if time_remaining is not None:
-                time_str = format_time_remaining(time_remaining)
+            time_text = f"\n⏱️ {format_time_remaining(time_remaining)} remaining" if time_remaining is not None else ""
+            if phase == "agent_protect":
                 embed.add_field(
-                    name=f"**{action_type.title()} Agent**",
-                    value=f"Select an agent to {action_type} for **{current_map}** (Map {current_index + 1})\n{time_str} remaining",
+                    name="🟢 YOUR TURN \u2014 PROTECT AN AGENT",
+                    value=f"Select an agent to protect for **{current_map}** (Map {current_index + 1}){time_text}",
                     inline=False
                 )
             else:
                 embed.add_field(
-                    name=f"**{action_type.title()} Agent**",
-                    value=f"Select an agent to {action_type} for **{current_map}** (Map {current_index + 1})",
+                    name="\U0001f534 YOUR TURN \u2014 BAN AN AGENT",
+                    value=f"Select an agent to ban for **{current_map}** (Map {current_index + 1}){time_text}",
                     inline=False
                 )
         else:
-            other_name = truncate_name(session.get("captain2_name" if is_captain1 else "captain1_name", "opponent"))
+            action_word = "protecting an agent" if phase == "agent_protect" else "banning an agent"
             embed.add_field(
                 name="**Waiting**",
-                value=f"Waiting for {other_name} to {action_type} an agent...",
+                value=f"⏳ Waiting \u2014 {other_name} is {action_word}...",
                 inline=False
             )
 
-        # Show agent status for current map if any
-        if current_map:
-            map_protects = agent_protects.get(current_map, {})
-            map_bans = agent_bans.get(current_map, {})
-
-            agent_status = []
-            for cid, agent in map_protects.items():
-                cname = session.get("captain1_name" if int(cid) == session["captain1_id"] else "captain2_name", "Captain")
-                agent_status.append(f"Protected: {agent} ({cname[:10]})")
-            for cid, agent in map_bans.items():
-                cname = session.get("captain1_name" if int(cid) == session["captain1_id"] else "captain2_name", "Captain")
-                agent_status.append(f"Banned: {agent} ({cname[:10]})")
-
-            if agent_status:
-                embed.add_field(
-                    name=f"**{current_map} Agents**",
-                    value="\n".join(agent_status),
-                    inline=False
-                )
-
     # Progress bar footer
-    total_moves = calculate_total_moves(session["format"], len(map_pool))
-    current_move = calculate_current_move(actions, side_selections)
+    total_moves = calculate_total_moves(session["format"], len(map_pool), session)
+    current_move = calculate_current_move(actions, side_selections, session)
     progress = create_progress_bar(current_move, total_moves)
     embed.set_footer(text=progress)
-    
+
     return embed
 
 
 def build_spectator_embed(session: Dict) -> discord.Embed:
     """Build the spectator view embed."""
     format_display = "Bo1" if session["format"] == "bo1" else "Bo3"
+    phase = session["current_phase"]
+
+    # Phase-specific embed color
+    if phase in ("banning", "agent_ban"):
+        embed_color = COLOR_DANGER
+    elif phase == "picking":
+        embed_color = COLOR_SUCCESS
+    elif phase == "side_select":
+        embed_color = COLOR_PRIMARY
+    elif phase == "agent_protect":
+        embed_color = COLOR_PROTECT
+    else:
+        embed_color = COLOR_PRIMARY
+
     embed = discord.Embed(
         title=f"{session['matchup_name']} ({format_display})",
-        color=COLOR_PRIMARY
+        color=embed_color
     )
 
     actions = json.loads(session["actions"]) if isinstance(session["actions"], str) else session["actions"]
@@ -1244,16 +1269,15 @@ def build_spectator_embed(session: Dict) -> discord.Embed:
     remaining = get_remaining_maps(map_pool, actions)
 
     # Picks/Bans section
-    picks_bans = build_picks_bans_text(actions, remaining, side_selections)
+    picks_bans = build_picks_bans_text(actions, remaining, side_selections, map_pool=map_pool)
     embed.add_field(name="**Picks/Bans**", value=picks_bans, inline=False)
 
     # Remaining pool
-    if remaining:
+    if len(remaining) > 1:
         pool_text = build_remaining_pool_text(remaining)
         embed.add_field(name="**Remaining Pool**", value=pool_text, inline=False)
 
     # Status
-    phase = session["current_phase"]
     if phase == "ready":
         c1_ready = "✅" if session["captain1_ready"] else "⏳"
         c2_ready = "✅" if session["captain2_ready"] else "⏳"
@@ -1272,47 +1296,32 @@ def build_spectator_embed(session: Dict) -> discord.Embed:
             turn_name = truncate_name(session.get("captain1_name", "Captain 1"))
         else:
             turn_name = truncate_name(session.get("captain2_name", "Captain 2"))
-        
-        action_word = "ban" if phase == "banning" else ("pick" if phase == "picking" else "choose side")
+
+        if phase == "banning":
+            status_text = f"⏳ {turn_name} is banning a map..."
+        elif phase == "picking":
+            status_text = f"⏳ {turn_name} is picking a map..."
+        elif phase == "side_select":
+            status_text = f"⏳ {turn_name} is choosing a side..."
+        elif phase == "agent_protect":
+            status_text = f"⏳ {turn_name} is protecting an agent..."
+        elif phase == "agent_ban":
+            status_text = f"⏳ {turn_name} is banning an agent..."
+        else:
+            status_text = f"⏳ {turn_name} is selecting..."
+
         embed.add_field(
             name="**Current Turn**",
-            value=f"⏳ {turn_name} is selecting...",
+            value=status_text,
             inline=False
         )
-    
+
     # Progress bar footer
-    total_moves = calculate_total_moves(session["format"], len(map_pool))
-    current_move = calculate_current_move(actions, side_selections)
+    total_moves = calculate_total_moves(session["format"], len(map_pool), session)
+    current_move = calculate_current_move(actions, side_selections, session)
     progress = create_progress_bar(current_move, total_moves)
     embed.set_footer(text=progress)
-    
-    return embed
 
-
-def build_admin_log_embed(session: Dict, thread1_url: str, thread2_url: str) -> discord.Embed:
-    """Build the admin log embed."""
-    format_display = "Bo1" if session["format"] == "bo1" else "Bo3"
-    embed = discord.Embed(
-        title="📋 Map Ban Session Started",
-        color=COLOR_PRIMARY
-    )
-    
-    first_ban_name = session.get("captain1_name") if session["first_ban"] == "captain1" else session.get("captain2_name", "Random")
-    decider_text = "Opponent chooses" if session["decider_side"] == "opponent" else "Banner chooses"
-    
-    embed.add_field(name="**Matchup**", value=session["matchup_name"], inline=True)
-    embed.add_field(name="**Format**", value=format_display, inline=True)
-    embed.add_field(name="**First Ban**", value=f"{truncate_name(first_ban_name)} ({session['first_ban']})", inline=True)
-    embed.add_field(name="**Decider Side**", value=decider_text, inline=True)
-    
-    c1_name = truncate_name(session.get("captain1_name", "Captain 1"))
-    c2_name = truncate_name(session.get("captain2_name", "Captain 2"))
-    captains_text = f"└ {c1_name} - [Thread]({thread1_url})\n└ {c2_name} - [Thread]({thread2_url})"
-    embed.add_field(name="**Captains**", value=captains_text, inline=False)
-    
-    embed.add_field(name="**Started by**", value=f"<@{session['admin_id']}>", inline=True)
-    embed.timestamp = datetime.now(timezone.utc)
-    
     return embed
 
 
@@ -1350,7 +1359,13 @@ def build_final_result_embed(session: Dict) -> discord.Embed:
         for i, action in enumerate(picked_maps):
             map_name = action["map"]
             side_info = side_selections.get(map_name, {})
-            side_text = f"({side_info.get('side', 'TBD')[:3].title()})" if side_info else ""
+            if side_info:
+                chooser_side = side_info.get('side', 'TBD')
+                # Picker starts on opposite side of what chooser chose
+                picker_side = "Defense" if chooser_side.lower() == "attack" else "Attack"
+                side_text = f"({picker_side[:3].title()})"
+            else:
+                side_text = ""
             captain_name = truncate_name(action["captain_name"])
             lines.append(f"{i+1}. {map_name} - {captain_name} {side_text}")
         
@@ -1512,35 +1527,7 @@ class AdminPanelView(discord.ui.View):
         embed = build_agent_management_embed(agents)
         await interaction.response.send_message(embed=embed, view=AgentManagementView(self.cog), ephemeral=True)
 
-    @discord.ui.button(label="Schedule Session", style=discord.ButtonStyle.success, row=3)
-    async def schedule_session(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """Schedule a map ban session."""
-        await interaction.response.send_message("Select both captains, then click Continue:", view=ScheduleSessionView(self.cog), ephemeral=True)
-    
-    @discord.ui.button(label="View Scheduled", style=discord.ButtonStyle.secondary, row=3)
-    async def view_scheduled(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """View scheduled sessions."""
-        sessions = await self.cog.get_scheduled_sessions(interaction.guild_id)
-        embed = build_scheduled_sessions_embed(sessions)
-        view = ScheduledSessionsView(self.cog, sessions) if sessions else None
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-    
-    @discord.ui.button(label="Manage Subs", style=discord.ButtonStyle.secondary, row=3)
-    async def manage_subs(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """Manage captain substitutions."""
-        sessions = await self.cog.get_active_sessions(interaction.guild_id)
-        if not sessions:
-            await interaction.response.send_message("❌ No active sessions to manage.", ephemeral=True)
-            return
-        
-        embed = discord.Embed(
-            title="👥 Manage Substitutes",
-            description="Select an active session:",
-            color=COLOR_PRIMARY
-        )
-        await interaction.response.send_message(embed=embed, view=SubManagementView(self.cog, sessions), ephemeral=True)
-    
-    @discord.ui.button(label="Cancel Session", style=discord.ButtonStyle.danger, row=4)
+    @discord.ui.button(label="Cancel Session", style=discord.ButtonStyle.danger, row=3)
     async def cancel_session(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Cancel an active session."""
         sessions = await self.cog.get_active_sessions(interaction.guild_id)
@@ -1555,7 +1542,7 @@ class AdminPanelView(discord.ui.View):
         )
         await interaction.response.send_message(embed=embed, view=CancelSessionView(self.cog, sessions), ephemeral=True)
     
-    @discord.ui.button(label="Clear Settings", style=discord.ButtonStyle.danger, row=4)
+    @discord.ui.button(label="Clear Settings", style=discord.ButtonStyle.danger, row=3)
     async def clear_settings(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Clear a configured setting."""
         settings = await self.cog.get_guild_settings(interaction.guild_id)
@@ -1565,7 +1552,7 @@ class AdminPanelView(discord.ui.View):
             ephemeral=True
         )
 
-    @discord.ui.button(label="Refresh Panel", style=discord.ButtonStyle.secondary, row=4)
+    @discord.ui.button(label="Refresh Panel", style=discord.ButtonStyle.secondary, row=3)
     async def refresh_panel(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Refresh the admin panel."""
         settings = await self.cog.get_guild_settings(interaction.guild_id)
@@ -2092,7 +2079,7 @@ class AddAgentsModal(discord.ui.Modal, title="Add Agents"):
         self.cog = cog
 
     async def on_submit(self, interaction: discord.Interaction):
-        names = [n.strip() for n in self.agent_names.value.split(",") if n.strip()]
+        names = [n.strip() for n in re.split(r'[,\n]+', self.agent_names.value) if n.strip()]
         added = await self.cog.add_agents(interaction.guild_id, names)
         await interaction.response.send_message(f"✅ Added {added} agent(s)", ephemeral=True)
 
@@ -2133,211 +2120,23 @@ class ToggleAgentView(discord.ui.View):
 
 
 # =============================================================================
-# VIEWS & MODALS - SCHEDULED SESSIONS
-# =============================================================================
-
-def build_scheduled_sessions_embed(sessions: List[Dict]) -> discord.Embed:
-    """Build embed for scheduled sessions list."""
-    embed = discord.Embed(
-        title="📅 Scheduled Map Ban Sessions",
-        color=COLOR_PRIMARY
-    )
-    
-    if not sessions:
-        embed.description = "*No scheduled sessions*"
-        return embed
-    
-    for i, s in enumerate(sessions[:10], 1):
-        format_type = "Bo3" if s["format"] == "bo3" else "Bo1"
-        scheduled = datetime.fromisoformat(s["scheduled_time"]) if isinstance(s["scheduled_time"], str) else s["scheduled_time"]
-        
-        embed.add_field(
-            name=f"{i}. {s['matchup_name']} ({format_type})",
-            value=f"📆 <t:{int(scheduled.timestamp())}:F>\n👤 <@{s['captain1_id']}> vs <@{s['captain2_id']}>",
-            inline=False
-        )
-    
-    return embed
-
-
-class ScheduleSessionView(discord.ui.View):
-    """View to select captains for scheduling."""
-
-    def __init__(self, cog: "MapBanCog"):
-        super().__init__(timeout=120)
-        self.cog = cog
-        self.captain1: Optional[discord.Member] = None
-        self.captain2: Optional[discord.Member] = None
-
-    @discord.ui.select(cls=discord.ui.UserSelect, placeholder="Select Captain 1", row=0)
-    async def captain1_select(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
-        self.captain1 = select.values[0]
-        await interaction.response.defer()
-
-    @discord.ui.select(cls=discord.ui.UserSelect, placeholder="Select Captain 2", row=1)
-    async def captain2_select(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
-        self.captain2 = select.values[0]
-        await interaction.response.defer()
-
-    @discord.ui.button(label="Continue", style=discord.ButtonStyle.success, row=2)
-    async def continue_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self.captain1 or not self.captain2:
-            await interaction.response.send_message("❌ Select both captains first.", ephemeral=True)
-            return
-        if self.captain1.id == self.captain2.id:
-            await interaction.response.send_message("❌ Captains must be different users.", ephemeral=True)
-            return
-        await interaction.response.send_modal(ScheduleSessionModal(self.cog, self.captain1, self.captain2))
-
-
-class ScheduleSessionModal(discord.ui.Modal, title="Schedule Map Ban Session"):
-    """Modal for remaining schedule details."""
-
-    matchup_name = discord.ui.TextInput(label="Matchup Name", placeholder="e.g., Team A vs Team B", required=True, max_length=50)
-    format_type = discord.ui.TextInput(label="Format", placeholder="bo1 or bo3", required=True, max_length=3)
-    scheduled_time = discord.ui.TextInput(label="Scheduled Time (Unix Timestamp)", placeholder="Use discordtimestamp.com", required=True, max_length=15)
-
-    def __init__(self, cog: "MapBanCog", captain1: discord.Member, captain2: discord.Member):
-        super().__init__()
-        self.cog = cog
-        self.captain1 = captain1
-        self.captain2 = captain2
-
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            format_type = self.format_type.value.strip().lower()
-            if format_type not in ("bo1", "bo3"):
-                await interaction.response.send_message("❌ Format must be 'bo1' or 'bo3'.", ephemeral=True)
-                return
-
-            timestamp = int(self.scheduled_time.value.strip())
-            scheduled = datetime.fromtimestamp(timestamp, tz=timezone.utc)
-
-            if scheduled <= datetime.now(timezone.utc):
-                await interaction.response.send_message("❌ Scheduled time must be in the future.", ephemeral=True)
-                return
-
-            await self.cog.schedule_session(
-                guild_id=interaction.guild_id,
-                matchup_name=self.matchup_name.value.strip(),
-                format_type=format_type,
-                captain1_id=self.captain1.id,
-                captain2_id=self.captain2.id,
-                admin_id=interaction.user.id,
-                scheduled_time=scheduled
-            )
-
-            await interaction.response.send_message(
-                f"✅ Scheduled **{self.matchup_name.value}** for <t:{timestamp}:F>",
-                ephemeral=True
-            )
-        except ValueError as e:
-            await interaction.response.send_message(f"❌ Invalid input: {e}", ephemeral=True)
-
-
-class ScheduledSessionsView(discord.ui.View):
-    """View for managing scheduled sessions."""
-    
-    def __init__(self, cog: "MapBanCog", sessions: List[Dict]):
-        super().__init__(timeout=120)
-        self.cog = cog
-        self.sessions = sessions
-    
-    @discord.ui.button(label="Cancel Scheduled", style=discord.ButtonStyle.danger)
-    async def cancel_scheduled(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self.sessions:
-            await interaction.response.send_message("❌ No scheduled sessions.", ephemeral=True)
-            return
-        
-        options = []
-        for s in self.sessions[:25]:
-            options.append(discord.SelectOption(
-                label=s["matchup_name"][:100],
-                value=str(s["id"]),
-                description=f"Bo{'3' if s['format'] == 'bo3' else '1'}"
-            ))
-        
-        view = CancelScheduledView(self.cog, options)
-        await interaction.response.send_message("Select session to cancel:", view=view, ephemeral=True)
-
-
-class CancelScheduledView(discord.ui.View):
-    """View for cancelling a scheduled session."""
-    
-    def __init__(self, cog: "MapBanCog", options: List[discord.SelectOption]):
-        super().__init__(timeout=60)
-        self.cog = cog
-        
-        self.select = discord.ui.Select(placeholder="Select session", options=options)
-        self.select.callback = self.select_callback
-        self.add_item(self.select)
-    
-    async def select_callback(self, interaction: discord.Interaction):
-        session_id = int(self.select.values[0])
-        
-        embed = discord.Embed(
-            title="⚠️ Confirm Cancellation",
-            description="Are you sure you want to cancel this scheduled session?",
-            color=COLOR_WARNING
-        )
-        await interaction.response.edit_message(
-            embed=embed,
-            view=ConfirmCancelScheduledView(self.cog, session_id)
-        )
-
-
-class ConfirmCancelScheduledView(discord.ui.View):
-    """Confirmation for cancelling scheduled session."""
-    
-    def __init__(self, cog: "MapBanCog", session_id: int):
-        super().__init__(timeout=30)
-        self.cog = cog
-        self.session_id = session_id
-    
-    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger)
-    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.cancel_scheduled_session(self.session_id)
-        await interaction.response.edit_message(content="✅ Scheduled session cancelled.", embed=None, view=None)
-    
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(content="❌ Cancelled.", embed=None, view=None)
-
-
-# =============================================================================
 # VIEWS - CAPTAIN INTERACTION (MAP SELECTION, SIDE SELECTION, READY)
 # =============================================================================
 
 class ReadyUpView(discord.ui.View):
-    """View for captains to ready up. Uses persistent custom_id for restart recovery."""
+    """View for captains to ready up. Uses unique custom_id per session.
+    Interaction handling is done via the cog's on_interaction listener."""
 
-    def __init__(self, cog: "MapBanCog", session_id: str, captain_id: int):
+    def __init__(self, session_id: str):
         super().__init__(timeout=None)
-        self.cog = cog
-        self.session_id = session_id
-        self.captain_id = captain_id
-
-        # Create button with persistent custom_id
-        button = discord.ui.Button(
+        self.add_item(discord.ui.Button(
             label="Ready",
             style=discord.ButtonStyle.success,
-            custom_id="mapban_ready_persistent"  # Same as PersistentReadyView
-        )
-        button.callback = self.ready_callback
-        self.add_item(button)
+            custom_id=f"mapban_ready_{session_id}"
+        ))
 
-    async def ready_callback(self, interaction: discord.Interaction):
-        session = self.cog.active_sessions.get(self.session_id)
-        if not session:
-            await interaction.response.send_message("Session not found.", ephemeral=True)
-            return
-
-        captain_id = interaction.user.id
-        if captain_id not in (session["captain1_id"], session["captain2_id"]):
-            await interaction.response.send_message("You are not a captain in this session.", ephemeral=True)
-            return
-
-        await self.cog.handle_ready(interaction, self.session_id, captain_id)
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return False  # Handled by on_interaction listener
 
 
 class MapSelectView(discord.ui.View):
@@ -2355,15 +2154,21 @@ class MapSelectView(discord.ui.View):
         # Sort alphabetically
         sorted_maps = sorted(remaining_maps)
 
-        # Create buttons for each map - 2 per row for clean mobile layout
+        # Create buttons for each map.
+        # Discord allows max 5 rows (0-4) and max 5 buttons per row.
+        # Calculate buttons_per_row to fit within 5 rows.
+        maps_count = len(sorted_maps)
+        buttons_per_row = max(2, (maps_count + 4) // 5)  # ceiling division by 5, min 2
+        buttons_per_row = min(buttons_per_row, 5)  # cap at Discord's 5 per row limit
+
         button_style = discord.ButtonStyle.danger if action_type == "ban" else discord.ButtonStyle.success
 
-        for i, map_name in enumerate(sorted_maps):
+        for i, map_name in enumerate(sorted_maps[:25]):  # Discord max 25 components
             button = discord.ui.Button(
                 label=map_name,
                 style=button_style,
                 custom_id=f"{PREFIX_MAP_SELECT}{session_id}_{map_name}",
-                row=i // 2  # 2 buttons per row
+                row=i // buttons_per_row
             )
             button.callback = self.create_callback(map_name)
             self.add_item(button)
@@ -2373,30 +2178,29 @@ class MapSelectView(discord.ui.View):
             if interaction.user.id != self.captain_id:
                 await interaction.response.send_message("❌ It's not your turn.", ephemeral=True)
                 return
-            
+
             self.pending_selection = map_name
-            
-            # Show confirmation
+
+            # Show confirmation inline by editing the captain message
             embed = discord.Embed(
                 title=f"⚠️ Confirm {self.action_type.title()}",
                 description=f"Are you sure you want to **{self.action_type}** **{map_name}**?",
                 color=COLOR_WARNING
             )
-            await interaction.response.send_message(
+            await interaction.response.edit_message(
                 embed=embed,
                 view=ConfirmMapSelectView(
-                    self.cog, self.session_id, self.captain_id, 
+                    self.cog, self.session_id, self.captain_id,
                     map_name, self.action_type
-                ),
-                ephemeral=True
+                )
             )
-        
+
         return callback
 
 
 class ConfirmMapSelectView(discord.ui.View):
-    """Confirmation view for map selection."""
-    
+    """Confirmation view for map selection (inline on captain message)."""
+
     def __init__(self, cog: "MapBanCog", session_id: str, captain_id: int,
                  map_name: str, action_type: str):
         super().__init__(timeout=30)
@@ -2405,84 +2209,61 @@ class ConfirmMapSelectView(discord.ui.View):
         self.captain_id = captain_id
         self.map_name = map_name
         self.action_type = action_type
-    
+
     @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(content="✅ Confirmed!", embed=None, view=None)
+        await interaction.response.defer()
         await self.cog.handle_map_selection(
-            interaction, self.session_id, self.captain_id, 
+            interaction, self.session_id, self.captain_id,
             self.map_name, self.action_type
         )
-    
+
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(content="❌ Cancelled. Make another selection.", embed=None, view=None)
+        # Restore the captain embed with map select buttons
+        session = self.cog.active_sessions.get(self.session_id)
+        if not session:
+            session = await self.cog.get_session(self.session_id)
+        if not session:
+            await interaction.response.edit_message(content="Session not found.", embed=None, view=None)
+            return
+
+        is_captain1 = self.captain_id == session["captain1_id"]
+        embed = build_captain_embed(session, is_captain1=is_captain1)
+
+        actions = json.loads(session["actions"]) if isinstance(session["actions"], str) else session["actions"]
+        map_pool = json.loads(session["map_pool"]) if isinstance(session["map_pool"], str) else session["map_pool"]
+        remaining = get_remaining_maps(map_pool, actions)
+
+        view = MapSelectView(self.cog, self.session_id, self.captain_id, remaining, self.action_type)
+        await interaction.response.edit_message(embed=embed, view=view)
 
 
 class SideSelectView(discord.ui.View):
-    """View for selecting starting side. Uses persistent custom_ids."""
+    """View for selecting starting side. Uses unique custom_id per session.
+    Interaction handling is done via the cog's on_interaction listener."""
 
-    def __init__(self, cog: "MapBanCog", session_id: str, captain_id: int, map_name: str):
+    def __init__(self, session_id: str):
         super().__init__(timeout=None)
-        self.cog = cog
-        self.session_id = session_id
-        self.captain_id = captain_id
-        self.map_name = map_name
-
-        # Create buttons with persistent custom_ids (same as PersistentSideSelectView)
-        attack_btn = discord.ui.Button(
+        self.add_item(discord.ui.Button(
             label="Attack",
             style=discord.ButtonStyle.primary,
-            custom_id="mapban_side_attack"
-        )
-        attack_btn.callback = self.attack_callback
-        self.add_item(attack_btn)
-
-        defense_btn = discord.ui.Button(
+            custom_id=f"mapban_side_attack_{session_id}"
+        ))
+        self.add_item(discord.ui.Button(
             label="Defense",
             style=discord.ButtonStyle.primary,
-            custom_id="mapban_side_defense"
-        )
-        defense_btn.callback = self.defense_callback
-        self.add_item(defense_btn)
+            custom_id=f"mapban_side_defense_{session_id}"
+        ))
 
-    async def attack_callback(self, interaction: discord.Interaction):
-        if interaction.user.id != self.captain_id:
-            await interaction.response.send_message("It's not your turn.", ephemeral=True)
-            return
-
-        embed = discord.Embed(
-            title="Confirm Side Selection",
-            description=f"Start on **Attack** for **{self.map_name}**?",
-            color=COLOR_WARNING
-        )
-        await interaction.response.send_message(
-            embed=embed,
-            view=ConfirmSideSelectView(self.cog, self.session_id, self.captain_id, self.map_name, "Attack"),
-            ephemeral=True
-        )
-
-    async def defense_callback(self, interaction: discord.Interaction):
-        if interaction.user.id != self.captain_id:
-            await interaction.response.send_message("It's not your turn.", ephemeral=True)
-            return
-
-        embed = discord.Embed(
-            title="Confirm Side Selection",
-            description=f"Start on **Defense** for **{self.map_name}**?",
-            color=COLOR_WARNING
-        )
-        await interaction.response.send_message(
-            embed=embed,
-            view=ConfirmSideSelectView(self.cog, self.session_id, self.captain_id, self.map_name, "Defense"),
-            ephemeral=True
-        )
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return False  # Handled by on_interaction listener
 
 
 class ConfirmSideSelectView(discord.ui.View):
-    """Confirmation view for side selection."""
-    
-    def __init__(self, cog: "MapBanCog", session_id: str, captain_id: int, 
+    """Confirmation view for side selection (inline on captain message)."""
+
+    def __init__(self, cog: "MapBanCog", session_id: str, captain_id: int,
                  map_name: str, side: str):
         super().__init__(timeout=30)
         self.cog = cog
@@ -2490,18 +2271,29 @@ class ConfirmSideSelectView(discord.ui.View):
         self.captain_id = captain_id
         self.map_name = map_name
         self.side = side
-    
+
     @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(content="✅ Confirmed!", embed=None, view=None)
+        await interaction.response.defer()
         await self.cog.handle_side_selection(
             interaction, self.session_id, self.captain_id,
             self.map_name, self.side
         )
-    
+
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(content="Cancelled.", embed=None, view=None)
+        # Restore the captain embed with side select buttons
+        session = self.cog.active_sessions.get(self.session_id)
+        if not session:
+            session = await self.cog.get_session(self.session_id)
+        if not session:
+            await interaction.response.edit_message(content="Session not found.", embed=None, view=None)
+            return
+
+        is_captain1 = self.captain_id == session["captain1_id"]
+        embed = build_captain_embed(session, is_captain1=is_captain1)
+        view = SideSelectView(self.session_id)
+        await interaction.response.edit_message(embed=embed, view=view)
 
 
 # =============================================================================
@@ -2509,159 +2301,20 @@ class ConfirmSideSelectView(discord.ui.View):
 # =============================================================================
 
 class AgentSelectView(discord.ui.View):
-    """View with a button to open role-based agent selection. Uses persistent custom_id."""
+    """View with a button to open role-based agent selection. Uses unique custom_id per session.
+    Interaction handling is done via the cog's on_interaction listener."""
 
-    def __init__(self, cog: "MapBanCog", session_id: str, captain_id: int,
-                 action_type: str, available_agents: List[str]):
+    def __init__(self, session_id: str, action_type: str):
         super().__init__(timeout=None)
-        self.cog = cog
-        self.session_id = session_id
-        self.captain_id = captain_id
-        self.action_type = action_type
-        self.available_agents = available_agents
-
-        # Create button with persistent custom_id
         label = f"Select Agent to {action_type.title()}"
-        button = discord.ui.Button(
+        self.add_item(discord.ui.Button(
             label=label,
             style=discord.ButtonStyle.primary,
-            custom_id="mapban_agent_select"
-        )
-        button.callback = self.select_callback
-        self.add_item(button)
+            custom_id=f"mapban_agent_select_{session_id}"
+        ))
 
-    async def select_callback(self, interaction: discord.Interaction):
-        if interaction.user.id != self.captain_id:
-            await interaction.response.send_message("It's not your turn.", ephemeral=True)
-            return
-
-        # Show role selection view
-        await interaction.response.send_message(
-            f"Select a role to {self.action_type} an agent:",
-            view=AgentRoleSelectView(self.cog, self.session_id, self.captain_id, self.action_type, self.available_agents),
-            ephemeral=True
-        )
-
-
-# =============================================================================
-# VIEWS - SUB MANAGEMENT & SESSION CANCELLATION
-# =============================================================================
-
-class SubManagementView(discord.ui.View):
-    """View for managing substitutes."""
-    
-    def __init__(self, cog: "MapBanCog", sessions: List[Dict]):
-        super().__init__(timeout=120)
-        self.cog = cog
-        
-        options = []
-        for s in sessions[:25]:
-            format_type = "Bo3" if s["format"] == "bo3" else "Bo1"
-            options.append(discord.SelectOption(
-                label=f"{s['matchup_name']} ({format_type})",
-                value=s["session_id"]
-            ))
-        
-        self.select = discord.ui.Select(placeholder="Select session", options=options)
-        self.select.callback = self.select_callback
-        self.add_item(self.select)
-    
-    async def select_callback(self, interaction: discord.Interaction):
-        session_id = self.select.values[0]
-        session = await self.cog.get_session(session_id)
-        
-        if not session:
-            await interaction.response.send_message("❌ Session not found.", ephemeral=True)
-            return
-        
-        embed = discord.Embed(
-            title=f"👥 Substitute for: {session['matchup_name']}",
-            description="Select which captain to replace:",
-            color=COLOR_PRIMARY
-        )
-        embed.add_field(
-            name="Current Captains",
-            value=f"• <@{session['captain1_id']}>\n• <@{session['captain2_id']}>",
-            inline=False
-        )
-        
-        await interaction.response.edit_message(embed=embed, view=SubCaptainSelectView(self.cog, session))
-
-
-class SubCaptainSelectView(discord.ui.View):
-    """View for selecting which captain to substitute."""
-
-    def __init__(self, cog: "MapBanCog", session: Dict):
-        super().__init__(timeout=60)
-        self.cog = cog
-        self.session = session
-
-    @discord.ui.button(label="Sub Captain 1", style=discord.ButtonStyle.primary)
-    async def sub_captain1(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("Select new captain:", view=SubstituteView(self.cog, self.session, 1), ephemeral=True)
-
-    @discord.ui.button(label="Sub Captain 2", style=discord.ButtonStyle.primary)
-    async def sub_captain2(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("Select new captain:", view=SubstituteView(self.cog, self.session, 2), ephemeral=True)
-
-
-class SubstituteView(discord.ui.View):
-    """View with user select for substitution."""
-
-    def __init__(self, cog: "MapBanCog", session: Dict, captain_num: int):
-        super().__init__(timeout=60)
-        self.cog = cog
-        self.session = session
-        self.captain_num = captain_num
-
-    @discord.ui.select(cls=discord.ui.UserSelect, placeholder="Select new captain")
-    async def user_select(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
-        new_captain = select.values[0]
-        other_captain = self.session["captain2_id"] if self.captain_num == 1 else self.session["captain1_id"]
-
-        if new_captain.id == other_captain:
-            await interaction.response.send_message("❌ Can't be the same as the other captain.", ephemeral=True)
-            return
-
-        embed = discord.Embed(
-            title="⚠️ Confirm Substitution",
-            description=f"Replace Captain {self.captain_num} with {new_captain.mention}?",
-            color=COLOR_WARNING
-        )
-        await interaction.response.edit_message(
-            content=None,
-            embed=embed,
-            view=ConfirmSubstituteView(self.cog, self.session, self.captain_num, new_captain.id)
-        )
-
-
-class ConfirmSubstituteView(discord.ui.View):
-    """Confirmation view for substitution."""
-    
-    def __init__(self, cog: "MapBanCog", session: Dict, captain_num: int, new_captain_id: int):
-        super().__init__(timeout=30)
-        self.cog = cog
-        self.session = session
-        self.captain_num = captain_num
-        self.new_captain_id = new_captain_id
-    
-    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success)
-    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        success = await self.cog.substitute_captain(
-            interaction.guild,
-            self.session["session_id"],
-            self.captain_num,
-            self.new_captain_id
-        )
-        
-        if success:
-            await interaction.response.edit_message(content="✅ Captain substituted successfully!", embed=None, view=None)
-        else:
-            await interaction.response.edit_message(content="❌ Failed to substitute captain.", embed=None, view=None)
-    
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(content="❌ Cancelled.", embed=None, view=None)
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return False  # Handled by on_interaction listener
 
 
 class CancelSessionView(discord.ui.View):
@@ -2743,23 +2396,227 @@ class MapBanCog(commands.Cog):
         await self.load_active_sessions()
 
         # Register persistent views for bot restart recovery
-        self.bot.add_view(PersistentReadyView(self))
+        # Ready, Side, and Agent views now use dynamic custom_ids and are
+        # handled via the on_interaction listener instead of persistent views.
         self.bot.add_view(PersistentMapSelectView(self))
-        self.bot.add_view(PersistentSideSelectView(self))
-        self.bot.add_view(PersistentAgentSelectView(self))
         self.bot.add_view(PersistentObserveView(self))
 
         self.timer_task.start()
         self.cleanup_task.start()
-        self.scheduled_session_task.start()
         print("MapBan cog loaded")
     
     async def cog_unload(self):
         """Called when the cog is unloaded."""
         self.timer_task.cancel()
         self.cleanup_task.cancel()
-        self.scheduled_session_task.cancel()
-    
+
+    # =========================================================================
+    # INTERACTION LISTENER (handles ready, side select, agent select buttons)
+    # =========================================================================
+
+    def _find_session_by_channel(self, channel_id: int, user_id: int) -> Optional[Dict]:
+        """Find an active session where this user is a captain in this thread."""
+        for session_id, session in self.active_sessions.items():
+            if session.get("status") != "active":
+                continue
+            if channel_id in (session.get("thread1_id"), session.get("thread2_id")):
+                if user_id in (session.get("captain1_id"), session.get("captain2_id")):
+                    return session
+        return None
+
+    @commands.Cog.listener()
+    async def on_interaction(self, interaction: discord.Interaction):
+        """Handle all mapban button interactions via custom_id routing.
+
+        This replaces the old PersistentReadyView/SideSelectView/AgentSelectView
+        approach which used shared static custom_ids across threads, causing
+        discord.py's view store to lose track of button handlers.
+
+        We intentionally do NOT check interaction.response.is_done() here because
+        after a cog reload, orphaned old view instances may still be in the view
+        store and respond first with stale state. We need to always handle mapban
+        buttons from this (current) cog regardless.
+        """
+        if interaction.type != discord.InteractionType.component:
+            return
+
+        custom_id = interaction.data.get("custom_id", "")
+        if not custom_id.startswith("mapban_"):
+            return
+
+        print(f"[MapBan] on_interaction fired: custom_id={custom_id}, "
+              f"user={interaction.user.id}, channel={interaction.channel_id}, "
+              f"is_done={interaction.response.is_done()}")
+
+        # --- Ready buttons ---
+        # New format: "mapban_ready_{session_id}"
+        # Old format: "mapban_ready_persistent"
+        if custom_id.startswith("mapban_ready_"):
+            try:
+                session_id = custom_id[len("mapban_ready_"):]
+
+                # Old format - find session by channel
+                if session_id == "persistent":
+                    session = self._find_session_by_channel(interaction.channel_id, interaction.user.id)
+                    if not session:
+                        try:
+                            await interaction.response.send_message("Session not found.", ephemeral=True)
+                        except Exception:
+                            pass
+                        return
+                    session_id = session["session_id"]
+
+                captain_id = interaction.user.id
+                session = self.active_sessions.get(session_id)
+                if not session:
+                    print(f"[MapBan] Session {session_id} not in active_sessions, fetching from DB")
+                    session = await self.get_session(session_id)
+                if not session:
+                    print(f"[MapBan] Session {session_id} not found anywhere!")
+                    try:
+                        await interaction.response.send_message("Session not found.", ephemeral=True)
+                    except Exception:
+                        pass
+                    return
+
+                if captain_id not in (session.get("captain1_id"), session.get("captain2_id")):
+                    print(f"[MapBan] Captain ID mismatch: {captain_id} not in "
+                          f"({session.get('captain1_id')}, {session.get('captain2_id')})")
+                    try:
+                        await interaction.response.send_message("You are not a captain in this session.", ephemeral=True)
+                    except Exception:
+                        pass
+                    return
+
+                print(f"[MapBan] Calling handle_ready for session={session_id}, captain={captain_id}")
+                await self.handle_ready(interaction, session_id, captain_id)
+            except Exception as e:
+                print(f"[MapBan] Ready handler error: {e}\n{traceback.format_exc()}")
+                try:
+                    if not interaction.response.is_done():
+                        await interaction.response.send_message("Something went wrong. Please try again.", ephemeral=True)
+                except Exception:
+                    pass
+            return
+
+        # --- Side select buttons ---
+        # New format: "mapban_side_attack_{session_id}" / "mapban_side_defense_{session_id}"
+        # Old format: "mapban_side_attack" / "mapban_side_defense"
+        if custom_id.startswith("mapban_side_attack") or custom_id.startswith("mapban_side_defense"):
+            try:
+                if custom_id.startswith("mapban_side_attack"):
+                    side = "Attack"
+                    suffix = custom_id[len("mapban_side_attack"):]
+                else:
+                    side = "Defense"
+                    suffix = custom_id[len("mapban_side_defense"):]
+
+                # Parse session_id (new format has "_{session_id}", old format has nothing)
+                if suffix.startswith("_") and len(suffix) > 1:
+                    session_id = suffix[1:]  # Strip leading underscore
+                else:
+                    # Old format - find by channel
+                    session = self._find_session_by_channel(interaction.channel_id, interaction.user.id)
+                    if not session:
+                        try:
+                            await interaction.response.send_message("Session not found.", ephemeral=True)
+                        except Exception:
+                            pass
+                        return
+                    session_id = session["session_id"]
+
+                session = self.active_sessions.get(session_id)
+                if not session:
+                    session = await self.get_session(session_id)
+                if not session:
+                    try:
+                        await interaction.response.send_message("Session not found.", ephemeral=True)
+                    except Exception:
+                        pass
+                    return
+
+                captain_id = interaction.user.id
+                if captain_id != session.get("current_turn"):
+                    try:
+                        await interaction.response.send_message("It's not your turn.", ephemeral=True)
+                    except Exception:
+                        pass
+                    return
+
+                current_map = session.get("current_side_select_map", "")
+                embed = discord.Embed(
+                    title="Confirm Side Selection",
+                    description=f"Start on **{side}** for **{current_map}**?",
+                    color=COLOR_WARNING
+                )
+                await interaction.response.edit_message(
+                    embed=embed,
+                    view=ConfirmSideSelectView(self, session_id, captain_id, current_map, side)
+                )
+            except Exception as e:
+                print(f"[MapBan] Side select error: {e}\n{traceback.format_exc()}")
+                try:
+                    if not interaction.response.is_done():
+                        await interaction.response.send_message("Something went wrong. Please try again.", ephemeral=True)
+                except Exception:
+                    pass
+            return
+
+        # --- Agent select buttons ---
+        # New format: "mapban_agent_select_{session_id}"
+        # Old format: "mapban_agent_select"
+        if custom_id.startswith("mapban_agent_select"):
+            try:
+                suffix = custom_id[len("mapban_agent_select"):]
+
+                if suffix.startswith("_") and len(suffix) > 1:
+                    session_id = suffix[1:]
+                else:
+                    session = self._find_session_by_channel(interaction.channel_id, interaction.user.id)
+                    if not session:
+                        try:
+                            await interaction.response.send_message("Session not found.", ephemeral=True)
+                        except Exception:
+                            pass
+                        return
+                    session_id = session["session_id"]
+
+                session = self.active_sessions.get(session_id)
+                if not session:
+                    session = await self.get_session(session_id)
+                if not session:
+                    try:
+                        await interaction.response.send_message("Session not found.", ephemeral=True)
+                    except Exception:
+                        pass
+                    return
+
+                captain_id = interaction.user.id
+                if captain_id != session.get("current_turn"):
+                    try:
+                        await interaction.response.send_message("It's not your turn.", ephemeral=True)
+                    except Exception:
+                        pass
+                    return
+
+                phase = session.get("current_phase")
+                action_type = "protect" if phase == "agent_protect" else "ban"
+                available_agents = self.get_available_agents(session, captain_id, action_type)
+
+                await interaction.response.send_message(
+                    f"Select a role to {action_type} an agent:",
+                    view=AgentRoleSelectView(self, session_id, captain_id, action_type, available_agents),
+                    ephemeral=True
+                )
+            except Exception as e:
+                print(f"[MapBan] Agent select error: {e}\n{traceback.format_exc()}")
+                try:
+                    if not interaction.response.is_done():
+                        await interaction.response.send_message("Something went wrong. Please try again.", ephemeral=True)
+                except Exception:
+                    pass
+            return
+
     # =========================================================================
     # DATABASE OPERATIONS
     # =========================================================================
@@ -3077,8 +2934,8 @@ class MapBanCog(commands.Cog):
                     turn_start_time, reminder_sent, status, complete_time,
                     current_side_select_map, agent_pool, agent_protects, agent_bans,
                     used_protects, used_bans, current_agent_phase, current_agent_map_index,
-                    captain1_name, captain2_name, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    captain1_name, captain2_name, team1_name, team2_name, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             """, (
                 session["session_id"],
                 session["guild_id"],
@@ -3117,7 +2974,9 @@ class MapBanCog(commands.Cog):
                 session.get("current_agent_phase"),
                 session.get("current_agent_map_index", 0),
                 session.get("captain1_name"),
-                session.get("captain2_name")
+                session.get("captain2_name"),
+                session.get("team1_name"),
+                session.get("team2_name")
             ))
             await db.commit()
     
@@ -3169,49 +3028,6 @@ class MapBanCog(commands.Cog):
                     session = dict(row)
                     self.active_sessions[session["session_id"]] = session
     
-    async def schedule_session(self, guild_id: int, matchup_name: str, format_type: str,
-                               captain1_id: int, captain2_id: int, admin_id: int,
-                               scheduled_time: datetime, first_ban: str = "random",
-                               decider_side: str = "opponent"):
-        """Schedule a session for later."""
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            await db.execute("""
-                INSERT INTO scheduled_sessions (
-                    guild_id, matchup_name, format, captain1_id, captain2_id,
-                    admin_id, first_ban, decider_side, scheduled_time
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                guild_id, matchup_name, format_type, captain1_id, captain2_id,
-                admin_id, first_ban, decider_side, scheduled_time.isoformat()
-            ))
-            await db.commit()
-    
-    async def get_scheduled_sessions(self, guild_id: int) -> List[Dict]:
-        """Get scheduled sessions for a guild."""
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute(
-                "SELECT * FROM scheduled_sessions WHERE guild_id = ? AND created = 0 ORDER BY scheduled_time",
-                (guild_id,)
-            ) as cursor:
-                rows = await cursor.fetchall()
-                return [dict(row) for row in rows]
-    
-    async def cancel_scheduled_session(self, session_id: int):
-        """Cancel a scheduled session."""
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            await db.execute("DELETE FROM scheduled_sessions WHERE id = ?", (session_id,))
-            await db.commit()
-    
-    async def mark_scheduled_created(self, session_id: int):
-        """Mark a scheduled session as created."""
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            await db.execute(
-                "UPDATE scheduled_sessions SET created = 1 WHERE id = ?",
-                (session_id,)
-            )
-            await db.commit()
-    
     # =========================================================================
     # SESSION MANAGEMENT
     # =========================================================================
@@ -3219,7 +3035,8 @@ class MapBanCog(commands.Cog):
     async def create_session(self, guild: discord.Guild, matchup_name: str,
                             format_type: str, captain1: discord.Member,
                             captain2: discord.Member, admin: discord.Member,
-                            first_ban: str = "random", decider_side: str = "opponent") -> Optional[str]:
+                            first_ban: str = "random", decider_side: str = "opponent",
+                            team1_name: str = None, team2_name: str = None) -> Optional[str]:
         """Create a new map ban session."""
         settings = await self.get_guild_settings(guild.id)
         
@@ -3280,7 +3097,9 @@ class MapBanCog(commands.Cog):
             "used_protects": {},
             "used_bans": {},
             "current_agent_phase": None,
-            "current_agent_map_index": 0
+            "current_agent_map_index": 0,
+            "team1_name": team1_name,
+            "team2_name": team2_name
         }
         
         # Create private threads
@@ -3317,10 +3136,17 @@ class MapBanCog(commands.Cog):
                         description=f"**{captain1.display_name}** vs **{captain2.display_name}**",
                         color=COLOR_PRIMARY
                     )
-                    await alert_channel.send(
-                        embed=alert_embed,
-                        view=ObserveSessionView(self, session_id, thread1.id, thread2.id)
+                    alert_embed.add_field(
+                        name=f"{captain1.display_name} Thread",
+                        value=f"[Jump to Thread]({thread1.jump_url})",
+                        inline=True
                     )
+                    alert_embed.add_field(
+                        name=f"{captain2.display_name} Thread",
+                        value=f"[Jump to Thread]({thread2.jump_url})",
+                        inline=True
+                    )
+                    await alert_channel.send(embed=alert_embed)
                 except Exception:
                     pass
 
@@ -3331,13 +3157,13 @@ class MapBanCog(commands.Cog):
         msg1 = await thread1.send(
             content=f"{captain1.mention} Ready up!",
             embed=embed1,
-            view=ReadyUpView(self, session_id, captain1.id)
+            view=ReadyUpView(session_id)
         )
-        
+
         msg2 = await thread2.send(
             content=f"{captain2.mention} Ready up!",
             embed=embed2,
-            view=ReadyUpView(self, session_id, captain2.id)
+            view=ReadyUpView(session_id)
         )
         
         session["captain1_msg_id"] = msg1.id
@@ -3358,19 +3184,7 @@ class MapBanCog(commands.Cog):
                     pass
         
         session["spectator_messages"] = spectator_messages
-        
-        # Send admin log embed
-        admin_log_id = settings.get("admin_log_channel_id")
-        if admin_log_id:
-            admin_log = guild.get_channel_or_thread(admin_log_id)
-            if admin_log:
-                try:
-                    admin_embed = build_admin_log_embed(session, thread1.jump_url, thread2.jump_url)
-                    admin_msg = await admin_log.send(embed=admin_embed)
-                    session["admin_log_msg_id"] = admin_msg.id
-                except Exception:
-                    pass
-        
+
         # Save session
         await self.save_session(session)
         self.active_sessions[session_id] = session
@@ -3413,87 +3227,30 @@ class MapBanCog(commands.Cog):
         # Delete from database
         await self.delete_session(session_id)
     
-    async def substitute_captain(self, guild: discord.Guild, session_id: str,
-                                  captain_num: int, new_captain_id: int) -> bool:
-        """Substitute a captain in an active session."""
-        session = self.active_sessions.get(session_id)
-        if not session:
-            session = await self.get_session(session_id)
-            if not session:
-                return False
-        
-        new_captain = guild.get_member(new_captain_id)
-        if not new_captain:
-            return False
-        
-        # Update thread membership
-        if captain_num == 1:
-            old_captain_id = session["captain1_id"]
-            thread_id = session.get("thread1_id")
-            session["captain1_id"] = new_captain_id
-            session["captain1_name"] = new_captain.display_name
-            
-            # Update current turn if it was the old captain
-            if session["current_turn"] == old_captain_id:
-                session["current_turn"] = new_captain_id
-        else:
-            old_captain_id = session["captain2_id"]
-            thread_id = session.get("thread2_id")
-            session["captain2_id"] = new_captain_id
-            session["captain2_name"] = new_captain.display_name
-            
-            if session["current_turn"] == old_captain_id:
-                session["current_turn"] = new_captain_id
-        
-        # Update thread
-        if thread_id:
-            thread = await self._get_thread(guild, thread_id)
-            if thread:
-                # Remove old captain
-                old_captain = guild.get_member(old_captain_id)
-                if old_captain:
-                    try:
-                        await thread.remove_user(old_captain)
-                    except Exception:
-                        pass
-                
-                # Add new captain
-                await thread.add_user(new_captain)
-                
-                # Send notification
-                await thread.send(f"🔄 {new_captain.mention} has been substituted in as captain!")
-        
-        # Save and update
-        await self.save_session(session)
-        self.active_sessions[session_id] = session
-        
-        # Update all embeds
-        await self.update_all_embeds(guild, session)
-        
-        return True
-    
     # =========================================================================
     # GAME LOGIC HANDLERS
     # =========================================================================
     
     async def handle_ready(self, interaction: discord.Interaction, session_id: str, captain_id: int):
         """Handle a captain readying up."""
-        try:
-            await interaction.response.defer()
-        except Exception:
-            pass  # May already be responded to
+        print(f"[MapBan] handle_ready START: session={session_id}, captain={captain_id}, "
+              f"is_done={interaction.response.is_done()}")
+
         async with self.get_session_lock(session_id):
             session = self.active_sessions.get(session_id)
             if not session:
                 session = await self.get_session(session_id)
                 if not session:
+                    print(f"[MapBan] handle_ready: session {session_id} not found")
                     return
 
             # Mark ready
             if captain_id == session["captain1_id"]:
                 session["captain1_ready"] = 1
+                is_captain1 = True
             else:
                 session["captain2_ready"] = 1
+                is_captain1 = False
 
             # Check if both ready
             if session["captain1_ready"] and session["captain2_ready"]:
@@ -3505,7 +3262,63 @@ class MapBanCog(commands.Cog):
             self.active_sessions[session_id] = session
             await self.save_session(session)
 
-        # Update embeds (outside lock to avoid holding it too long)
+        print(f"[MapBan] handle_ready: state updated - phase={session.get('current_phase')}, "
+              f"c1_ready={session.get('captain1_ready')}, c2_ready={session.get('captain2_ready')}")
+
+        # Build embed for the captain who clicked, and respond immediately
+        # using edit_message (type 7) instead of defer+edit to guarantee the
+        # Discord client displays the update.
+        settings = await self.get_guild_settings(interaction.guild.id)
+        turn_timeout = settings.get("turn_timeout", DEFAULT_TURN_TIMEOUT)
+        time_remaining = None
+        turn_start = session.get("turn_start_time")
+        if turn_start:
+            if isinstance(turn_start, str):
+                turn_start_dt = datetime.fromisoformat(turn_start.replace("Z", "+00:00"))
+            else:
+                turn_start_dt = turn_start
+            elapsed = (datetime.now(timezone.utc) - turn_start_dt).total_seconds()
+            time_remaining = max(0, int(turn_timeout - elapsed))
+
+        embed = build_captain_embed(session, is_captain1=is_captain1, time_remaining=time_remaining)
+
+        # Determine the view for the clicked captain
+        phase = session.get("current_phase", "ready")
+        cap_id = session["captain1_id"] if is_captain1 else session["captain2_id"]
+        actions = json.loads(session["actions"]) if isinstance(session["actions"], str) else session["actions"]
+        map_pool = json.loads(session["map_pool"]) if isinstance(session["map_pool"], str) else session["map_pool"]
+        remaining = get_remaining_maps(map_pool, actions)
+
+        view = None
+        if phase == "ready":
+            cap_ready = session.get("captain1_ready") if is_captain1 else session.get("captain2_ready")
+            if not cap_ready:
+                view = ReadyUpView(session_id)
+        elif phase in ("banning", "picking") and session["current_turn"] == cap_id:
+            action_type = "ban" if phase == "banning" else "pick"
+            view = MapSelectView(self, session_id, cap_id, remaining, action_type)
+        elif phase == "side_select" and session["current_turn"] == cap_id:
+            view = SideSelectView(session_id)
+        elif phase in ("agent_protect", "agent_ban") and session["current_turn"] == cap_id:
+            action_type = "protect" if phase == "agent_protect" else "ban"
+            view = AgentSelectView(session_id, action_type)
+
+        # Respond to the interaction by directly editing the clicked captain's message
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.edit_message(embed=embed, view=view)
+                print(f"[MapBan] handle_ready: edit_message SUCCESS for captain {captain_id}")
+            else:
+                # Interaction already responded to (possibly by orphaned view) - use followup
+                print(f"[MapBan] handle_ready: interaction already done, trying edit_original_response")
+                await interaction.edit_original_response(embed=embed, view=view)
+                print(f"[MapBan] handle_ready: edit_original_response SUCCESS for captain {captain_id}")
+        except Exception as e:
+            print(f"[MapBan] handle_ready: FAILED to edit clicked captain's message: {e}\n"
+                  f"{traceback.format_exc()}")
+
+        # Update both captain embeds and spectators via msg.edit()
+        # (redundant for the clicked captain but serves as backup)
         await self.update_all_embeds(interaction.guild, session)
     
     async def handle_map_selection(self, interaction: discord.Interaction, session_id: str,
@@ -3807,99 +3620,87 @@ class MapBanCog(commands.Cog):
     
     async def _advance_bo3(self, guild: discord.Guild, session: Dict,
                           actions: List[Dict], remaining: List[str], side_selections: Dict):
-        """Advance a Bo3 session."""
+        """Advance a Bo3 session.
+
+        Flow: Ban1 → Ban2 → Pick1 → Side1 → Pick2 → Side2 → Ban... → Decider Side → Agents → Complete
+
+        Uses explicit turn calculation from action history and first_ban setting
+        instead of alternating from current_turn (which breaks when side selects
+        interrupt the pick/ban flow).
+        """
         picks = [a for a in actions if a["type"] == "pick"]
         bans = [a for a in actions if a["type"] == "ban"]
-        
-        # Phase logic:
-        # 0-1 bans: banning phase 1
-        # 2 bans, 0-1 picks: picking phase
-        # 2 picks: banning phase 2 until 1 remains
-        # 1 remaining: side selection for all 3 maps
-        
+
+        # Determine captain order from first_ban setting
+        if session["first_ban"] == "captain1":
+            first_captain = session["captain1_id"]
+            second_captain = session["captain2_id"]
+        else:
+            first_captain = session["captain2_id"]
+            second_captain = session["captain1_id"]
+
+        # --- Priority 1: Check if a just-picked map needs side selection ---
+        # This handles the immediate side-select-after-pick flow
+        for pick_action in picks:
+            if pick_action["map"] not in side_selections:
+                # This picked map needs side selection - opponent of picker chooses
+                picker_id = pick_action["captain_id"]
+                session["current_phase"] = "side_select"
+                session["current_side_select_map"] = pick_action["map"]
+                session["current_turn"] = session["captain1_id"] if picker_id == session["captain2_id"] else session["captain2_id"]
+                return
+
+        # --- Priority 2: Initial bans (need 2) ---
         if len(bans) < 2:
-            # Still in initial ban phase
             session["current_phase"] = "banning"
-            session["current_turn"] = session["captain1_id"] if session["current_turn"] == session["captain2_id"] else session["captain2_id"]
+            # Ban 0 → first_captain, Ban 1 → second_captain
+            session["current_turn"] = first_captain if len(bans) == 0 else second_captain
             return
-        
+
+        # --- Priority 3: Picks (need 2) ---
         if len(picks) < 2:
-            # Move to or continue picking phase
             session["current_phase"] = "picking"
-            if len(picks) == 0:
-                # First pick goes to first banner
-                session["current_turn"] = session["captain1_id"] if session["first_ban"] == "captain1" else session["captain2_id"]
-            else:
-                # Alternate
-                session["current_turn"] = session["captain1_id"] if session["current_turn"] == session["captain2_id"] else session["captain2_id"]
+            # Pick 0 → first_captain, Pick 1 → second_captain
+            session["current_turn"] = first_captain if len(picks) == 0 else second_captain
             return
-        
+
+        # --- Priority 4: Continue banning until 1 map remains ---
         if len(remaining) > 1:
-            # Continue banning until 1 remains
             session["current_phase"] = "banning"
-            session["current_turn"] = session["captain1_id"] if session["current_turn"] == session["captain2_id"] else session["captain2_id"]
+            # Post-pick bans: calculate turn from ban count after initial 2
+            post_pick_bans = len(bans) - 2
+            # Even index → first_captain, odd → second_captain
+            session["current_turn"] = first_captain if post_pick_bans % 2 == 0 else second_captain
             return
-        
-        # All bans/picks done - now side selection
-        # Order: Map 1 (picker's opponent chooses), Map 2 (picker's opponent chooses), Decider
-        picked_maps = [a["map"] for a in picks]
-        decider_map = remaining[0]
-        
-        # Determine which maps need side selection
-        maps_needing_sides = []
-        for action in picks:
-            if action["map"] not in side_selections:
-                maps_needing_sides.append(action)
-        
-        if decider_map not in side_selections:
-            maps_needing_sides.append({"map": decider_map, "type": "decider"})
-        
-        if not maps_needing_sides:
-            # All sides selected - check if agent selection is needed
-            agent_pool = json.loads(session.get("agent_pool", "[]")) if isinstance(session.get("agent_pool"), str) else session.get("agent_pool", [])
-            if agent_pool:
-                # Move to agent protect phase
-                maps_to_play = self._get_maps_to_play(session)
-                session["current_phase"] = "agent_protect"
-                session["current_agent_map_index"] = 0
-                # Side chooser of first map goes first
-                first_map = maps_to_play[0] if maps_to_play else ""
-                side_chooser = side_selections.get(first_map, {}).get("chosen_by", session["captain1_id"])
-                session["current_turn"] = side_chooser
-                session["turn_start_time"] = datetime.now(timezone.utc).isoformat()
-                session["reminder_sent"] = 0
-            else:
-                # No agents configured - complete
-                session["current_phase"] = "complete"
-                session["status"] = "complete"
-                await self.complete_session(guild, session)
-            return
-        
-        # Get next map needing side selection
-        next_map = maps_needing_sides[0]
-        session["current_phase"] = "side_select"
-        session["current_side_select_map"] = next_map["map"]
-        
-        if next_map.get("type") == "decider":
-            # Decider - based on decider_side setting
-            # Get the actual last ban, not just the last action
+
+        # --- Priority 5: Decider side selection ---
+        decider_map = remaining[0] if remaining else None
+        if decider_map and decider_map not in side_selections:
+            session["current_phase"] = "side_select"
+            session["current_side_select_map"] = decider_map
+            # Decider side based on decider_side setting
             last_ban = bans[-1] if bans else None
             if last_ban and session["decider_side"] == "opponent":
                 session["current_turn"] = session["captain1_id"] if last_ban["captain_id"] == session["captain2_id"] else session["captain2_id"]
             else:
-                session["current_turn"] = last_ban["captain_id"] if last_ban else session["captain1_id"]
+                session["current_turn"] = last_ban["captain_id"] if last_ban else first_captain
+            return
+
+        # --- Priority 6: Agent phases or complete ---
+        agent_pool = json.loads(session.get("agent_pool", "[]")) if isinstance(session.get("agent_pool"), str) else session.get("agent_pool", [])
+        if agent_pool:
+            maps_to_play = self._get_maps_to_play(session)
+            session["current_phase"] = "agent_protect"
+            session["current_agent_map_index"] = 0
+            first_map = maps_to_play[0] if maps_to_play else ""
+            side_chooser = side_selections.get(first_map, {}).get("chosen_by", session["captain1_id"])
+            session["current_turn"] = side_chooser
+            session["turn_start_time"] = datetime.now(timezone.utc).isoformat()
+            session["reminder_sent"] = 0
         else:
-            # Picked map - opponent of picker chooses side
-            picker_id = next_map.get("captain_id")
-            if picker_id:
-                session["current_turn"] = session["captain1_id"] if picker_id == session["captain2_id"] else session["captain2_id"]
-            else:
-                # Find who picked this map
-                for action in picks:
-                    if action["map"] == next_map["map"]:
-                        picker_id = action["captain_id"]
-                        session["current_turn"] = session["captain1_id"] if picker_id == session["captain2_id"] else session["captain2_id"]
-                        break
+            session["current_phase"] = "complete"
+            session["status"] = "complete"
+            await self.complete_session(guild, session)
     
     async def complete_session(self, guild: discord.Guild, session: Dict):
         """Complete a session and send final results."""
@@ -3918,7 +3719,7 @@ class MapBanCog(commands.Cog):
         # Send to spectator channels
         settings = await self.get_guild_settings(guild.id)
         spectator_channels = json.loads(settings.get("spectator_channels", "[]"))
-        
+
         for channel_id in spectator_channels:
             channel = guild.get_channel_or_thread(channel_id)
             if channel:
@@ -3931,7 +3732,18 @@ class MapBanCog(commands.Cog):
                         await channel.send(embed=final_embed)
                 except Exception as e:
                     print(f"Failed to send to spectator channel: {e}")
-        
+
+        # Delete old spectator messages (redundant with final result embed)
+        spectator_messages = json.loads(session.get("spectator_messages", "[]")) if isinstance(session.get("spectator_messages", "[]"), str) else session.get("spectator_messages", [])
+        for spec in spectator_messages:
+            try:
+                channel = guild.get_channel_or_thread(spec["channel_id"])
+                if channel:
+                    msg = await channel.fetch_message(spec["message_id"])
+                    await msg.delete()
+            except Exception:
+                pass
+
         # Send to admin log
         admin_log_id = settings.get("admin_log_channel_id")
         if admin_log_id:
@@ -3987,6 +3799,7 @@ class MapBanCog(commands.Cog):
     async def update_all_embeds(self, guild: discord.Guild, session: Dict):
         """Update all embeds for a session."""
         session_id = session["session_id"]
+        print(f"[MapBan] update_all_embeds START: session={session_id}, phase={session.get('current_phase')}")
 
         # Get settings for timeout
         settings = await self.get_guild_settings(guild.id)
@@ -4007,73 +3820,85 @@ class MapBanCog(commands.Cog):
         map_pool = json.loads(session["map_pool"]) if isinstance(session["map_pool"], str) else session["map_pool"]
         remaining = get_remaining_maps(map_pool, actions)
 
-        # Update captain 1 embed
+        # Build ALL embeds and views upfront before any async edits
+        # to prevent race conditions where another coroutine modifies session
+        # state between building embed1 and embed2
+        embed1 = build_captain_embed(session, is_captain1=True, time_remaining=time_remaining)
+        embed2 = build_captain_embed(session, is_captain1=False, time_remaining=time_remaining)
+
+        view1 = None
+        if phase == "ready" and not session.get("captain1_ready"):
+            view1 = ReadyUpView(session_id)
+        elif phase in ("banning", "picking") and session["current_turn"] == session["captain1_id"]:
+            action_type = "ban" if phase == "banning" else "pick"
+            view1 = MapSelectView(self, session_id, session["captain1_id"], remaining, action_type)
+        elif phase == "side_select" and session["current_turn"] == session["captain1_id"]:
+            view1 = SideSelectView(session_id)
+        elif phase in ("agent_protect", "agent_ban") and session["current_turn"] == session["captain1_id"]:
+            action_type = "protect" if phase == "agent_protect" else "ban"
+            view1 = AgentSelectView(session_id, action_type)
+
+        view2 = None
+        if phase == "ready" and not session.get("captain2_ready"):
+            view2 = ReadyUpView(session_id)
+        elif phase in ("banning", "picking") and session["current_turn"] == session["captain2_id"]:
+            action_type = "ban" if phase == "banning" else "pick"
+            view2 = MapSelectView(self, session_id, session["captain2_id"], remaining, action_type)
+        elif phase == "side_select" and session["current_turn"] == session["captain2_id"]:
+            view2 = SideSelectView(session_id)
+        elif phase in ("agent_protect", "agent_ban") and session["current_turn"] == session["captain2_id"]:
+            action_type = "protect" if phase == "agent_protect" else "ban"
+            view2 = AgentSelectView(session_id, action_type)
+
+        spec_embed = None
+        if phase != "complete":
+            spec_embed = build_spectator_embed(session)
+
+        # Now do all async edits with pre-built embeds/views
         thread1 = await self._get_thread(guild, session.get("thread1_id"))
         if thread1:
             try:
                 msg1 = await thread1.fetch_message(session.get("captain1_msg_id"))
-                embed1 = build_captain_embed(session, is_captain1=True, time_remaining=time_remaining)
-
-                # Determine view
-                view1 = None
-                if phase == "ready" and not session.get("captain1_ready"):
-                    view1 = ReadyUpView(self, session_id, session["captain1_id"])
-                elif phase in ("banning", "picking") and session["current_turn"] == session["captain1_id"]:
-                    action_type = "ban" if phase == "banning" else "pick"
-                    view1 = MapSelectView(self, session_id, session["captain1_id"], remaining, action_type)
-                elif phase == "side_select" and session["current_turn"] == session["captain1_id"]:
-                    current_map = session.get("current_side_select_map", remaining[0] if remaining else "")
-                    view1 = SideSelectView(self, session_id, session["captain1_id"], current_map)
-                elif phase in ("agent_protect", "agent_ban") and session["current_turn"] == session["captain1_id"]:
-                    action_type = "protect" if phase == "agent_protect" else "ban"
-                    available_agents = self.get_available_agents(session, session["captain1_id"], action_type)
-                    view1 = AgentSelectView(self, session_id, session["captain1_id"], action_type, available_agents)
-
                 await msg1.edit(embed=embed1, view=view1)
+                print(f"[MapBan] update_all_embeds: captain 1 msg.edit SUCCESS "
+                      f"(thread={session.get('thread1_id')}, msg={session.get('captain1_msg_id')}, "
+                      f"view={'None' if view1 is None else type(view1).__name__})")
             except Exception as e:
-                print(f"Failed to update captain 1 embed: {e}")
+                print(f"[MapBan] update_all_embeds: captain 1 FAILED "
+                      f"(thread={session.get('thread1_id')}, msg={session.get('captain1_msg_id')}): "
+                      f"{e}\n{traceback.format_exc()}")
         else:
-            print(f"Could not find thread for captain 1 (thread_id={session.get('thread1_id')})")
+            print(f"[MapBan] update_all_embeds: could not find thread for captain 1 "
+                  f"(thread_id={session.get('thread1_id')})")
 
-        # Update captain 2 embed
         thread2 = await self._get_thread(guild, session.get("thread2_id"))
         if thread2:
             try:
                 msg2 = await thread2.fetch_message(session.get("captain2_msg_id"))
-                embed2 = build_captain_embed(session, is_captain1=False, time_remaining=time_remaining)
-
-                view2 = None
-                if phase == "ready" and not session.get("captain2_ready"):
-                    view2 = ReadyUpView(self, session_id, session["captain2_id"])
-                elif phase in ("banning", "picking") and session["current_turn"] == session["captain2_id"]:
-                    action_type = "ban" if phase == "banning" else "pick"
-                    view2 = MapSelectView(self, session_id, session["captain2_id"], remaining, action_type)
-                elif phase == "side_select" and session["current_turn"] == session["captain2_id"]:
-                    current_map = session.get("current_side_select_map", remaining[0] if remaining else "")
-                    view2 = SideSelectView(self, session_id, session["captain2_id"], current_map)
-                elif phase in ("agent_protect", "agent_ban") and session["current_turn"] == session["captain2_id"]:
-                    action_type = "protect" if phase == "agent_protect" else "ban"
-                    available_agents = self.get_available_agents(session, session["captain2_id"], action_type)
-                    view2 = AgentSelectView(self, session_id, session["captain2_id"], action_type, available_agents)
-
                 await msg2.edit(embed=embed2, view=view2)
+                print(f"[MapBan] update_all_embeds: captain 2 msg.edit SUCCESS "
+                      f"(thread={session.get('thread2_id')}, msg={session.get('captain2_msg_id')}, "
+                      f"view={'None' if view2 is None else type(view2).__name__})")
             except Exception as e:
-                print(f"Failed to update captain 2 embed: {e}")
+                print(f"[MapBan] update_all_embeds: captain 2 FAILED "
+                      f"(thread={session.get('thread2_id')}, msg={session.get('captain2_msg_id')}): "
+                      f"{e}\n{traceback.format_exc()}")
         else:
-            print(f"Could not find thread for captain 2 (thread_id={session.get('thread2_id')})")
-        
-        # Update spectator embeds
-        spectator_messages = json.loads(session.get("spectator_messages", "[]")) if isinstance(session.get("spectator_messages", "[]"), str) else session.get("spectator_messages", [])
-        spec_embed = build_spectator_embed(session)
-        
-        for spec in spectator_messages:
-            channel = guild.get_channel_or_thread(spec["channel_id"])
-            if channel:
-                try:
-                    msg = await channel.fetch_message(spec["message_id"])
-                    await msg.edit(embed=spec_embed)
-                except Exception:
-                    pass
+            print(f"[MapBan] update_all_embeds: could not find thread for captain 2 "
+                  f"(thread_id={session.get('thread2_id')})")
+
+        # Update spectator embeds (skip if complete - messages already deleted)
+        if spec_embed is not None:
+            spectator_messages = json.loads(session.get("spectator_messages", "[]")) if isinstance(session.get("spectator_messages", "[]"), str) else session.get("spectator_messages", [])
+
+            for spec in spectator_messages:
+                channel = guild.get_channel_or_thread(spec["channel_id"])
+                if channel:
+                    try:
+                        msg = await channel.fetch_message(spec["message_id"])
+                        await msg.edit(embed=spec_embed)
+                    except Exception:
+                        pass
     
     # =========================================================================
     # BACKGROUND TASKS
@@ -4363,59 +4188,10 @@ class MapBanCog(commands.Cog):
                 (cutoff,)
             )
             
-            # Clean up old scheduled sessions that were created
-            await db.execute(
-                "DELETE FROM scheduled_sessions WHERE created = 1"
-            )
-            
             await db.commit()
-    
-    @tasks.loop(minutes=1)
-    async def scheduled_session_task(self):
-        """Check for scheduled sessions that need to be created."""
-        now = datetime.now(timezone.utc)
-        five_min_later = now + timedelta(minutes=5)
-        
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute(
-                "SELECT * FROM scheduled_sessions WHERE created = 0 AND scheduled_time <= ?",
-                (five_min_later.isoformat(),)
-            ) as cursor:
-                sessions = await cursor.fetchall()
-                
-                for row in sessions:
-                    scheduled = dict(row)
-                    
-                    guild = self.bot.get_guild(scheduled["guild_id"])
-                    if not guild:
-                        continue
-                    
-                    captain1 = guild.get_member(scheduled["captain1_id"])
-                    captain2 = guild.get_member(scheduled["captain2_id"])
-                    admin = guild.get_member(scheduled["admin_id"])
-                    
-                    if not all([captain1, captain2, admin]):
-                        continue
-                    
-                    # Create the session
-                    session_id = await self.create_session(
-                        guild=guild,
-                        matchup_name=scheduled["matchup_name"],
-                        format_type=scheduled["format"],
-                        captain1=captain1,
-                        captain2=captain2,
-                        admin=admin,
-                        first_ban=scheduled.get("first_ban", "random"),
-                        decider_side=scheduled.get("decider_side", "opponent")
-                    )
-                    
-                    if session_id:
-                        await self.mark_scheduled_created(scheduled["id"])
     
     @timer_task.before_loop
     @cleanup_task.before_loop
-    @scheduled_session_task.before_loop
     async def before_tasks(self):
         """Wait until bot is ready before starting tasks."""
         await self.bot.wait_until_ready()
@@ -4459,7 +4235,9 @@ class MapBanCog(commands.Cog):
         captain_2="Second captain",
         format="Bo1 or Bo3",
         first_ban="Who bans first (random by default)",
-        decider_side="Who chooses side on decider map"
+        decider_side="Who chooses side on decider map",
+        team_name_1="Optional team name for captain 1 (max 20 chars, shown on summary image)",
+        team_name_2="Optional team name for captain 2 (max 20 chars, shown on summary image)"
     )
     @app_commands.choices(
         format=[
@@ -4484,13 +4262,21 @@ class MapBanCog(commands.Cog):
         captain_2: discord.Member,
         format: app_commands.Choice[str],
         first_ban: app_commands.Choice[str] = None,
-        decider_side: app_commands.Choice[str] = None
+        decider_side: app_commands.Choice[str] = None,
+        team_name_1: str = None,
+        team_name_2: str = None
     ):
         """Start a map ban session."""
         if not await self.is_mapban_admin(interaction):
             await interaction.response.send_message("❌ You don't have permission.", ephemeral=True)
             return
         
+        # Truncate team names to 20 chars
+        if team_name_1:
+            team_name_1 = team_name_1[:20]
+        if team_name_2:
+            team_name_2 = team_name_2[:20]
+
         # Validate
         if captain_1 == captain_2:
             await interaction.response.send_message("❌ Captains must be different users.", ephemeral=True)
@@ -4545,7 +4331,9 @@ class MapBanCog(commands.Cog):
             captain2=captain_2,
             admin=interaction.user,
             first_ban=first_ban_value,
-            decider_side=decider_value
+            decider_side=decider_value,
+            team1_name=team_name_1,
+            team2_name=team_name_2
         )
         
         if session_id:

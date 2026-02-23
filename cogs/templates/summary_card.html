@@ -73,30 +73,12 @@
         /* Title */
         .title {{
             text-align: center;
-            font-size: 26px;
+            font-size: 17px;
             font-weight: bold;
             letter-spacing: 2px;
             text-shadow: 0 2px 10px rgba(0,0,0,0.6);
             margin-bottom: 2px;
         }}
-
-        /* Player names row */
-        .players-row {{
-            display: flex;
-            justify-content: space-between;
-            padding: 0 20px;
-            margin-bottom: 8px;
-        }}
-
-        .player-name {{
-            font-size: 20px;
-            font-weight: bold;
-            letter-spacing: 2px;
-            text-shadow: 0 2px 8px rgba(0,0,0,0.5);
-        }}
-
-        .player-name.c1 {{ color: #ED4245; }}
-        .player-name.c2 {{ color: #00D4AA; }}
 
         /* === MAIN 2-COLUMN LAYOUT: bans left, maps right === */
         .main-area {{
@@ -334,11 +316,6 @@
 
     <div class="content">
         <div class="title">{title}</div>
-
-        <div class="players-row">
-            <div class="player-name c1">{captain1_name}</div>
-            <div class="player-name c2">{captain2_name}</div>
-        </div>
 
         <div class="main-area">
             <!-- LEFT: all bans in a grid -->

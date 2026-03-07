@@ -78,6 +78,17 @@
         .team-name.winner {{ color: #43b581; }}
         .team-name.loser {{ color: #f04747; }}
 
+        .team-score {{
+            font-size: 20px;
+            font-weight: bold;
+            margin-left: 10px;
+            padding: 0 8px;
+            border-radius: 4px;
+        }}
+
+        .team-header.winner .team-score {{ color: #43b581; }}
+        .team-header.loser .team-score {{ color: #f04747; }}
+
         .team-result {{
             font-size: 13px;
             padding: 4px 12px;
@@ -192,7 +203,7 @@
 
     <div class="team-section">
         <div class="team-header winner">
-            <span class="team-name winner">{winner_team_name}</span>
+            <span class="team-name winner">{winner_team_name}{winner_score_html}</span>
             <span class="team-result winner">WINNER</span>
         </div>
         <div class="column-headers">
@@ -211,7 +222,7 @@
 
     <div class="team-section">
         <div class="team-header loser">
-            <span class="team-name loser">{loser_team_name}</span>
+            <span class="team-name loser">{loser_team_name}{loser_score_html}</span>
             <span class="team-result loser">LOSER</span>
         </div>
         <div class="column-headers">

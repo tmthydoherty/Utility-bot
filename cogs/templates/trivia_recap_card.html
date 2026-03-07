@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Luckiest+Guy&family=Paytone+One&display=swap');
+
+  :root {{
+    --bg-color: #2b2b2b;
+    --accent-blue: #00a8cc;
+    --accent-orange: #ff5e00;
+    --accent-dark-orange: #b34200;
+    --text-white: #ffffff;
+    --podium-bg: #3d3d3d;
+  }}
+
+  body {{
+    margin: 0;
+    padding: 0;
+    width: 1080px;
+    height: {dynamic_height}px;
+    background-color: var(--bg-color);
+    font-family: 'Paytone One', sans-serif;
+    color: var(--text-white);
+    position: relative;
+    overflow: hidden;
+  }}
+
+  /* Header Section */
+  .header-banner {{
+    background-color: var(--accent-blue);
+    padding: 50px 40px 60px 40px;
+    position: relative;
+    clip-path: polygon(0 0, 100% 0, 100% 90%, 0 100%);
+  }}
+
+  .header-title {{
+    font-family: 'Luckiest Guy', cursive;
+    font-size: 130px;
+    color: var(--text-white);
+    line-height: 0.95;
+    text-transform: uppercase;
+    text-shadow: 6px 6px 0px rgba(0,0,0,0.2);
+    display: flex;
+    flex-direction: column;
+    margin-top: -10px;
+  }}
+
+  .header-title span:nth-child(2) {{
+    align-self: flex-end;
+    margin-right: 210px;
+  }}
+
+  .lightbulb {{
+    position: absolute;
+    right: 40px;
+    top: 20px;
+    width: 160px;
+    height: auto;
+    filter: drop-shadow(4px 4px 0px rgba(0,0,0,0.2));
+  }}
+
+  /* Question Block */
+  .questions-container {{
+    margin-top: -40px;
+    padding: 0 50px;
+    position: relative;
+    z-index: 10;
+  }}
+
+  .q-badge {{
+    background-color: #1a1a1a;
+    color: #fff;
+    font-family: 'Luckiest Guy', cursive;
+    font-size: 40px;
+    padding: 10px 30px;
+    display: inline-block;
+    transform: rotate(-4deg);
+    border-radius: 8px;
+    box-shadow: 4px 4px 0px rgba(0,0,0,0.3);
+    margin-bottom: -15px;
+    position: relative;
+    z-index: 11;
+  }}
+
+  .q-pair {{
+    margin-bottom: 20px;
+  }}
+
+  .q-box {{
+    background-color: var(--accent-orange);
+    padding: 20px 30px;
+    border-radius: 12px 12px 0 0;
+    font-size: 32px;
+    text-align: center;
+    box-shadow: 0 10px 20px rgba(0,0,0,0.2);
+  }}
+
+  .a-box {{
+    background-color: var(--accent-dark-orange);
+    padding: 15px 30px;
+    border-radius: 0 0 12px 12px;
+    font-size: 32px;
+    text-align: center;
+    box-shadow: 0 10px 20px rgba(0,0,0,0.2);
+  }}
+
+  .don-box {{
+    background-color: var(--accent-blue);
+  }}
+
+  .don-a-box {{
+    background-color: #00809b; /* darker blue for answer */
+  }}
+
+  /* Main Grid */
+  .grid-container {{
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 30px;
+    padding: 50px;
+  }}
+
+  .card {{
+    background-color: var(--podium-bg);
+    border-radius: 15px;
+    padding: 30px;
+    position: relative;
+    box-shadow: 0 8px 15px rgba(0,0,0,0.3);
+  }}
+
+  .card.blue {{
+    background-color: var(--accent-blue);
+  }}
+
+  .card-title {{
+    font-family: 'Luckiest Guy', cursive;
+    font-size: 45px;
+    background-color: #fff;
+    color: #1a1a1a;
+    display: inline-block;
+    padding: 8px 20px;
+    border-radius: 8px;
+    margin-top: -55px;
+    margin-bottom: 20px;
+    box-shadow: 4px 4px 0px rgba(0,0,0,0.2);
+    text-transform: uppercase;
+  }}
+  
+  .card.blue .card-title {{
+    color: var(--accent-blue);
+  }}
+  
+  .card-title.orange {{
+    color: var(--accent-orange);
+  }}
+
+  .podium-list {{
+    font-size: 32px;
+    line-height: 1.6;
+  }}
+
+  .podium-list .rank {{
+    font-weight: bold;
+    margin-right: 10px;
+  }}
+
+  /* Single Stat Cards */
+  .stat-grid {{
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    margin-top: 10px;
+  }}
+
+  .stat-badge {{
+    background-color: var(--podium-bg);
+    border-radius: 12px;
+    padding: 20px;
+    text-align: center;
+    box-shadow: 0 6px 12px rgba(0,0,0,0.2);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }}
+
+  .stat-badge-title {{
+    font-family: 'Luckiest Guy', cursive;
+    font-size: 32px;
+    color: var(--accent-blue);
+    margin-bottom: 10px;
+    text-transform: uppercase;
+    line-height: 1.1;
+  }}
+
+  .stat-badge-title.orange {{
+    color: var(--accent-orange);
+  }}
+
+  .stat-badge-value {{
+    font-size: 28px;
+    background-color: #1a1a1a;
+    padding: 8px 15px;
+    border-radius: 8px;
+    display: inline-block;
+    word-break: break-word;
+  }}
+
+  /* All-Time Stats Section (Bottom Quarter) */
+  .all-time-section {{
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    height: 640px;
+    background-color: #1f1f1f;
+    clip-path: polygon(0 8%, 100% 0, 100% 100%, 0 100%);
+    padding: 70px 50px 70px 50px;
+    box-sizing: border-box;
+  }}
+
+  .all-time-header {{
+    font-family: 'Luckiest Guy', cursive;
+    font-size: 60px;
+    text-align: center;
+    color: #ffd700;
+    margin-bottom: 30px;
+    text-shadow: 4px 4px 0px rgba(0,0,0,0.4);
+    letter-spacing: 2px;
+  }}
+
+  .all-time-grid {{
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 20px;
+  }}
+  
+  .all-time-col-large {{
+    grid-column: span 3;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    margin-bottom: 20px;
+  }}
+
+  .at-box {{
+    background-color: rgba(255, 255, 255, 0.05);
+    border-radius: 12px;
+    padding: 15px 20px;
+    border-left: 6px solid #ffd700;
+  }}
+
+  .at-box.blue {{ border-left-color: var(--accent-blue); }}
+  .at-box.orange {{ border-left-color: var(--accent-orange); }}
+
+  .at-title {{
+    font-size: 24px;
+    text-transform: uppercase;
+    margin-bottom: 10px;
+    color: #ccc;
+  }}
+
+  .at-list {{
+    font-size: 24px;
+    line-height: 1.5;
+  }}
+
+  .at-list .at-rank {{
+    color: #888;
+    margin-right: 8px;
+  }}
+
+  .at-list .at-score {{
+    float: right;
+    font-weight: bold;
+    color: #fff;
+  }}
+  
+  .dots {{
+    position: absolute;
+    bottom: 620px;
+    right: 20px;
+    width: 200px;
+    height: 200px;
+    background-image: radial-gradient(var(--accent-orange) 20%, transparent 20%);
+    background-size: 20px 20px;
+    opacity: 0.5;
+  }}
+
+</style>
+</head>
+<body>
+
+  <div class="header-banner">
+    <div class="header-title">
+      <span>{day_of_week}</span>
+      <span>Recap</span>
+    </div>
+    <svg class="lightbulb" viewBox="0 0 24 24" fill="none" stroke="var(--accent-orange)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M9 18h6"></path>
+      <path d="M10 22h4"></path>
+      <path d="M12 2v1"></path>
+      <path d="M12 11v1"></path>
+      <path d="M4 12h1"></path>
+      <path d="M19 12h1"></path>
+      <path d="M5.6 5.6l.7.7"></path>
+      <path d="M18.4 5.6l-.7.7"></path>
+      <path d="M15.5 15.5c-.8.8-1.5 1.5-1.5 2.5v1a2 2 0 0 1-2 2h-2a2 2 0 0 1-2-2v-1c0-1-.7-1.7-1.5-2.5A6 6 0 1 1 15.5 15.5z"></path>
+    </svg>
+  </div>
+
+  <div class="questions-container">
+    <div class="q-badge">QUESTIONS</div>
+    
+    <!-- Regular Question -->
+    <div class="q-pair">
+      <div class="q-box">{question_text}</div>
+      <div class="a-box">{answer_text}</div>
+    </div>
+    
+    <!-- DoN Question -->
+    <div class="q-pair">
+      <div class="q-box don-box">{don_question_text}</div>
+      <div class="a-box don-a-box">{don_answer_text}</div>
+    </div>
+  </div>
+
+  <div class="grid-container">
+    <div class="card blue">
+      <div class="card-title">THE PODIUM</div>
+      <div class="podium-list">
+        {podium_html}
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title blue">DoN PODIUM</div>
+      <div class="podium-list">
+        {don_podium_html}
+      </div>
+    </div>
+  </div>
+
+  <div style="padding: 0 50px;">
+    <div class="stat-grid">
+        {awards_html}
+    </div>
+  </div>
+  
+  <div class="dots"></div>
+
+  <div class="all-time-section">
+    <div class="all-time-header">ALL-TIME LEGENDS</div>
+    
+    <div class="all-time-col-large">
+        <div class="at-box">
+          <div class="at-title">All-Time Score (Top 5)</div>
+          <div class="at-list">
+            {at_score_html}
+          </div>
+        </div>
+        
+        <div class="at-box blue">
+          <div class="at-title">Most Correct Answers (Top 5)</div>
+          <div class="at-list">
+            {at_correct_html}
+          </div>
+        </div>
+    </div>
+
+    <div class="all-time-grid">
+      <div class="at-box orange">
+        <div class="at-title">DoN Wins</div>
+        <div class="at-list">
+          {at_don_wins_html}
+        </div>
+      </div>
+
+      <div class="at-box">
+        <div class="at-title">Best Accuracy</div>
+        <div class="at-list">
+          {at_accuracy_html}
+        </div>
+      </div>
+
+      <div class="at-box blue">
+        <div class="at-title">Best DoN Acc</div>
+        <div class="at-list">
+          {at_don_acc_html}
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+</body>
+</html>

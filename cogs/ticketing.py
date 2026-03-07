@@ -1007,6 +1007,9 @@ class TopicWizardView(discord.ui.View):
             await interaction.followup.send(f"❌ An error occurred: `{e.__class__.__name__}`. Check logs.", ephemeral=True)
             return
 
+        # Refresh any live panel messages that include this topic
+        asyncio.create_task(self.cog._refresh_panels_for_topic(interaction.guild, self.topic_data['name']))
+
         await self.original_interaction.edit_original_response(content=f"✅ {topic_type.capitalize()} `{self.topic_data['name']}` saved.", embed=None, view=None)
         self.stop()
 
@@ -1082,6 +1085,25 @@ class AddQuestionModal(discord.ui.Modal, title="Add a Question"):
         await itx.response.send_message("An error occurred. Please try again.", ephemeral=True)
         logger.error(f"AddQuestionModal error: {error}", exc_info=True)
 
+class EditQuestionModal(discord.ui.Modal, title="Edit Question"):
+    question = discord.ui.TextInput(label="Question Text", style=discord.TextStyle.long, required=True)
+
+    def __init__(self, parent_wizard: "TopicWizardView", index: int, current_text: str):
+        super().__init__()
+        self.parent_wizard = parent_wizard
+        self.index = index
+        self.question.default = current_text
+
+    async def on_submit(self, itx: discord.Interaction):
+        questions = self.parent_wizard.topic_data.get('questions', [])
+        if 0 <= self.index < len(questions):
+            questions[self.index] = self.question.value
+        await self.parent_wizard.update_message_state(itx, "✅ Question updated.")
+
+    async def on_error(self, itx: discord.Interaction, error: Exception):
+        await itx.response.send_message("An error occurred. Please try again.", ephemeral=True)
+        logger.error(f"EditQuestionModal error: {error}", exc_info=True)
+
 class QuestionManagerView(discord.ui.View):
     def __init__(self, parent_wizard: "TopicWizardView"):
         super().__init__(timeout=180)
@@ -1089,16 +1111,41 @@ class QuestionManagerView(discord.ui.View):
         self._update_remove_button_state()
 
     def _update_remove_button_state(self):
-        """Safely update the remove button's disabled state."""
+        """Safely update the remove/edit buttons' disabled state."""
         has_questions = bool(self.parent_wizard.topic_data.get('questions', []))
         for item in self.children:
-            if isinstance(item, discord.ui.Button) and item.label == "Remove Question":
+            if isinstance(item, discord.ui.Button) and item.label in ("Remove Question", "Edit Question"):
                 item.disabled = not has_questions
-                break
 
     @discord.ui.button(label="Add Question", style=discord.ButtonStyle.success, row=0)
     async def add_question(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(AddQuestionModal(self.parent_wizard))
+
+    @discord.ui.button(label="Edit Question", style=discord.ButtonStyle.primary, row=0)
+    async def edit_question(self, interaction: discord.Interaction, button: discord.ui.Button):
+        questions = self.parent_wizard.topic_data.get('questions', [])
+        if not questions:
+            return await interaction.response.send_message("No questions to edit.", ephemeral=True, delete_after=5)
+
+        options = [discord.SelectOption(label=q[:100], value=str(i)) for i, q in enumerate(questions)]
+        picker_view = discord.ui.View(timeout=120)
+        select = discord.ui.Select(placeholder="Select a question to edit...", options=options, min_values=1, max_values=1)
+
+        original_msg_interaction = interaction
+
+        async def select_callback(itx: discord.Interaction):
+            index = int(itx.data['values'][0])
+            current_questions = self.parent_wizard.topic_data.get('questions', [])
+            try:
+                await original_msg_interaction.delete_original_response()
+            except (discord.NotFound, discord.HTTPException):
+                pass
+            if 0 <= index < len(current_questions):
+                await itx.response.send_modal(EditQuestionModal(self.parent_wizard, index, current_questions[index]))
+
+        select.callback = select_callback
+        picker_view.add_item(select)
+        await interaction.response.send_message("Select a question to edit:", view=picker_view, ephemeral=True)
 
     @discord.ui.button(label="Remove Question", style=discord.ButtonStyle.danger, row=0)
     async def remove_question(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2603,6 +2650,35 @@ class TicketSystem(commands.Cog):
 
         self.persistent_views_added = True
         logger.info("Persistent ticket, survey, and action views have been loaded.")
+
+    async def _refresh_panels_for_topic(self, guild: discord.Guild, topic_name: str):
+        """Edit live panel messages for every panel that includes the given topic."""
+        try:
+            panels = await _load_json(self.bot, PANELS_FILE, self.panels_lock)
+            topics = await _load_json(self.bot, TOPICS_FILE, self.topics_lock)
+            for panel_data in panels.values():
+                if topic_name not in panel_data.get('topic_names', []):
+                    continue
+                channel_id = panel_data.get('channel_id')
+                message_id = panel_data.get('message_id')
+                if not channel_id or not message_id:
+                    continue
+                channel = guild.get_channel(channel_id)
+                if not channel or not isinstance(channel, discord.TextChannel):
+                    continue
+                try:
+                    msg = await channel.fetch_message(message_id)
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    continue
+                view = self.create_panel_view(panel_data, topics)
+                if not view:
+                    continue
+                try:
+                    await msg.edit(view=view)
+                except (discord.Forbidden, discord.HTTPException) as e:
+                    logger.warning(f"Failed to refresh panel '{panel_data.get('name')}' message: {e}")
+        except Exception as e:
+            logger.error(f"Error refreshing panels for topic '{topic_name}': {e}", exc_info=True)
 
     def create_panel_view(self, panel_data: Dict[str, Any], all_topics: Dict[str, Any]) -> Optional[discord.ui.View]:
         view = discord.ui.View(timeout=None)

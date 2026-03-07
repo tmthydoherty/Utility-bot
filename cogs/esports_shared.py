@@ -750,6 +750,10 @@ class EsportsAdminView(discord.ui.View):
     async def test_result(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.run_test(interaction, is_result=True)
 
+    @discord.ui.button(label="Force Publish", style=discord.ButtonStyle.danger, row=3)
+    async def force_publish(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.show_force_publish_menu(interaction)
+
     @discord.ui.button(label="Debug Strafe", style=discord.ButtonStyle.secondary, row=3)
     async def debug_strafe(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.debug_strafe(interaction)

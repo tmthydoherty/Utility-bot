@@ -162,8 +162,38 @@ class UserActionModal(discord.ui.Modal):
                 # Unblock in global data
                 if user_id_val in global_data.setdefault("blocked_users", []): global_data["blocked_users"].remove(user_id_val)
                 message = f"✅ User `{user_id_val}` has been unblocked."
+            elif self.action == 'reset_attempt':
+                for key in ["daily_interactions", "daily_don_interactions", "daily_answer_times", "daily_don_answer_times"]:
+                    if key in global_data:
+                        global_data[key] = [r for r in global_data[key] if r.get("user_id") != user_id_str]
+                message = f"✅ Daily attempt reset for user `{user_id_val}`."
             self.main_cog.config_is_dirty = True
         await interaction.followup.send(message, ephemeral=True)
+
+class ResetAttemptSelectView(discord.ui.View):
+    def __init__(self, main_cog: "DailyTrivia"):
+        super().__init__(timeout=180)
+        self.main_cog = main_cog
+        self.add_item(self.UserSelect())
+
+    class UserSelect(discord.ui.UserSelect):
+        def __init__(self):
+            super().__init__(placeholder="Select a user to reset daily attempt", min_values=1, max_values=1)
+
+        async def callback(self, interaction: discord.Interaction):
+            await interaction.response.defer(ephemeral=True)
+            user = self.values[0]
+            user_id_str = str(user.id)
+            
+            async with self.view.main_cog.config_lock:
+                global_data = self.view.main_cog.get_global_data()
+                for key in ["daily_interactions", "daily_don_interactions", "daily_answer_times", "daily_don_answer_times"]:
+                    if key in global_data:
+                        global_data[key] = [r for r in global_data[key] if r.get("user_id") != user_id_str]
+                self.view.main_cog.config_is_dirty = True
+            
+            await interaction.followup.send(f"✅ Daily attempt reset for {user.mention}.", ephemeral=True)
+
 
 class UserManagementView(discord.ui.View):
     def __init__(self, main_cog: "DailyTrivia"): super().__init__(timeout=180); self.main_cog = main_cog
@@ -173,6 +203,8 @@ class UserManagementView(discord.ui.View):
     async def block(self, i: discord.Interaction, b: discord.ui.Button): await i.response.send_modal(UserActionModal(self.main_cog, "block"))
     @discord.ui.button(label="Unblock User", style=discord.ButtonStyle.secondary)
     async def unblock(self, i: discord.Interaction, b: discord.ui.Button): await i.response.send_modal(UserActionModal(self.main_cog, "unblock"))
+    @discord.ui.button(label="Reset Daily Attempt", style=discord.ButtonStyle.success, row=1)
+    async def reset_attempt(self, i: discord.Interaction, b: discord.ui.Button): await i.response.send_message("Select a user to reset their attempt:", view=ResetAttemptSelectView(self.main_cog), ephemeral=True)
     @discord.ui.button(label="Purge User Data", style=discord.ButtonStyle.danger, row=2)
     async def purge(self, i: discord.Interaction, b: discord.ui.Button): await i.response.send_modal(UserActionModal(self.main_cog, "purge_all_data"))
 

@@ -12,6 +12,14 @@ import os
 import json
 import logging
 import typing
+import io
+from pathlib import Path
+
+try:
+    from playwright.async_api import async_playwright
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    PLAYWRIGHT_AVAILABLE = False
 
 # =====================================================================================
 # UTILS & CONSTANTS
@@ -24,6 +32,67 @@ log_trivia = logging.getLogger("discord.trivia")
 _cog_dir = os.path.dirname(os.path.abspath(__file__))
 # Joins it with '..' (parent folder) and the filename
 CONFIG_FILE_TRIVIA = os.path.join(_cog_dir, '..', 'trivia_config.json')
+TRIVIA_RECAP_TEMPLATE_PATH = Path(_cog_dir) / "templates" / "trivia_recap_card.html"
+
+# =====================================================================================
+# IMAGE GENERATOR
+# =====================================================================================
+
+class TriviaImageGenerator:
+    """Generates trivia recap card images using Playwright and HTML templates."""
+
+    def __init__(self):
+        self.browser = None
+        self.playwright = None
+
+    async def initialize(self):
+        if not PLAYWRIGHT_AVAILABLE:
+            log_trivia.warning("Playwright not available. Recap cards will fall back to embed.")
+            return False
+        try:
+            self.playwright = await async_playwright().start()
+            self.browser = await self.playwright.chromium.launch()
+            log_trivia.info("Trivia Image Generator initialized.")
+            return True
+        except Exception as e:
+            log_trivia.error(f"Failed to initialize trivia image generator: {e}")
+            return False
+
+    async def close(self):
+        if self.browser:
+            await self.browser.close()
+        if self.playwright:
+            await self.playwright.stop()
+
+    async def generate_recap_image(self, data: dict) -> typing.Optional[io.BytesIO]:
+        if not self.browser:
+            return None
+
+        try:
+            if not TRIVIA_RECAP_TEMPLATE_PATH.exists():
+                log_trivia.error(f"Recap template not found at {TRIVIA_RECAP_TEMPLATE_PATH}")
+                return None
+
+            template = TRIVIA_RECAP_TEMPLATE_PATH.read_text(encoding='utf-8')
+
+            html = template.format(**data)
+
+            page = await self.browser.new_page(
+                viewport={'width': 1080, 'height': data['dynamic_height']},
+                device_scale_factor=2
+            )
+            await page.set_content(html)
+            await page.wait_for_timeout(100)
+
+            screenshot = await page.screenshot(type='png')
+            await page.close()
+
+            return io.BytesIO(screenshot)
+
+        except Exception as e:
+            log_trivia.error(f"Error generating recap card: {e}")
+            return None
+
 # This will now *always* correctly point to /home/tmthy/Vibey/trivia_config.json
 # ---
 
@@ -130,7 +199,19 @@ class DailyGatewayView(discord.ui.View):
                 recap_data = full_global_data_copy.get("yesterdays_recap_data")
 
             if recap_data and recap_data.get("daily_question"):
-                # MODIFICATION: Added RecapView to the followup message
+                if PLAYWRIGHT_AVAILABLE and self.cog.image_generator.browser:
+                    recap_data_dict = await self.cog.build_recap_image_data(interaction.guild, recap_data, full_global_data_copy)
+                    image_buffer = await self.cog.image_generator.generate_recap_image(recap_data_dict)
+                    if image_buffer:
+                        file = discord.File(fp=image_buffer, filename="recap.png")
+                        await interaction.followup.send(
+                            file=file,
+                            view=RecapView(self.cog), 
+                            ephemeral=True
+                        )
+                        return
+                
+                # Fallback
                 await interaction.followup.send(
                     embed=await self.cog.build_daily_awards_embed(interaction.guild, recap_data, full_global_data_copy), 
                     view=RecapView(self.cog), 
@@ -799,25 +880,27 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
         self.config_lock = asyncio.Lock()
         self.config_is_dirty = False
         self.reveal_timestamps, self.don_reveal_timestamps, self.cheat_test_timestamps = {}, {}, {}
+        self.image_generator = TriviaImageGenerator()
         self.bot.loop.create_task(self.setup_hook())
 
     async def setup_hook(self):
         await self.bot.wait_until_ready()
+        await self.image_generator.initialize()
         self.bot.add_view(DailyGatewayView(self))
 
     @commands.Cog.listener()
     async def on_ready(self):
         if not self.trivia_loop.is_running(): self.trivia_loop.start()
-        if not self.monthly_winner_loop.is_running(): self.monthly_winner_loop.start()
         if not self.cache_refill_loop.is_running(): self.cache_refill_loop.start()
         if not self.backup_save_loop.is_running(): self.backup_save_loop.start()
         log_trivia.info(f"DailyTrivia cog is ready. Config path: {CONFIG_FILE_TRIVIA}")
 
     async def cog_unload(self):
         if self.config_is_dirty: save_config_trivia(self.config)
-        self.trivia_loop.cancel(); self.monthly_winner_loop.cancel(); self.cache_refill_loop.cancel(); self.backup_save_loop.cancel()
+        self.trivia_loop.cancel(); self.cache_refill_loop.cancel(); self.backup_save_loop.cancel()
         if self.session and not self.session.closed:
             await self.session.close()
+        await self.image_generator.close()
     
     async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         log_trivia.error(f"Error in command '{interaction.command.name}': {error}", exc_info=True)
@@ -893,7 +976,10 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
             "correct": 0, "incorrect": 0, "current_streak": 0, "longest_streak": 0, 
             "don_declined": 0, "don_accepted": 0, "don_successes": 0, 
             "categories": {}, "all_time_score": 0, "current_incorrect_streak": 0,
-            "all_time_timestamp": None  # NEW: for tie-breaking
+            "all_time_timestamp": None,  # NEW: for tie-breaking
+            "participation_streak": 0,
+            "longest_participation_streak": 0,
+            "last_participation_date": None
         }
         user_stats_pool = global_data.setdefault("user_stats", {})
         
@@ -1073,15 +1159,14 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
         now_est = datetime.now(TRIVIA_TIMEZONE)
         if not any(now_est.hour == t.hour and now_est.minute == t.minute for t in POST_TIMES): return
 
-        # Iterate over guild_settings, not the whole config
         guild_settings_pool = self.config.get("guild_settings", {})
+        ran_monthly_reset = False
         
         for gid_str, cfg_settings in list(guild_settings_pool.items()):
             if not cfg_settings.get("enabled") or not cfg_settings.get("channel_id"): continue
             
             try:
                 guild = self.bot.get_guild(int(gid_str))
-                # Added guild.me check
                 if not guild or not guild.me: 
                     log_trivia.warning(f"Could not find or access guild {gid_str}, skipping trivia loop.")
                     continue
@@ -1090,6 +1175,10 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
                 
                 log_trivia.info(f"Met time condition for guild {guild.id} at {now_est.hour}:00 EST.")
                 if now_est.hour == RESET_HOUR and cfg_settings.get("last_posted_date") != now_est.date().isoformat():
+                    # Check for 1st of month here
+                    if now_est.day == 1:
+                        await self._process_monthly_winners(guild)
+                        ran_monthly_reset = True
                     await self._trigger_daily_reset_and_post(guild)
                 elif cfg_settings.get("last_posted_date") == now_est.date().isoformat():
                     await self._bump_messages(guild)
@@ -1098,6 +1187,14 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
                 log_trivia.error(f"Failed to post trivia in loop for guild {gid_str}: {e}")
             except Exception as e:
                 log_trivia.error(f"Unexpected error in trivia loop for guild {gid_str}: {e}", exc_info=True)
+
+        if ran_monthly_reset:
+            async with self.config_lock:
+                scores = self.get_global_data().get("scores", {})
+                if scores:
+                    self.get_global_data()["scores"] = {}
+                    self.config_is_dirty = True
+                    log_trivia.info("Global monthly scores have been reset.")
     
     @tasks.loop(minutes=15)
     async def cache_refill_loop(self):
@@ -1107,22 +1204,22 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
             return
 
         try:
-            log_trivia.info("Global cache is low, refilling with custom difficulty distribution...")
+            log_trivia.info("Global cache is low, refilling with custom category distribution...")
             
-            total_amount = CACHE_FETCH_AMOUNT
-            amounts = {
-                'easy': int(total_amount * 0.45),   # 45%
-                'medium': int(total_amount * 0.40), # 40%
-                'hard': int(total_amount * 0.15)    # 15%
-            }
-            current_total = sum(amounts.values())
-            amounts['easy'] += total_amount - current_total # Add remainder to easy to ensure total is met
+            # Boosted Categories
+            # 15: Games, 12: Music, 31: Anime, 32: Cartoons, 11: Film, 14: TV, 10: Books
+            # 17: Science/Nature, 18: Computers, 30: Gadgets, 21: Sports, 16: Board Games
+            boosted = [15, 12, 31, 32, 11, 14, 10, 17, 18, 30, 21, 16]
             
             fetch_tasks = []
-            for difficulty, amount in amounts.items():
-                if amount > 0:
-                    url = f"{TRIVIA_API_URL_BASE}?amount={amount}&difficulty={difficulty}&type=multiple"
-                    fetch_tasks.append(self.session.get(url, timeout=aiohttp.ClientTimeout(total=10)))
+            selected_boosted = random.sample(boosted, 5) # Pick 5 boosted categories
+            for cat in selected_boosted:
+                url = f"{TRIVIA_API_URL_BASE}?amount=7&category={cat}&type=multiple"
+                fetch_tasks.append(self.session.get(url, timeout=aiohttp.ClientTimeout(total=10)))
+                
+            # 15 random questions
+            url_random = f"{TRIVIA_API_URL_BASE}?amount=15&type=multiple"
+            fetch_tasks.append(self.session.get(url_random, timeout=aiohttp.ClientTimeout(total=10)))
             
             responses = await asyncio.gather(*fetch_tasks, return_exceptions=True)
             
@@ -1156,60 +1253,32 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
         except Exception as e:
             log_trivia.error(f"Unexpected error during global cache refill: {e}", exc_info=True)
 
-    @tasks.loop(time=time(hour=0, minute=5, tzinfo=timezone.utc))
-    async def monthly_winner_loop(self):
-        now_utc = datetime.now(timezone.utc)
-        if now_utc.day != 1: 
-            return
-            
-        log_trivia.info("First of the month: running winner announcements.")
+    async def _process_monthly_winners(self, guild: discord.Guild):
+        now_est = datetime.now(TRIVIA_TIMEZONE)
         
-        # Get global scores *once*
         global_data = self.get_global_data()
         scores = global_data.get("scores", {})
         
-        guild_settings_pool = self.config.get("guild_settings", {})
+        cfg_settings = self.get_guild_settings(guild.id)
+        last_announce = datetime.fromisoformat(cfg_settings["last_winner_announcement"]) if cfg_settings.get("last_winner_announcement") else None
+        if last_announce and last_announce.month == now_est.month and last_announce.year == now_est.year: 
+            return # Already announced for this guild
 
-        for gid_str, cfg_settings in list(guild_settings_pool.items()):
-            if not cfg_settings.get("enabled"): continue
+        try:
+            channel = guild.get_channel(cfg_settings.get("channel_id", 0))
+            if channel and scores:
+                prev_month = now_est - timedelta(days=1)
+                leaderboard_desc = await self._get_leaderboard_text(guild, limit=LEADERBOARD_LIMIT) 
+                embed = discord.Embed(title=f"🏆 Trivia Champions for {prev_month.strftime('%B %Y')}", description=leaderboard_desc, color=0xFFD700)
+                await channel.send(embed=embed)
             
-            # Check guild-specific announcement timestamp
-            last_announce = datetime.fromisoformat(cfg_settings["last_winner_announcement"]) if cfg_settings.get("last_winner_announcement") else None
-            if last_announce and last_announce.month == now_utc.month and last_announce.year == now_utc.year: continue
+            await self._handle_monthly_role_reward(guild, scores)
             
-            try:
-                guild = self.bot.get_guild(int(gid_str))
-                if not guild: continue
-                channel = guild.get_channel(cfg_settings.get("channel_id", 0))
-                if not channel: 
-                    log_trivia.warning(f"Could not find trivia channel for monthly winner in guild {gid_str}")
-                    continue
-                
-                if scores:
-                    prev_month = now_utc - timedelta(days=2)
-                    # Pass guild to format names, but scores are fetched globally
-                    leaderboard_desc = await self._get_leaderboard_text(guild, limit=LEADERBOARD_LIMIT) 
-                    embed = discord.Embed(title=f"🏆 Trivia Champions for {prev_month.strftime('%B %Y')}", description=leaderboard_desc, color=0xFFD700)
-                    await channel.send(embed=embed)
-                
-                # Handle role rewards (which are guild-specific)
-                await self._handle_monthly_role_reward(guild, scores)
-                
-                async with self.config_lock:
-                    # Update guild-specific announcement time
-                    self.get_guild_settings(guild.id)["last_winner_announcement"] = now_utc.isoformat()
-                    self.config_is_dirty = True
-            except discord.HTTPException as e:
-                log_trivia.error(f"Failed to send monthly winner message in guild {gid_str}: {e}")
-            except Exception as e:
-                log_trivia.error(f"Monthly winner loop failed for guild {gid_str}: {e}", exc_info=True)
-
-        # Reset global scores *once* after all guilds are processed
-        async with self.config_lock:
-            self.get_global_data()["scores"] = {}
-            self.config_is_dirty = True
-        log_trivia.info("Global monthly scores have been reset.")
-
+            async with self.config_lock:
+                self.get_guild_settings(guild.id)["last_winner_announcement"] = now_est.isoformat()
+                self.config_is_dirty = True
+        except Exception as e:
+            log_trivia.error(f"Monthly winner logic failed for guild {guild.id}: {e}", exc_info=True)
 
     @tasks.loop(seconds=60)
     async def backup_save_loop(self):
@@ -1289,6 +1358,7 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
             # Save recap data to GLOBAL
             global_data["yesterdays_recap_data"] = {
                 "daily_question": global_data.get("daily_question_data"), 
+                "daily_don_question": global_data.get("daily_don_question_data"),
                 "daily_interactions": global_data.get("daily_interactions", []).copy(), 
                 "daily_don_interactions": global_data.get("daily_don_interactions", []).copy(), 
                 "daily_answer_times": global_data.get("daily_answer_times", []).copy(), 
@@ -1342,6 +1412,990 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
             msg = await channel.send(embed=await self._build_daily_embed(guild), view=DailyGatewayView(self))
             async with self.config_lock: self.get_guild_settings(guild.id)["gateway_message_id"], self.config_is_dirty = msg.id, True
         except discord.HTTPException as e: raise TriviaPostingError(f"Failed to send message to {channel.mention}. Error: {e}")
+
+    async def build_recap_image_data(self, guild: discord.Guild, data: dict, full_global_data: dict) -> dict:
+        dq = data.get("daily_question", {})
+        yesterday = datetime.now(TRIVIA_TIMEZONE) - timedelta(days=1)
+        
+        user_stats = full_global_data.get("user_stats", {})
+        
+        async def format_podium(times_data):
+            if not times_data: return '<div style="color:#aaa;">No data</div>'
+            sorted_data = sorted(times_data, key=lambda x: x['time'])[:5]
+            html = ""
+            for i, entry in enumerate(sorted_data):
+                name = await self._get_formatted_name(guild, entry['user_id'])
+                if len(name) > 15: name = name[:12] + '...'
+                html += f'<div class="rank">{i+1}. {name} ({entry["time"]:.2f}s)</div>'
+            return html
+            
+        podium_html = await format_podium(data.get("daily_answer_times", []))
+        don_podium_html = await format_podium(data.get("daily_don_answer_times", []))
+        
+        awards = []
+        def add_award(title, value, is_orange=False):
+            t_class = "stat-badge-title orange" if is_orange else "stat-badge-title"
+            awards.append(f'<div class="stat-badge"><div class="{t_class}">{title}</div><div class="stat-badge-value">{value}</div></div>')
+
+        q_cat = dq.get("category", "Unknown")
+        correct_user_ids = {i['user_id'] for i in data.get("daily_interactions", []) if i.get("correct")}
+        
+        if correct_user_ids and q_cat != "Unknown":
+            best_acc, best_uid, best_stats = 0, None, None
+            for uid in correct_user_ids:
+                cat_stats = user_stats.get(uid, {}).get("categories", {}).get(q_cat)
+                if not cat_stats: continue
+                total = cat_stats.get("correct", 0) + cat_stats.get("incorrect", 0)
+                if total >= 5:
+                    acc = cat_stats.get("correct", 0) / total
+                    if acc > best_acc:
+                        best_acc, best_uid, best_stats = acc, uid, cat_stats
+            if best_uid:
+                name = await self._get_formatted_name(guild, best_uid)
+                add_award("THE SPECIALIST", f"{name[:12]} {best_stats.get('correct')}-{best_stats.get('incorrect')} ({best_acc*100:.0f}%)", True)
+                
+        if correct_user_ids:
+            best_streak, best_uid = 0, None
+            for uid in correct_user_ids:
+                streak = user_stats.get(uid, {}).get("current_streak", 0)
+                if streak > best_streak: best_streak, best_uid = streak, uid
+            if best_streak >= 3:
+                name = await self._get_formatted_name(guild, best_uid)
+                add_award("LONGEST STREAK", f"{name[:15]} ({best_streak})", False)
+                
+        comebacks = [i for i in data.get("daily_interactions", []) if i.get("missed_before", 0) > 0 and i.get("correct")]
+        if comebacks:
+            best_cb = max(comebacks, key=lambda x: x["missed_before"])
+            name = await self._get_formatted_name(guild, best_cb["user_id"])
+            add_award("COMEBACK KID", f"{name[:15]} ({best_cb['missed_before']} missed)", True)
+            
+        leaps = [i for i in data.get("daily_interactions", []) if i.get("leap", 0) > 0]
+        if leaps:
+            best_leap = max(leaps, key=lambda x: x["leap"])
+            name = await self._get_formatted_name(guild, best_leap["user_id"])
+            add_award("BIGGEST LEAP", f"{name[:15]} (#{best_leap['old_rank']} ➔ #{best_leap['new_rank']})", False)
+            
+        scholars = [i for i in data.get("daily_interactions", []) if i.get("participation_streak", 0) >= 5]
+        if scholars:
+            best_scholar = max(scholars, key=lambda x: x["participation_streak"])
+            name = await self._get_formatted_name(guild, best_scholar["user_id"])
+            add_award("LOYAL SCHOLAR", f"{name[:15]} ({best_scholar['participation_streak']} days)", True)
+            
+        rank_ups = [i for i in data.get("daily_interactions", []) if i.get("rank_up")]
+        if rank_ups:
+            best_ru = rank_ups[0]
+            name = await self._get_formatted_name(guild, best_ru["user_id"])
+            add_award("RANK UP", f"{name[:12]} ({best_ru['rank_up']})", False)
+            
+        if len(awards) % 2 != 0:
+            awards.append('<div class="stat-badge" style="opacity:0.3;"><div class="stat-badge-title">???</div></div>')
+
+        async def format_at_list(items, value_fmt=lambda x: str(x)):
+            if not items: return '<div style="color:#aaa;">No data</div>'
+            html = ""
+            for i, (uid, val) in enumerate(items[:5]):
+                name = await self._get_formatted_name(guild, uid)
+                if len(name) > 12: name = name[:10] + '..'
+                html += f'<div><span class="at-rank">{i+1}.</span> {name} <span class="at-score">{value_fmt(val)}</span></div>'
+            return html
+
+        all_time_scores = [(uid, stats.get("all_time_score", 0)) for uid, stats in user_stats.items() if stats.get("all_time_score", 0) > 0]
+        all_time_scores.sort(key=lambda x: x[1], reverse=True)
+        
+        all_time_correct = [(uid, stats.get("correct", 0)) for uid, stats in user_stats.items() if stats.get("correct", 0) > 0]
+        all_time_correct.sort(key=lambda x: x[1], reverse=True)
+        
+        all_time_don_wins = [(uid, stats.get("don_successes", 0)) for uid, stats in user_stats.items() if stats.get("don_successes", 0) > 0]
+        all_time_don_wins.sort(key=lambda x: x[1], reverse=True)
+        
+        all_time_acc = []
+        all_time_don_acc = []
+        for uid, stats in user_stats.items():
+            tot = stats.get("correct", 0) + stats.get("incorrect", 0)
+            if tot >= 20: all_time_acc.append((uid, stats.get("correct", 0) / tot))
+            don_tot = stats.get("don_accepted", 0)
+            if don_tot >= 5: all_time_don_acc.append((uid, stats.get("don_successes", 0) / don_tot))
+                
+        all_time_acc.sort(key=lambda x: x[1], reverse=True)
+        all_time_don_acc.sort(key=lambda x: x[1], reverse=True)
+
+        return {
+            "day_of_week": yesterday.strftime('%A'),
+            "question_text": dq.get("question", "N/A"),
+            "answer_text": dq.get("correct", "N/A"),
+            "don_question_text": data.get("daily_don_question", {}).get("question", "No DoN Question Played"),
+            "don_answer_text": data.get("daily_don_question", {}).get("correct", "N/A"),
+            "podium_html": podium_html,
+            "don_podium_html": don_podium_html,
+            "awards_html": "".join(awards),
+            "at_score_html": await format_at_list(all_time_scores),
+            "at_correct_html": await format_at_list(all_time_correct),
+            "at_don_wins_html": await format_at_list(all_time_don_wins[:3]),
+            "at_accuracy_html": await format_at_list(all_time_acc[:3], lambda x: f"{x*100:.1f}%"),
+            "at_don_acc_html": await format_at_list(all_time_don_acc[:3], lambda x: f"{x*100:.1f}%")
+        }
+
+    async def build_recap_image_data(self, guild: discord.Guild, data: dict, full_global_data: dict) -> dict:
+        dq = data.get("daily_question", {})
+        yesterday = datetime.now(TRIVIA_TIMEZONE) - timedelta(days=1)
+        
+        user_stats = full_global_data.get("user_stats", {})
+        
+        async def format_podium(times_data):
+            if not times_data: return '<div style="color:#aaa;">No data</div>'
+            sorted_data = sorted(times_data, key=lambda x: x['time'])[:5]
+            html = ""
+            for i, entry in enumerate(sorted_data):
+                name = await self._get_formatted_name(guild, entry['user_id'])
+                if len(name) > 15: name = name[:12] + '...'
+                html += f'<div class="rank">{i+1}. {name} ({entry["time"]:.2f}s)</div>'
+            return html
+            
+        podium_html = await format_podium(data.get("daily_answer_times", []))
+        don_podium_html = await format_podium(data.get("daily_don_answer_times", []))
+        
+        awards = []
+        def add_award(title, value, is_orange=False):
+            t_class = "stat-badge-title orange" if is_orange else "stat-badge-title"
+            awards.append(f'<div class="stat-badge"><div class="{t_class}">{title}</div><div class="stat-badge-value">{value}</div></div>')
+
+        q_cat = dq.get("category", "Unknown")
+        correct_user_ids = {i['user_id'] for i in data.get("daily_interactions", []) if i.get("correct")}
+        
+        if correct_user_ids and q_cat != "Unknown":
+            best_acc, best_uid, best_stats = 0, None, None
+            for uid in correct_user_ids:
+                cat_stats = user_stats.get(uid, {}).get("categories", {}).get(q_cat)
+                if not cat_stats: continue
+                total = cat_stats.get("correct", 0) + cat_stats.get("incorrect", 0)
+                if total >= 5:
+                    acc = cat_stats.get("correct", 0) / total
+                    if acc > best_acc:
+                        best_acc, best_uid, best_stats = acc, uid, cat_stats
+            if best_uid:
+                name = await self._get_formatted_name(guild, best_uid)
+                add_award("THE SPECIALIST", f"{name[:12]} {best_stats.get('correct')}-{best_stats.get('incorrect')} ({best_acc*100:.0f}%)", True)
+                
+        if correct_user_ids:
+            best_streak, best_uid = 0, None
+            for uid in correct_user_ids:
+                streak = user_stats.get(uid, {}).get("current_streak", 0)
+                if streak > best_streak: best_streak, best_uid = streak, uid
+            if best_streak >= 3:
+                name = await self._get_formatted_name(guild, best_uid)
+                add_award("LONGEST STREAK", f"{name[:15]} ({best_streak})", False)
+                
+        comebacks = [i for i in data.get("daily_interactions", []) if i.get("missed_before", 0) > 0 and i.get("correct")]
+        if comebacks:
+            best_cb = max(comebacks, key=lambda x: x["missed_before"])
+            name = await self._get_formatted_name(guild, best_cb["user_id"])
+            add_award("COMEBACK KID", f"{name[:15]} ({best_cb['missed_before']} missed)", True)
+            
+        leaps = [i for i in data.get("daily_interactions", []) if i.get("leap", 0) > 0]
+        if leaps:
+            best_leap = max(leaps, key=lambda x: x["leap"])
+            name = await self._get_formatted_name(guild, best_leap["user_id"])
+            add_award("BIGGEST LEAP", f"{name[:15]} (#{best_leap['old_rank']} ➔ #{best_leap['new_rank']})", False)
+            
+        scholars = [i for i in data.get("daily_interactions", []) if i.get("participation_streak", 0) >= 5]
+        if scholars:
+            best_scholar = max(scholars, key=lambda x: x["participation_streak"])
+            name = await self._get_formatted_name(guild, best_scholar["user_id"])
+            add_award("LOYAL SCHOLAR", f"{name[:15]} ({best_scholar['participation_streak']} days)", True)
+            
+        rank_ups = [i for i in data.get("daily_interactions", []) if i.get("rank_up")]
+        if rank_ups:
+            best_ru = rank_ups[0]
+            name = await self._get_formatted_name(guild, best_ru["user_id"])
+            add_award("RANK UP", f"{name[:12]} ({best_ru['rank_up']})", False)
+            
+        if len(awards) % 2 != 0:
+            awards.append('<div class="stat-badge" style="opacity:0.3;"><div class="stat-badge-title">???</div></div>')
+
+        async def format_at_list(items, value_fmt=lambda x: str(x)):
+            if not items: return '<div style="color:#aaa;">No data</div>'
+            html = ""
+            for i, (uid, val) in enumerate(items[:5]):
+                name = await self._get_formatted_name(guild, uid)
+                if len(name) > 12: name = name[:10] + '..'
+                html += f'<div><span class="at-rank">{i+1}.</span> {name} <span class="at-score">{value_fmt(val)}</span></div>'
+            return html
+
+        all_time_scores = [(uid, stats.get("all_time_score", 0)) for uid, stats in user_stats.items() if stats.get("all_time_score", 0) > 0]
+        all_time_scores.sort(key=lambda x: x[1], reverse=True)
+        
+        all_time_correct = [(uid, stats.get("correct", 0)) for uid, stats in user_stats.items() if stats.get("correct", 0) > 0]
+        all_time_correct.sort(key=lambda x: x[1], reverse=True)
+        
+        all_time_don_wins = [(uid, stats.get("don_successes", 0)) for uid, stats in user_stats.items() if stats.get("don_successes", 0) > 0]
+        all_time_don_wins.sort(key=lambda x: x[1], reverse=True)
+        
+        all_time_acc = []
+        all_time_don_acc = []
+        for uid, stats in user_stats.items():
+            tot = stats.get("correct", 0) + stats.get("incorrect", 0)
+            if tot >= 20: all_time_acc.append((uid, stats.get("correct", 0) / tot))
+            don_tot = stats.get("don_accepted", 0)
+            if don_tot >= 5: all_time_don_acc.append((uid, stats.get("don_successes", 0) / don_tot))
+                
+        all_time_acc.sort(key=lambda x: x[1], reverse=True)
+        all_time_don_acc.sort(key=lambda x: x[1], reverse=True)
+
+        return {
+            "day_of_week": yesterday.strftime('%A'),
+            "question_text": dq.get("question", "N/A"),
+            "answer_text": dq.get("correct", "N/A"),
+            "don_question_text": data.get("daily_don_question", {}).get("question", "No DoN Question Played"),
+            "don_answer_text": data.get("daily_don_question", {}).get("correct", "N/A"),
+            "podium_html": podium_html,
+            "don_podium_html": don_podium_html,
+            "awards_html": "".join(awards),
+            "at_score_html": await format_at_list(all_time_scores),
+            "at_correct_html": await format_at_list(all_time_correct),
+            "at_don_wins_html": await format_at_list(all_time_don_wins[:3]),
+            "at_accuracy_html": await format_at_list(all_time_acc[:3], lambda x: f"{x*100:.1f}%"),
+            "at_don_acc_html": await format_at_list(all_time_don_acc[:3], lambda x: f"{x*100:.1f}%")
+        }
+
+    async def build_recap_image_data(self, guild: discord.Guild, data: dict, full_global_data: dict) -> dict:
+        dq = data.get("daily_question", {})
+        yesterday = datetime.now(TRIVIA_TIMEZONE) - timedelta(days=1)
+        
+        user_stats = full_global_data.get("user_stats", {})
+        
+        async def format_podium(times_data):
+            if not times_data: return '<div style="color:#aaa;">No data</div>'
+            sorted_data = sorted(times_data, key=lambda x: x['time'])[:5]
+            html = ""
+            for i, entry in enumerate(sorted_data):
+                name = await self._get_formatted_name(guild, entry['user_id'])
+                if len(name) > 15: name = name[:12] + '...'
+                html += f'<div class="rank">{i+1}. {name} ({entry["time"]:.2f}s)</div>'
+            return html
+            
+        podium_html = await format_podium(data.get("daily_answer_times", []))
+        don_podium_html = await format_podium(data.get("daily_don_answer_times", []))
+        
+        awards = []
+        def add_award(title, value, is_orange=False):
+            t_class = "stat-badge-title orange" if is_orange else "stat-badge-title"
+            awards.append(f'<div class="stat-badge"><div class="{t_class}">{title}</div><div class="stat-badge-value">{value}</div></div>')
+
+        q_cat = dq.get("category", "Unknown")
+        correct_user_ids = {i['user_id'] for i in data.get("daily_interactions", []) if i.get("correct")}
+        
+        if correct_user_ids and q_cat != "Unknown":
+            best_acc, best_uid, best_stats = 0, None, None
+            for uid in correct_user_ids:
+                cat_stats = user_stats.get(uid, {}).get("categories", {}).get(q_cat)
+                if not cat_stats: continue
+                total = cat_stats.get("correct", 0) + cat_stats.get("incorrect", 0)
+                if total >= 5:
+                    acc = cat_stats.get("correct", 0) / total
+                    if acc > best_acc:
+                        best_acc, best_uid, best_stats = acc, uid, cat_stats
+            if best_uid:
+                name = await self._get_formatted_name(guild, best_uid)
+                add_award("THE SPECIALIST", f"{name[:12]} {best_stats.get('correct')}-{best_stats.get('incorrect')} ({best_acc*100:.0f}%)", True)
+                
+        if correct_user_ids:
+            best_streak, best_uid = 0, None
+            for uid in correct_user_ids:
+                streak = user_stats.get(uid, {}).get("current_streak", 0)
+                if streak > best_streak: best_streak, best_uid = streak, uid
+            if best_streak >= 3:
+                name = await self._get_formatted_name(guild, best_uid)
+                add_award("LONGEST STREAK", f"{name[:15]} ({best_streak})", False)
+                
+        comebacks = [i for i in data.get("daily_interactions", []) if i.get("missed_before", 0) > 0 and i.get("correct")]
+        if comebacks:
+            best_cb = max(comebacks, key=lambda x: x["missed_before"])
+            name = await self._get_formatted_name(guild, best_cb["user_id"])
+            add_award("COMEBACK KID", f"{name[:15]} ({best_cb['missed_before']} missed)", True)
+            
+        leaps = [i for i in data.get("daily_interactions", []) if i.get("leap", 0) > 0]
+        if leaps:
+            best_leap = max(leaps, key=lambda x: x["leap"])
+            name = await self._get_formatted_name(guild, best_leap["user_id"])
+            add_award("BIGGEST LEAP", f"{name[:15]} (#{best_leap['old_rank']} ➔ #{best_leap['new_rank']})", False)
+            
+        scholars = [i for i in data.get("daily_interactions", []) if i.get("participation_streak", 0) >= 5]
+        if scholars:
+            best_scholar = max(scholars, key=lambda x: x["participation_streak"])
+            name = await self._get_formatted_name(guild, best_scholar["user_id"])
+            add_award("LOYAL SCHOLAR", f"{name[:15]} ({best_scholar['participation_streak']} days)", True)
+            
+        rank_ups = [i for i in data.get("daily_interactions", []) if i.get("rank_up")]
+        if rank_ups:
+            best_ru = rank_ups[0]
+            name = await self._get_formatted_name(guild, best_ru["user_id"])
+            add_award("RANK UP", f"{name[:12]} ({best_ru['rank_up']})", False)
+            
+        if len(awards) % 2 != 0:
+            awards.append('<div class="stat-badge" style="opacity:0.3;"><div class="stat-badge-title">???</div></div>')
+
+        async def format_at_list(items, value_fmt=lambda x: str(x)):
+            if not items: return '<div style="color:#aaa;">No data</div>'
+            html = ""
+            for i, (uid, val) in enumerate(items[:5]):
+                name = await self._get_formatted_name(guild, uid)
+                if len(name) > 12: name = name[:10] + '..'
+                html += f'<div><span class="at-rank">{i+1}.</span> {name} <span class="at-score">{value_fmt(val)}</span></div>'
+            return html
+
+        all_time_scores = [(uid, stats.get("all_time_score", 0)) for uid, stats in user_stats.items() if stats.get("all_time_score", 0) > 0]
+        all_time_scores.sort(key=lambda x: x[1], reverse=True)
+        
+        all_time_correct = [(uid, stats.get("correct", 0)) for uid, stats in user_stats.items() if stats.get("correct", 0) > 0]
+        all_time_correct.sort(key=lambda x: x[1], reverse=True)
+        
+        all_time_don_wins = [(uid, stats.get("don_successes", 0)) for uid, stats in user_stats.items() if stats.get("don_successes", 0) > 0]
+        all_time_don_wins.sort(key=lambda x: x[1], reverse=True)
+        
+        all_time_acc = []
+        all_time_don_acc = []
+        for uid, stats in user_stats.items():
+            tot = stats.get("correct", 0) + stats.get("incorrect", 0)
+            if tot >= 20: all_time_acc.append((uid, stats.get("correct", 0) / tot))
+            don_tot = stats.get("don_accepted", 0)
+            if don_tot >= 5: all_time_don_acc.append((uid, stats.get("don_successes", 0) / don_tot))
+                
+        all_time_acc.sort(key=lambda x: x[1], reverse=True)
+        all_time_don_acc.sort(key=lambda x: x[1], reverse=True)
+
+        return {
+            "day_of_week": yesterday.strftime('%A'),
+            "question_text": dq.get("question", "N/A"),
+            "answer_text": dq.get("correct", "N/A"),
+            "don_question_text": data.get("daily_don_question", {}).get("question", "No DoN Question Played"),
+            "don_answer_text": data.get("daily_don_question", {}).get("correct", "N/A"),
+            "podium_html": podium_html,
+            "don_podium_html": don_podium_html,
+            "awards_html": "".join(awards),
+            "at_score_html": await format_at_list(all_time_scores),
+            "at_correct_html": await format_at_list(all_time_correct),
+            "at_don_wins_html": await format_at_list(all_time_don_wins[:3]),
+            "at_accuracy_html": await format_at_list(all_time_acc[:3], lambda x: f"{x*100:.1f}%"),
+            "at_don_acc_html": await format_at_list(all_time_don_acc[:3], lambda x: f"{x*100:.1f}%")
+        }
+
+    async def build_recap_image_data(self, guild: discord.Guild, data: dict, full_global_data: dict) -> dict:
+        dq = data.get("daily_question", {})
+        yesterday = datetime.now(TRIVIA_TIMEZONE) - timedelta(days=1)
+        
+        user_stats = full_global_data.get("user_stats", {})
+        
+        async def format_podium(times_data):
+            if not times_data: return '<div style="color:#aaa;">No data</div>'
+            sorted_data = sorted(times_data, key=lambda x: x['time'])[:5]
+            html = ""
+            for i, entry in enumerate(sorted_data):
+                name = await self._get_formatted_name(guild, entry['user_id'])
+                if len(name) > 15: name = name[:12] + '...'
+                html += f'<div class="rank">{i+1}. {name} ({entry["time"]:.2f}s)</div>'
+            return html
+            
+        podium_html = await format_podium(data.get("daily_answer_times", []))
+        don_podium_html = await format_podium(data.get("daily_don_answer_times", []))
+        
+        awards = []
+        def add_award(title, value, is_orange=False):
+            t_class = "stat-badge-title orange" if is_orange else "stat-badge-title"
+            awards.append(f'<div class="stat-badge"><div class="{t_class}">{title}</div><div class="stat-badge-value">{value}</div></div>')
+
+        q_cat = dq.get("category", "Unknown")
+        correct_user_ids = {i['user_id'] for i in data.get("daily_interactions", []) if i.get("correct")}
+        
+        if correct_user_ids and q_cat != "Unknown":
+            best_acc, best_uid, best_stats = 0, None, None
+            for uid in correct_user_ids:
+                cat_stats = user_stats.get(uid, {}).get("categories", {}).get(q_cat)
+                if not cat_stats: continue
+                total = cat_stats.get("correct", 0) + cat_stats.get("incorrect", 0)
+                if total >= 5:
+                    acc = cat_stats.get("correct", 0) / total
+                    if acc > best_acc:
+                        best_acc, best_uid, best_stats = acc, uid, cat_stats
+            if best_uid:
+                name = await self._get_formatted_name(guild, best_uid)
+                add_award("THE SPECIALIST", f"{name[:12]} {best_stats.get('correct')}-{best_stats.get('incorrect')} ({best_acc*100:.0f}%)", True)
+                
+        if correct_user_ids:
+            best_streak, best_uid = 0, None
+            for uid in correct_user_ids:
+                streak = user_stats.get(uid, {}).get("current_streak", 0)
+                if streak > best_streak: best_streak, best_uid = streak, uid
+            if best_streak >= 3:
+                name = await self._get_formatted_name(guild, best_uid)
+                add_award("LONGEST STREAK", f"{name[:15]} ({best_streak})", False)
+                
+        comebacks = [i for i in data.get("daily_interactions", []) if i.get("missed_before", 0) > 0 and i.get("correct")]
+        if comebacks:
+            best_cb = max(comebacks, key=lambda x: x["missed_before"])
+            name = await self._get_formatted_name(guild, best_cb["user_id"])
+            add_award("COMEBACK KID", f"{name[:15]} ({best_cb['missed_before']} missed)", True)
+            
+        leaps = [i for i in data.get("daily_interactions", []) if i.get("leap", 0) > 0]
+        if leaps:
+            best_leap = max(leaps, key=lambda x: x["leap"])
+            name = await self._get_formatted_name(guild, best_leap["user_id"])
+            add_award("BIGGEST LEAP", f"{name[:15]} (#{best_leap['old_rank']} ➔ #{best_leap['new_rank']})", False)
+            
+        scholars = [i for i in data.get("daily_interactions", []) if i.get("participation_streak", 0) >= 5]
+        if scholars:
+            best_scholar = max(scholars, key=lambda x: x["participation_streak"])
+            name = await self._get_formatted_name(guild, best_scholar["user_id"])
+            add_award("LOYAL SCHOLAR", f"{name[:15]} ({best_scholar['participation_streak']} days)", True)
+            
+        rank_ups = [i for i in data.get("daily_interactions", []) if i.get("rank_up")]
+        if rank_ups:
+            best_ru = rank_ups[0]
+            name = await self._get_formatted_name(guild, best_ru["user_id"])
+            add_award("RANK UP", f"{name[:12]} ({best_ru['rank_up']})", False)
+            
+        if len(awards) % 2 != 0:
+            awards.append('<div class="stat-badge" style="opacity:0.3;"><div class="stat-badge-title">???</div></div>')
+
+        async def format_at_list(items, value_fmt=lambda x: str(x)):
+            if not items: return '<div style="color:#aaa;">No data</div>'
+            html = ""
+            for i, (uid, val) in enumerate(items[:5]):
+                name = await self._get_formatted_name(guild, uid)
+                if len(name) > 12: name = name[:10] + '..'
+                html += f'<div><span class="at-rank">{i+1}.</span> {name} <span class="at-score">{value_fmt(val)}</span></div>'
+            return html
+
+        all_time_scores = [(uid, stats.get("all_time_score", 0)) for uid, stats in user_stats.items() if stats.get("all_time_score", 0) > 0]
+        all_time_scores.sort(key=lambda x: x[1], reverse=True)
+        
+        all_time_correct = [(uid, stats.get("correct", 0)) for uid, stats in user_stats.items() if stats.get("correct", 0) > 0]
+        all_time_correct.sort(key=lambda x: x[1], reverse=True)
+        
+        all_time_don_wins = [(uid, stats.get("don_successes", 0)) for uid, stats in user_stats.items() if stats.get("don_successes", 0) > 0]
+        all_time_don_wins.sort(key=lambda x: x[1], reverse=True)
+        
+        all_time_acc = []
+        all_time_don_acc = []
+        for uid, stats in user_stats.items():
+            tot = stats.get("correct", 0) + stats.get("incorrect", 0)
+            if tot >= 20: all_time_acc.append((uid, stats.get("correct", 0) / tot))
+            don_tot = stats.get("don_accepted", 0)
+            if don_tot >= 5: all_time_don_acc.append((uid, stats.get("don_successes", 0) / don_tot))
+                
+        all_time_acc.sort(key=lambda x: x[1], reverse=True)
+        all_time_don_acc.sort(key=lambda x: x[1], reverse=True)
+
+        return {
+            "day_of_week": yesterday.strftime('%A'),
+            "question_text": dq.get("question", "N/A"),
+            "answer_text": dq.get("correct", "N/A"),
+            "don_question_text": data.get("daily_don_question", {}).get("question", "No DoN Question Played"),
+            "don_answer_text": data.get("daily_don_question", {}).get("correct", "N/A"),
+            "podium_html": podium_html,
+            "don_podium_html": don_podium_html,
+            "awards_html": "".join(awards),
+            "at_score_html": await format_at_list(all_time_scores),
+            "at_correct_html": await format_at_list(all_time_correct),
+            "at_don_wins_html": await format_at_list(all_time_don_wins[:3]),
+            "at_accuracy_html": await format_at_list(all_time_acc[:3], lambda x: f"{x*100:.1f}%"),
+            "at_don_acc_html": await format_at_list(all_time_don_acc[:3], lambda x: f"{x*100:.1f}%")
+        }
+
+    async def build_recap_image_data(self, guild: discord.Guild, data: dict, full_global_data: dict) -> dict:
+        dq = data.get("daily_question", {})
+        yesterday = datetime.now(TRIVIA_TIMEZONE) - timedelta(days=1)
+        
+        user_stats = full_global_data.get("user_stats", {})
+        
+        async def format_podium(times_data):
+            if not times_data: return '<div style="color:#aaa;">No data</div>'
+            sorted_data = sorted(times_data, key=lambda x: x['time'])[:5]
+            html = ""
+            for i, entry in enumerate(sorted_data):
+                name = await self._get_formatted_name(guild, entry['user_id'])
+                if len(name) > 15: name = name[:12] + '...'
+                html += f'<div class="rank">{i+1}. {name} ({entry["time"]:.2f}s)</div>'
+            return html
+            
+        podium_html = await format_podium(data.get("daily_answer_times", []))
+        don_podium_html = await format_podium(data.get("daily_don_answer_times", []))
+        
+        awards = []
+        def add_award(title, value, is_orange=False):
+            t_class = "stat-badge-title orange" if is_orange else "stat-badge-title"
+            awards.append(f'<div class="stat-badge"><div class="{t_class}">{title}</div><div class="stat-badge-value">{value}</div></div>')
+
+        q_cat = dq.get("category", "Unknown")
+        correct_user_ids = {i['user_id'] for i in data.get("daily_interactions", []) if i.get("correct")}
+        
+        if correct_user_ids and q_cat != "Unknown":
+            best_acc, best_uid, best_stats = 0, None, None
+            for uid in correct_user_ids:
+                cat_stats = user_stats.get(uid, {}).get("categories", {}).get(q_cat)
+                if not cat_stats: continue
+                total = cat_stats.get("correct", 0) + cat_stats.get("incorrect", 0)
+                if total >= 5:
+                    acc = cat_stats.get("correct", 0) / total
+                    if acc > best_acc:
+                        best_acc, best_uid, best_stats = acc, uid, cat_stats
+            if best_uid:
+                name = await self._get_formatted_name(guild, best_uid)
+                add_award("THE SPECIALIST", f"{name[:12]} {best_stats.get('correct')}-{best_stats.get('incorrect')} ({best_acc*100:.0f}%)", True)
+                
+        if correct_user_ids:
+            best_streak, best_uid = 0, None
+            for uid in correct_user_ids:
+                streak = user_stats.get(uid, {}).get("current_streak", 0)
+                if streak > best_streak: best_streak, best_uid = streak, uid
+            if best_streak >= 3:
+                name = await self._get_formatted_name(guild, best_uid)
+                add_award("LONGEST STREAK", f"{name[:15]} ({best_streak})", False)
+                
+        comebacks = [i for i in data.get("daily_interactions", []) if i.get("missed_before", 0) > 0 and i.get("correct")]
+        if comebacks:
+            best_cb = max(comebacks, key=lambda x: x["missed_before"])
+            name = await self._get_formatted_name(guild, best_cb["user_id"])
+            add_award("COMEBACK KID", f"{name[:15]} ({best_cb['missed_before']} missed)", True)
+            
+        leaps = [i for i in data.get("daily_interactions", []) if i.get("leap", 0) > 0]
+        if leaps:
+            best_leap = max(leaps, key=lambda x: x["leap"])
+            name = await self._get_formatted_name(guild, best_leap["user_id"])
+            add_award("BIGGEST LEAP", f"{name[:15]} (#{best_leap['old_rank']} ➔ #{best_leap['new_rank']})", False)
+            
+        scholars = [i for i in data.get("daily_interactions", []) if i.get("participation_streak", 0) >= 5]
+        if scholars:
+            best_scholar = max(scholars, key=lambda x: x["participation_streak"])
+            name = await self._get_formatted_name(guild, best_scholar["user_id"])
+            add_award("LOYAL SCHOLAR", f"{name[:15]} ({best_scholar['participation_streak']} days)", True)
+            
+        rank_ups = [i for i in data.get("daily_interactions", []) if i.get("rank_up")]
+        if rank_ups:
+            best_ru = rank_ups[0]
+            name = await self._get_formatted_name(guild, best_ru["user_id"])
+            add_award("RANK UP", f"{name[:12]} ({best_ru['rank_up']})", False)
+            
+        if len(awards) % 2 != 0:
+            awards.append('<div class="stat-badge" style="opacity:0.3;"><div class="stat-badge-title">???</div></div>')
+
+        async def format_at_list(items, value_fmt=lambda x: str(x)):
+            if not items: return '<div style="color:#aaa;">No data</div>'
+            html = ""
+            for i, (uid, val) in enumerate(items[:5]):
+                name = await self._get_formatted_name(guild, uid)
+                if len(name) > 12: name = name[:10] + '..'
+                html += f'<div><span class="at-rank">{i+1}.</span> {name} <span class="at-score">{value_fmt(val)}</span></div>'
+            return html
+
+        all_time_scores = [(uid, stats.get("all_time_score", 0)) for uid, stats in user_stats.items() if stats.get("all_time_score", 0) > 0]
+        all_time_scores.sort(key=lambda x: x[1], reverse=True)
+        
+        all_time_correct = [(uid, stats.get("correct", 0)) for uid, stats in user_stats.items() if stats.get("correct", 0) > 0]
+        all_time_correct.sort(key=lambda x: x[1], reverse=True)
+        
+        all_time_don_wins = [(uid, stats.get("don_successes", 0)) for uid, stats in user_stats.items() if stats.get("don_successes", 0) > 0]
+        all_time_don_wins.sort(key=lambda x: x[1], reverse=True)
+        
+        all_time_acc = []
+        all_time_don_acc = []
+        for uid, stats in user_stats.items():
+            tot = stats.get("correct", 0) + stats.get("incorrect", 0)
+            if tot >= 20: all_time_acc.append((uid, stats.get("correct", 0) / tot))
+            don_tot = stats.get("don_accepted", 0)
+            if don_tot >= 5: all_time_don_acc.append((uid, stats.get("don_successes", 0) / don_tot))
+                
+        all_time_acc.sort(key=lambda x: x[1], reverse=True)
+        all_time_don_acc.sort(key=lambda x: x[1], reverse=True)
+
+        return {
+            "day_of_week": yesterday.strftime('%A'),
+            "question_text": dq.get("question", "N/A"),
+            "answer_text": dq.get("correct", "N/A"),
+            "don_question_text": data.get("daily_don_question", {}).get("question", "No DoN Question Played"),
+            "don_answer_text": data.get("daily_don_question", {}).get("correct", "N/A"),
+            "podium_html": podium_html,
+            "don_podium_html": don_podium_html,
+            "awards_html": "".join(awards),
+            "at_score_html": await format_at_list(all_time_scores),
+            "at_correct_html": await format_at_list(all_time_correct),
+            "at_don_wins_html": await format_at_list(all_time_don_wins[:3]),
+            "at_accuracy_html": await format_at_list(all_time_acc[:3], lambda x: f"{x*100:.1f}%"),
+            "at_don_acc_html": await format_at_list(all_time_don_acc[:3], lambda x: f"{x*100:.1f}%")
+        }
+
+    async def build_recap_image_data(self, guild: discord.Guild, data: dict, full_global_data: dict) -> dict:
+        dq = data.get("daily_question", {})
+        yesterday = datetime.now(TRIVIA_TIMEZONE) - timedelta(days=1)
+        
+        user_stats = full_global_data.get("user_stats", {})
+        
+        async def format_podium(times_data):
+            if not times_data: return '<div style="color:#aaa;">No data</div>'
+            sorted_data = sorted(times_data, key=lambda x: x['time'])[:5]
+            html = ""
+            for i, entry in enumerate(sorted_data):
+                name = await self._get_formatted_name(guild, entry['user_id'])
+                if len(name) > 15: name = name[:12] + '...'
+                html += f'<div class="rank">{i+1}. {name} ({entry["time"]:.2f}s)</div>'
+            return html
+            
+        podium_html = await format_podium(data.get("daily_answer_times", []))
+        don_podium_html = await format_podium(data.get("daily_don_answer_times", []))
+        
+        awards = []
+        def add_award(title, value, is_orange=False):
+            t_class = "stat-badge-title orange" if is_orange else "stat-badge-title"
+            awards.append(f'<div class="stat-badge"><div class="{t_class}">{title}</div><div class="stat-badge-value">{value}</div></div>')
+
+        q_cat = dq.get("category", "Unknown")
+        correct_user_ids = {i['user_id'] for i in data.get("daily_interactions", []) if i.get("correct")}
+        
+        if correct_user_ids and q_cat != "Unknown":
+            best_acc, best_uid, best_stats = 0, None, None
+            for uid in correct_user_ids:
+                cat_stats = user_stats.get(uid, {}).get("categories", {}).get(q_cat)
+                if not cat_stats: continue
+                total = cat_stats.get("correct", 0) + cat_stats.get("incorrect", 0)
+                if total >= 5:
+                    acc = cat_stats.get("correct", 0) / total
+                    if acc > best_acc:
+                        best_acc, best_uid, best_stats = acc, uid, cat_stats
+            if best_uid:
+                name = await self._get_formatted_name(guild, best_uid)
+                add_award("THE SPECIALIST", f"{name[:12]} {best_stats.get('correct')}-{best_stats.get('incorrect')} ({best_acc*100:.0f}%)", True)
+                
+        if correct_user_ids:
+            best_streak, best_uid = 0, None
+            for uid in correct_user_ids:
+                streak = user_stats.get(uid, {}).get("current_streak", 0)
+                if streak > best_streak: best_streak, best_uid = streak, uid
+            if best_streak >= 3:
+                name = await self._get_formatted_name(guild, best_uid)
+                add_award("LONGEST STREAK", f"{name[:15]} ({best_streak})", False)
+                
+        comebacks = [i for i in data.get("daily_interactions", []) if i.get("missed_before", 0) > 0 and i.get("correct")]
+        if comebacks:
+            best_cb = max(comebacks, key=lambda x: x["missed_before"])
+            name = await self._get_formatted_name(guild, best_cb["user_id"])
+            add_award("COMEBACK KID", f"{name[:15]} ({best_cb['missed_before']} missed)", True)
+            
+        leaps = [i for i in data.get("daily_interactions", []) if i.get("leap", 0) > 0]
+        if leaps:
+            best_leap = max(leaps, key=lambda x: x["leap"])
+            name = await self._get_formatted_name(guild, best_leap["user_id"])
+            add_award("BIGGEST LEAP", f"{name[:15]} (#{best_leap['old_rank']} ➔ #{best_leap['new_rank']})", False)
+            
+        scholars = [i for i in data.get("daily_interactions", []) if i.get("participation_streak", 0) >= 5]
+        if scholars:
+            best_scholar = max(scholars, key=lambda x: x["participation_streak"])
+            name = await self._get_formatted_name(guild, best_scholar["user_id"])
+            add_award("LOYAL SCHOLAR", f"{name[:15]} ({best_scholar['participation_streak']} days)", True)
+            
+        rank_ups = [i for i in data.get("daily_interactions", []) if i.get("rank_up")]
+        if rank_ups:
+            best_ru = rank_ups[0]
+            name = await self._get_formatted_name(guild, best_ru["user_id"])
+            add_award("RANK UP", f"{name[:12]} ({best_ru['rank_up']})", False)
+            
+        if len(awards) % 2 != 0:
+            awards.append('<div class="stat-badge" style="opacity:0.3;"><div class="stat-badge-title">???</div></div>')
+
+        async def format_at_list(items, value_fmt=lambda x: str(x)):
+            if not items: return '<div style="color:#aaa;">No data</div>'
+            html = ""
+            for i, (uid, val) in enumerate(items[:5]):
+                name = await self._get_formatted_name(guild, uid)
+                if len(name) > 12: name = name[:10] + '..'
+                html += f'<div><span class="at-rank">{i+1}.</span> {name} <span class="at-score">{value_fmt(val)}</span></div>'
+            return html
+
+        all_time_scores = [(uid, stats.get("all_time_score", 0)) for uid, stats in user_stats.items() if stats.get("all_time_score", 0) > 0]
+        all_time_scores.sort(key=lambda x: x[1], reverse=True)
+        
+        all_time_correct = [(uid, stats.get("correct", 0)) for uid, stats in user_stats.items() if stats.get("correct", 0) > 0]
+        all_time_correct.sort(key=lambda x: x[1], reverse=True)
+        
+        all_time_don_wins = [(uid, stats.get("don_successes", 0)) for uid, stats in user_stats.items() if stats.get("don_successes", 0) > 0]
+        all_time_don_wins.sort(key=lambda x: x[1], reverse=True)
+        
+        all_time_acc = []
+        all_time_don_acc = []
+        for uid, stats in user_stats.items():
+            tot = stats.get("correct", 0) + stats.get("incorrect", 0)
+            if tot >= 20: all_time_acc.append((uid, stats.get("correct", 0) / tot))
+            don_tot = stats.get("don_accepted", 0)
+            if don_tot >= 5: all_time_don_acc.append((uid, stats.get("don_successes", 0) / don_tot))
+                
+        all_time_acc.sort(key=lambda x: x[1], reverse=True)
+        all_time_don_acc.sort(key=lambda x: x[1], reverse=True)
+
+        return {
+            "day_of_week": yesterday.strftime('%A'),
+            "question_text": dq.get("question", "N/A"),
+            "answer_text": dq.get("correct", "N/A"),
+            "don_question_text": data.get("daily_don_question", {}).get("question", "No DoN Question Played"),
+            "don_answer_text": data.get("daily_don_question", {}).get("correct", "N/A"),
+            "podium_html": podium_html,
+            "don_podium_html": don_podium_html,
+            "awards_html": "".join(awards),
+            "at_score_html": await format_at_list(all_time_scores),
+            "at_correct_html": await format_at_list(all_time_correct),
+            "at_don_wins_html": await format_at_list(all_time_don_wins[:3]),
+            "at_accuracy_html": await format_at_list(all_time_acc[:3], lambda x: f"{x*100:.1f}%"),
+            "at_don_acc_html": await format_at_list(all_time_don_acc[:3], lambda x: f"{x*100:.1f}%")
+        }
+
+    async def build_recap_image_data(self, guild: discord.Guild, data: dict, full_global_data: dict) -> dict:
+        dq = data.get("daily_question", {})
+        yesterday = datetime.now(TRIVIA_TIMEZONE) - timedelta(days=1)
+        
+        user_stats = full_global_data.get("user_stats", {})
+        
+        async def format_podium(times_data):
+            if not times_data: return '<div style="color:#aaa;">No data</div>'
+            sorted_data = sorted(times_data, key=lambda x: x['time'])[:5]
+            html = ""
+            for i, entry in enumerate(sorted_data):
+                name = await self._get_formatted_name(guild, entry['user_id'])
+                if len(name) > 15: name = name[:12] + '...'
+                html += f'<div class="rank">{i+1}. {name} ({entry["time"]:.2f}s)</div>'
+            return html
+            
+        podium_html = await format_podium(data.get("daily_answer_times", []))
+        don_podium_html = await format_podium(data.get("daily_don_answer_times", []))
+        
+        awards = []
+        def add_award(title, value, is_orange=False):
+            t_class = "stat-badge-title orange" if is_orange else "stat-badge-title"
+            awards.append(f'<div class="stat-badge"><div class="{t_class}">{title}</div><div class="stat-badge-value">{value}</div></div>')
+
+        q_cat = dq.get("category", "Unknown")
+        correct_user_ids = {i['user_id'] for i in data.get("daily_interactions", []) if i.get("correct")}
+        
+        if correct_user_ids and q_cat != "Unknown":
+            best_acc, best_uid, best_stats = 0, None, None
+            for uid in correct_user_ids:
+                cat_stats = user_stats.get(uid, {}).get("categories", {}).get(q_cat)
+                if not cat_stats: continue
+                total = cat_stats.get("correct", 0) + cat_stats.get("incorrect", 0)
+                if total >= 5:
+                    acc = cat_stats.get("correct", 0) / total
+                    if acc > best_acc:
+                        best_acc, best_uid, best_stats = acc, uid, cat_stats
+            if best_uid:
+                name = await self._get_formatted_name(guild, best_uid)
+                add_award("THE SPECIALIST", f"{name[:12]} {best_stats.get('correct')}-{best_stats.get('incorrect')} ({best_acc*100:.0f}%)", True)
+                
+        if correct_user_ids:
+            best_streak, best_uid = 0, None
+            for uid in correct_user_ids:
+                streak = user_stats.get(uid, {}).get("current_streak", 0)
+                if streak > best_streak: best_streak, best_uid = streak, uid
+            if best_streak >= 3:
+                name = await self._get_formatted_name(guild, best_uid)
+                add_award("LONGEST STREAK", f"{name[:15]} ({best_streak})", False)
+                
+        comebacks = [i for i in data.get("daily_interactions", []) if i.get("missed_before", 0) > 0 and i.get("correct")]
+        if comebacks:
+            best_cb = max(comebacks, key=lambda x: x["missed_before"])
+            name = await self._get_formatted_name(guild, best_cb["user_id"])
+            add_award("COMEBACK KID", f"{name[:15]} ({best_cb['missed_before']} missed)", True)
+            
+        leaps = [i for i in data.get("daily_interactions", []) if i.get("leap", 0) > 0]
+        if leaps:
+            best_leap = max(leaps, key=lambda x: x["leap"])
+            name = await self._get_formatted_name(guild, best_leap["user_id"])
+            add_award("BIGGEST LEAP", f"{name[:15]} (#{best_leap['old_rank']} ➔ #{best_leap['new_rank']})", False)
+            
+        scholars = [i for i in data.get("daily_interactions", []) if i.get("participation_streak", 0) >= 5]
+        if scholars:
+            best_scholar = max(scholars, key=lambda x: x["participation_streak"])
+            name = await self._get_formatted_name(guild, best_scholar["user_id"])
+            add_award("LOYAL SCHOLAR", f"{name[:15]} ({best_scholar['participation_streak']} days)", True)
+            
+        rank_ups = [i for i in data.get("daily_interactions", []) if i.get("rank_up")]
+        if rank_ups:
+            best_ru = rank_ups[0]
+            name = await self._get_formatted_name(guild, best_ru["user_id"])
+            add_award("RANK UP", f"{name[:12]} ({best_ru['rank_up']})", False)
+            
+        if len(awards) % 2 != 0:
+            awards.append('<div class="stat-badge" style="opacity:0.3;"><div class="stat-badge-title">???</div></div>')
+
+        async def format_at_list(items, value_fmt=lambda x: str(x)):
+            if not items: return '<div style="color:#aaa;">No data</div>'
+            html = ""
+            for i, (uid, val) in enumerate(items[:5]):
+                name = await self._get_formatted_name(guild, uid)
+                if len(name) > 12: name = name[:10] + '..'
+                html += f'<div><span class="at-rank">{i+1}.</span> {name} <span class="at-score">{value_fmt(val)}</span></div>'
+            return html
+
+        all_time_scores = [(uid, stats.get("all_time_score", 0)) for uid, stats in user_stats.items() if stats.get("all_time_score", 0) > 0]
+        all_time_scores.sort(key=lambda x: x[1], reverse=True)
+        
+        all_time_correct = [(uid, stats.get("correct", 0)) for uid, stats in user_stats.items() if stats.get("correct", 0) > 0]
+        all_time_correct.sort(key=lambda x: x[1], reverse=True)
+        
+        all_time_don_wins = [(uid, stats.get("don_successes", 0)) for uid, stats in user_stats.items() if stats.get("don_successes", 0) > 0]
+        all_time_don_wins.sort(key=lambda x: x[1], reverse=True)
+        
+        all_time_acc = []
+        all_time_don_acc = []
+        for uid, stats in user_stats.items():
+            tot = stats.get("correct", 0) + stats.get("incorrect", 0)
+            if tot >= 20: all_time_acc.append((uid, stats.get("correct", 0) / tot))
+            don_tot = stats.get("don_accepted", 0)
+            if don_tot >= 5: all_time_don_acc.append((uid, stats.get("don_successes", 0) / don_tot))
+                
+        all_time_acc.sort(key=lambda x: x[1], reverse=True)
+        all_time_don_acc.sort(key=lambda x: x[1], reverse=True)
+
+        return {
+            "day_of_week": yesterday.strftime('%A'),
+            "question_text": dq.get("question", "N/A"),
+            "answer_text": dq.get("correct", "N/A"),
+            "don_question_text": data.get("daily_don_question", {}).get("question", "No DoN Question Played"),
+            "don_answer_text": data.get("daily_don_question", {}).get("correct", "N/A"),
+            "podium_html": podium_html,
+            "don_podium_html": don_podium_html,
+            "awards_html": "".join(awards),
+            "at_score_html": await format_at_list(all_time_scores),
+            "at_correct_html": await format_at_list(all_time_correct),
+            "at_don_wins_html": await format_at_list(all_time_don_wins[:3]),
+            "at_accuracy_html": await format_at_list(all_time_acc[:3], lambda x: f"{x*100:.1f}%"),
+            "at_don_acc_html": await format_at_list(all_time_don_acc[:3], lambda x: f"{x*100:.1f}%")
+        }
+
+    async def build_recap_image_data(self, guild: discord.Guild, data: dict, full_global_data: dict) -> dict:
+        dq = data.get("daily_question", {})
+        yesterday = datetime.now(TRIVIA_TIMEZONE) - timedelta(days=1)
+        
+        user_stats = full_global_data.get("user_stats", {})
+        
+        async def format_podium(times_data):
+            if not times_data: return '<div style="color:#aaa;">No data</div>'
+            sorted_data = sorted(times_data, key=lambda x: x['time'])[:5]
+            html = ""
+            for i, entry in enumerate(sorted_data):
+                name = await self._get_formatted_name(guild, entry['user_id'])
+                if len(name) > 15: name = name[:12] + '...'
+                html += f'<div class="rank">{i+1}. {name} ({entry["time"]:.2f}s)</div>'
+            return html
+            
+        podium_html = await format_podium(data.get("daily_answer_times", []))
+        don_podium_html = await format_podium(data.get("daily_don_answer_times", []))
+        
+        awards = []
+        def add_award(title, value, is_orange=False):
+            t_class = "stat-badge-title orange" if is_orange else "stat-badge-title"
+            awards.append(f'<div class="stat-badge"><div class="{t_class}">{title}</div><div class="stat-badge-value">{value}</div></div>')
+
+        q_cat = dq.get("category", "Unknown")
+        correct_user_ids = {i['user_id'] for i in data.get("daily_interactions", []) if i.get("correct")}
+        
+        if correct_user_ids and q_cat != "Unknown":
+            best_acc, best_uid, best_stats = 0, None, None
+            for uid in correct_user_ids:
+                cat_stats = user_stats.get(uid, {}).get("categories", {}).get(q_cat)
+                if not cat_stats: continue
+                total = cat_stats.get("correct", 0) + cat_stats.get("incorrect", 0)
+                if total >= 5:
+                    acc = cat_stats.get("correct", 0) / total
+                    if acc > best_acc:
+                        best_acc, best_uid, best_stats = acc, uid, cat_stats
+            if best_uid:
+                name = await self._get_formatted_name(guild, best_uid)
+                add_award("THE SPECIALIST", f"{name[:12]} {best_stats.get('correct')}-{best_stats.get('incorrect')} ({best_acc*100:.0f}%)", True)
+                
+        if correct_user_ids:
+            best_streak, best_uid = 0, None
+            for uid in correct_user_ids:
+                streak = user_stats.get(uid, {}).get("current_streak", 0)
+                if streak > best_streak: best_streak, best_uid = streak, uid
+            if best_streak >= 3:
+                name = await self._get_formatted_name(guild, best_uid)
+                add_award("LONGEST STREAK", f"{name[:15]} ({best_streak})", False)
+                
+        comebacks = [i for i in data.get("daily_interactions", []) if i.get("missed_before", 0) > 0 and i.get("correct")]
+        if comebacks:
+            best_cb = max(comebacks, key=lambda x: x["missed_before"])
+            name = await self._get_formatted_name(guild, best_cb["user_id"])
+            add_award("COMEBACK KID", f"{name[:15]} ({best_cb['missed_before']} missed)", True)
+            
+        leaps = [i for i in data.get("daily_interactions", []) if i.get("leap", 0) > 0]
+        if leaps:
+            best_leap = max(leaps, key=lambda x: x["leap"])
+            name = await self._get_formatted_name(guild, best_leap["user_id"])
+            add_award("BIGGEST LEAP", f"{name[:15]} (#{best_leap['old_rank']} ➔ #{best_leap['new_rank']})", False)
+            
+        scholars = [i for i in data.get("daily_interactions", []) if i.get("participation_streak", 0) >= 5]
+        if scholars:
+            best_scholar = max(scholars, key=lambda x: x["participation_streak"])
+            name = await self._get_formatted_name(guild, best_scholar["user_id"])
+            add_award("LOYAL SCHOLAR", f"{name[:15]} ({best_scholar['participation_streak']} days)", True)
+            
+        rank_ups = [i for i in data.get("daily_interactions", []) if i.get("rank_up")]
+        if rank_ups:
+            best_ru = rank_ups[0]
+            name = await self._get_formatted_name(guild, best_ru["user_id"])
+            add_award("RANK UP", f"{name[:12]} ({best_ru['rank_up']})", False)
+            
+        if len(awards) % 2 != 0:
+            awards.append('<div class="stat-badge" style="opacity:0.3;"><div class="stat-badge-title">???</div></div>')
+
+        async def format_at_list(items, value_fmt=lambda x: str(x)):
+            if not items: return '<div style="color:#aaa;">No data</div>'
+            html = ""
+            for i, (uid, val) in enumerate(items[:5]):
+                name = await self._get_formatted_name(guild, uid)
+                if len(name) > 12: name = name[:10] + '..'
+                html += f'<div><span class="at-rank">{i+1}.</span> {name} <span class="at-score">{value_fmt(val)}</span></div>'
+            return html
+
+        all_time_scores = [(uid, stats.get("all_time_score", 0)) for uid, stats in user_stats.items() if stats.get("all_time_score", 0) > 0]
+        all_time_scores.sort(key=lambda x: x[1], reverse=True)
+        
+        all_time_correct = [(uid, stats.get("correct", 0)) for uid, stats in user_stats.items() if stats.get("correct", 0) > 0]
+        all_time_correct.sort(key=lambda x: x[1], reverse=True)
+        
+        all_time_don_wins = [(uid, stats.get("don_successes", 0)) for uid, stats in user_stats.items() if stats.get("don_successes", 0) > 0]
+        all_time_don_wins.sort(key=lambda x: x[1], reverse=True)
+        
+        all_time_acc = []
+        all_time_don_acc = []
+        for uid, stats in user_stats.items():
+            tot = stats.get("correct", 0) + stats.get("incorrect", 0)
+            if tot >= 20: all_time_acc.append((uid, stats.get("correct", 0) / tot))
+            don_tot = stats.get("don_accepted", 0)
+            if don_tot >= 5: all_time_don_acc.append((uid, stats.get("don_successes", 0) / don_tot))
+                
+        all_time_acc.sort(key=lambda x: x[1], reverse=True)
+        all_time_don_acc.sort(key=lambda x: x[1], reverse=True)
+
+        # Calculate dynamic height based on number of award badges
+        # Base height to fit header + questions + podiums + all-time section = 2000
+        # Each row of badges (2 badges per row) takes roughly 150px
+        num_badges = len(awards)
+        num_rows = (num_badges + 1) // 2
+        dynamic_height = 1900 + (num_rows * 160)
+
+        return {
+            "day_of_week": yesterday.strftime('%A'),
+            "question_text": dq.get("question", "N/A"),
+            "answer_text": dq.get("correct", "N/A"),
+            "don_question_text": data.get("daily_don_question", {}).get("question", "No DoN Question Played"),
+            "don_answer_text": data.get("daily_don_question", {}).get("correct", "N/A"),
+            "podium_html": podium_html,
+            "don_podium_html": don_podium_html,
+            "awards_html": "".join(awards),
+            "at_score_html": await format_at_list(all_time_scores),
+            "at_correct_html": await format_at_list(all_time_correct),
+            "at_don_wins_html": await format_at_list(all_time_don_wins[:3]),
+            "at_accuracy_html": await format_at_list(all_time_acc[:3], lambda x: f"{x*100:.1f}%"),
+            "at_don_acc_html": await format_at_list(all_time_don_acc[:3], lambda x: f"{x*100:.1f}%"),
+            "dynamic_height": dynamic_height
+        }
 
     async def build_daily_awards_embed(self, guild: discord.Guild, data: dict, full_global_data: dict) -> discord.Embed:
         # `data` is the recap_data
@@ -1465,8 +2519,12 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
                 q_cat = global_data.get("daily_question_data", {}).get("category", "Unknown")
                 stats.setdefault("categories", {}).setdefault(q_cat, {"correct": 0, "incorrect": 0})
 
-                # --- Pre-answer rank calculation for "Biggest Leap" award ---
+                # --- Pre-answer rank calculation for "Biggest Leap" and "Rank Up" awards ---
                 old_rank, new_rank, leap = None, None, 0
+                
+                old_score = stats.get("all_time_score", 0)
+                old_prestige_rank, _, _, _ = self.get_prestige_rank(old_score)
+                
                 if is_correct:
                     scores_before = copy.deepcopy(global_data.get("scores", {}))
                     sorted_before = sorted(scores_before.items(), key=self._get_score_sort_key)
@@ -1476,14 +2534,24 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
                 # Added logic for Comeback Kid
                 missed_before = stats.get("current_incorrect_streak", 0)
 
+                # --- Participation Tracking ---
+                today_date = answer_time.date().isoformat()
+                last_part = stats.get("last_participation_date")
+                last_part_date = datetime.fromisoformat(last_part).date() if last_part else None
+                if last_part_date != answer_time.date():
+                    if last_part_date == answer_time.date() - timedelta(days=1):
+                        stats["participation_streak"] = stats.get("participation_streak", 0) + 1
+                    else:
+                        stats["participation_streak"] = 1
+                    stats["last_participation_date"] = today_date
+                    stats["longest_participation_streak"] = max(stats.get("longest_participation_streak", 0), stats["participation_streak"])
+
                 if is_correct:
                     stats["correct"] += 1; stats["categories"][q_cat]["correct"] += 1
                     stats["current_streak"] += 1
                     stats["longest_streak"] = max(stats["current_streak"], stats["longest_streak"])
                     stats["current_incorrect_streak"] = 0 # Reset incorrect streak
                     points = 1
-                    if stats["current_streak"] > 0 and stats["current_streak"] % STREAK_BONUS_MILESTONE == 0:
-                        points += 1; streak_msg = f"\n**+1 Bonus Point** for your milestone!"
                     delta = (answer_time - self.reveal_timestamps.pop((interaction.guild.id, interaction.user.id), answer_time)).total_seconds()
                     global_data.setdefault("daily_answer_times", []).append({"user_id": user_id_str, "time": delta})
                     don_cat = global_data.get("daily_don_question_data", {}).get("category", "a surprise")
@@ -1507,6 +2575,11 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
                 final_score = score_data["score"]
 
                 # --- Post-answer rank calculation ---
+                new_prestige_rank, _, _, _ = self.get_prestige_rank(stats.get("all_time_score", 0))
+                rank_up_str = None
+                if is_correct and old_prestige_rank != new_prestige_rank:
+                    rank_up_str = f"{old_prestige_rank} ➔ {new_prestige_rank}"
+
                 if is_correct:
                     scores_after = global_data.get("scores", {})
                     sorted_after = sorted(scores_after.items(), key=self._get_score_sort_key)
@@ -1516,8 +2589,12 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
                         leap = old_rank - new_rank
 
                 interaction_record = {"user_id": user_id_str, "correct": is_correct}
+                interaction_record["participation_streak"] = stats.get("participation_streak", 1)
+
                 if leap > 0:
                     interaction_record.update({"leap": leap, "old_rank": old_rank, "new_rank": new_rank})
+                if rank_up_str:
+                    interaction_record["rank_up"] = rank_up_str
                 
                 # Store missed_before for Comeback Kid
                 if is_correct and stats["current_streak"] == 1 and missed_before > 0:
@@ -1538,7 +2615,7 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
             
             response = "✅ **Correct!**" if is_correct else "❌ Incorrect."
             # Edit the original response (the ephemeral message)
-            await interaction.edit_original_response(content=f"{response}\nYour score is now **{final_score}**.{streak_msg}", view=view)
+            await interaction.edit_original_response(content=f"{response}\nYour score is now **{final_score}**.", view=view)
             
             if don_view: 
                 # Send the prompt as a new ephemeral message via followup.send

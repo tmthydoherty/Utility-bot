@@ -1,3 +1,4 @@
+import copy
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -97,6 +98,11 @@ class VC(commands.Cog):
                 # Re-register KnockManagementView for threads
                 if data.get('knock_mgmt_msg_id') and data.get('thread_id'):
                     thread = self.bot.get_channel(data['thread_id'])
+                    if not thread:
+                        try:
+                            thread = await self.bot.fetch_channel(data['thread_id'])
+                        except discord.NotFound:
+                            pass
                     if thread:
                         # FIX: Check if thread is archived
                         if isinstance(thread, discord.Thread) and thread.archived:
@@ -277,7 +283,7 @@ class VC(commands.Cog):
                     guilds_to_update.add(guild.id)
                     if 'guild_id' not in data:
                         data['guild_id'] = guild.id
-                    owner = guild.get_member(oid)
+                    owner = await shared.validate_member(guild, oid)
 
                     if not owner:
                         shared.logger.warning(f"Owner {oid} not found for VC {vc_id}")
@@ -349,12 +355,16 @@ class VC(commands.Cog):
                     # FIX: Handle threads - DELETE if exists (never archive)
                     if data.get('thread_id'):
                         thread = self.bot.get_channel(data['thread_id'])
-                        if not thread: 
+                        if not thread:
+                            try:
+                                thread = await self.bot.fetch_channel(data['thread_id'])
+                            except discord.NotFound:
+                                pass
+                        if not thread:
                             shared.logger.warning(f"Thread {data['thread_id']} for VC {vc_id} not found")
                             data['thread_id'] = None
                             data['knock_mgmt_msg_id'] = None
-                        # Thread exists - keep it active, unarchive if needed
-                        elif isinstance(thread, discord.Thread) and thread.archived:
+                        # Thread exists - keep it active, unarchive if needed                        elif isinstance(thread, discord.Thread) and thread.archived:
                             try:
                                 await thread.edit(archived=False)
                                 shared.logger.info(f"Unarchived thread {thread.id} for VC {vc_id}")
@@ -365,7 +375,7 @@ class VC(commands.Cog):
                                         await thread.fetch_message(data['knock_mgmt_msg_id'])
                                     except discord.NotFound:
                                         # Message missing, recreate it
-                                        owner = guild.get_member(data['owner_id'])
+                                        owner = await shared.validate_member(guild, data['owner_id'])
                                         if owner:
                                             embed = shared.create_knock_management_embed(owner, [], guild, data)
                                             view = shared.KnockManagementView(self.bot, self, owner.id, vc_id)
@@ -380,8 +390,8 @@ class VC(commands.Cog):
                                     await thread.delete()
                                     data['thread_id'] = None
                                     data['knock_mgmt_msg_id'] = None
-                                except Exception:
-                                    pass
+                                except Exception as e:
+                                    shared.logger.debug(f"Failed to delete orphaned thread during restore: {e}")
 
                     # FIX: Reconcile permissions to match database state
                     vc_data = self.active_vcs.get(vc_id)
@@ -499,7 +509,7 @@ class VC(commands.Cog):
 
                             # FIX: Recreate the missing knock management message
                             if guild and not thread.archived:
-                                owner = guild.get_member(data['owner_id'])
+                                owner = await shared.validate_member(guild, data['owner_id'])
                                 if owner:
                                     try:
                                         embed = shared.create_knock_management_embed(owner, [], guild, data)
@@ -623,18 +633,23 @@ class VC(commands.Cog):
                 if data.get('thread_id'):
                     thread = self.bot.get_channel(data['thread_id'])
                     if not thread:
+                        try:
+                            thread = await self.bot.fetch_channel(data['thread_id'])
+                        except discord.NotFound:
+                            pass
+
+                    if not thread:
                         shared.logger.warning(f"Health check: Thread {data['thread_id']} missing for VC {vc_id}")
                         data['thread_id'] = None
                         data['knock_mgmt_msg_id'] = None
                         issues_found += 1
                         issues_fixed += 1
                     elif isinstance(thread, discord.Thread) and thread.archived:
-                        shared.logger.warning(f"Health check: Thread {data['thread_id']} archived for VC {vc_id}, deleting")
-                        await self._delete_thread(data['thread_id'])
-                        data['thread_id'] = None
-                        data['knock_mgmt_msg_id'] = None
-                        issues_found += 1
-                        issues_fixed += 1
+                        shared.logger.warning(f"Health check: Thread {data['thread_id']} archived for VC {vc_id}, unarchiving")
+                        try:
+                            await thread.edit(archived=False)
+                        except Exception as e:
+                            shared.logger.debug(f"Failed to unarchive thread {data['thread_id']}: {e}")
 
                 # Check hub message for locked VCs
                 if not data.get('unlocked', False) and not data.get('ghost', False) and not data.get('is_basic', False):
@@ -659,7 +674,7 @@ class VC(commands.Cog):
                                     issues_fixed += 1
 
                 # Check owner still in guild
-                owner = guild.get_member(data['owner_id'])
+                owner = await shared.validate_member(guild, data['owner_id'])
                 if not owner:
                     shared.logger.warning(f"Health check: Owner {data['owner_id']} not in guild for VC {vc_id}")
                     if member_count > 0:
@@ -706,8 +721,8 @@ class VC(commands.Cog):
                 return
             self._save_pending = False
             try:
-                # FIX: Copy active_vcs to avoid modification during save
-                vcs_to_save = dict(self.active_vcs)
+                # FIX: Deep copy active_vcs to avoid mutation during save
+                vcs_to_save = copy.deepcopy(self.active_vcs)
                 await shared.save_multiple_vcs(vcs_to_save)
                 shared.logger.debug("State saved successfully")
             except Exception as e:
@@ -1219,6 +1234,15 @@ class VC(commands.Cog):
         """Delete a thread - never archive"""
         try:
             thread = self.bot.get_channel(thread_id)
+            if not thread:
+                try:
+                    thread = await self.bot.fetch_channel(thread_id)
+                except discord.NotFound:
+                    shared.logger.debug(f"Thread {thread_id} already deleted (not found via fetch)")
+                    return
+                except Exception as e:
+                    shared.logger.error(f"Error fetching thread {thread_id} for deletion: {e}")
+                    return
             if thread:
                 await thread.delete()
                 shared.logger.info(f"Deleted thread {thread_id}")
@@ -1357,14 +1381,22 @@ class VC(commands.Cog):
                     except Exception as e:
                         shared.logger.error(f"Health check error: {e}", exc_info=True)
 
-                # SELF-HEALING: Every 2 iterations (~2 minutes), scan for orphaned VCs for faster recovery
-                if cleanup_iteration % 2 == 0:
-                    shared.logger.debug(f"Running self-heal scan (iteration #{cleanup_iteration})")
-                    for guild in self.bot.guilds:
-                        try:
-                            await self.self_heal_scan(guild)
-                        except Exception as e:
-                            shared.logger.error(f"Self-heal scan error for guild {guild.id}: {e}", exc_info=True)
+                # SELF-HEALING: Every iteration (~1 minute), scan for orphaned VCs for faster recovery
+                shared.logger.debug(f"Running self-heal scan (iteration #{cleanup_iteration})")
+                for guild in self.bot.guilds:
+                    try:
+                        await self.self_heal_scan(guild)
+                    except Exception as e:
+                        shared.logger.error(f"Self-heal scan error for guild {guild.id}: {e}", exc_info=True)
+
+                # Purge stale entries from timestamp/cooldown dicts to prevent memory leaks
+                if cleanup_iteration % 10 == 0:
+                    now = time.time()
+                    stale_threshold = now - 3600  # 1 hour
+                    self.vc_creation_cooldowns = {k: v for k, v in self.vc_creation_cooldowns.items() if v > stale_threshold}
+                    self.last_knock_ping = {k: v for k, v in self.last_knock_ping.items() if v > stale_threshold}
+                    self._name_update_debounce = {k: v for k, v in self._name_update_debounce.items() if v > stale_threshold}
+                    self._hub_update_cooldowns = {k: v for k, v in self._hub_update_cooldowns.items() if v > stale_threshold}
 
             except Exception as e:
                 shared.logger.error(f"Periodic cleanup error (iteration #{cleanup_iteration}): {e}", exc_info=True)
@@ -1443,7 +1475,7 @@ class VC(commands.Cog):
                             f"SELF-HEAL: Found empty orphaned VC {channel.id} ({channel.name}), "
                             f"scheduling cleanup with grace period"
                         )
-                        # Schedule cleanup task with shorter delay (30 seconds for orphaned VCs)
+                        # Schedule cleanup task with shorter delay (5 seconds for orphaned VCs)
                         if channel.id not in self.tasks:
                             self.tasks[channel.id] = {}
                         if not self.tasks[channel.id].get('cleanup') or self.tasks[channel.id]['cleanup'].done():
@@ -1471,8 +1503,8 @@ class VC(commands.Cog):
     async def _cleanup_orphaned_empty_vc(self, voice_channel, guild_id):
         """Clean up an orphaned empty VC after a short grace period"""
         try:
-            # Short grace period for orphaned VCs (30 seconds)
-            await asyncio.sleep(30)
+            # Short grace period for orphaned VCs (5 seconds)
+            await asyncio.sleep(5)
 
             # Verify via API that it's still empty
             guild = self.bot.get_guild(guild_id)
@@ -1560,8 +1592,8 @@ class VC(commands.Cog):
                                 await msg.delete()
                                 orphaned_count += 1
                                 shared.logger.info(f"Deleted orphaned hub message (invalid custom_id): {msg.id}")
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                shared.logger.debug(f"Failed to delete orphaned hub message {msg.id}: {e}")
                             break
 
                         # Check if this VC ID is active
@@ -1571,8 +1603,8 @@ class VC(commands.Cog):
                                 await msg.delete()
                                 orphaned_count += 1
                                 shared.logger.info(f"Deleted orphaned hub message for non-existent VC {vc_id}: {msg.id}")
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                shared.logger.debug(f"Failed to delete orphaned hub message {msg.id}: {e}")
                             break
 
                         # Check if this message ID is valid
@@ -1582,8 +1614,8 @@ class VC(commands.Cog):
                                 await msg.delete()
                                 orphaned_count += 1
                                 shared.logger.info(f"Deleted duplicate hub message for VC {vc_id}: {msg.id}")
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                shared.logger.debug(f"Failed to delete duplicate hub message {msg.id}: {e}")
                             break
 
             if orphaned_count > 0:
@@ -1659,7 +1691,7 @@ class VC(commands.Cog):
                     continue
 
                 # Channel exists - check owner
-                owner = guild.get_member(vc_data['owner_id'])
+                owner = await shared.validate_member(guild, vc_data['owner_id'])
                 if not owner:
                     if member_count > 0:
                         # Transfer to first member
@@ -1764,36 +1796,53 @@ class VC(commands.Cog):
             return
 
         try:
-            msg = thread.get_partial_message(knock_msg_id)
             embed = shared.create_knock_management_embed(owner, self.pending_knocks.get(vc_id, []), guild, vc_data)
-
-            # FIX: Log view creation for diagnostics
-            shared.logger.debug(f"Creating KnockManagementView for VC {vc_id}, owner={owner.id}, msg_id={knock_msg_id}")
             view = shared.KnockManagementView(self.bot, self, owner.id, vc_id)
 
             has_pending = len(self.pending_knocks.get(vc_id, [])) > 0
             view.accept_btn.disabled = not has_pending
             view.deny_btn.disabled = not has_pending
 
-            await msg.edit(embed=embed, view=view)
-            self.bot.add_view(view, message_id=knock_msg_id)
-            shared.logger.debug(f"Updated knock panel for VC {vc_id}, pending={len(self.pending_knocks.get(vc_id, []))}")
-        except discord.NotFound:
-            # Message deleted - try to recreate it
-            shared.logger.warning(f"Knock management message {knock_msg_id} not found, recreating")
-            vc_data['knock_mgmt_msg_id'] = None
+            # Check if panel is buried — compare panel msg ID to thread's last message
+            # If buried, delete + resend at bottom; otherwise just edit in place
+            panel_is_buried = False
+            if knock_msg_id and thread.last_message_id:
+                panel_is_buried = knock_msg_id != thread.last_message_id
 
-            try:
-                embed = shared.create_knock_management_embed(owner, self.pending_knocks.get(vc_id, []), guild, vc_data)
-                view = shared.KnockManagementView(self.bot, self, owner.id, vc_id)
-                msg = await thread.send(content=owner.mention, embed=embed, view=view)
-                self.bot.add_view(view, message_id=msg.id)
-                vc_data['knock_mgmt_msg_id'] = msg.id
-                shared.logger.info(f"Recreated knock management message for VC {vc_id}")
-            except Exception as e:
-                shared.logger.error(f"Failed to recreate knock management message: {e}")
+            if panel_is_buried and knock_msg_id:
+                # Delete old and resend at bottom
+                try:
+                    old_msg = thread.get_partial_message(knock_msg_id)
+                    await old_msg.delete()
+                except (discord.NotFound, discord.Forbidden):
+                    pass
+                except Exception as e:
+                    shared.logger.debug(f"Failed to delete old knock panel message: {e}")
 
-            await self.save_state()
+                new_msg = await thread.send(embed=embed, view=view)
+                self.bot.add_view(view, message_id=new_msg.id)
+                vc_data['knock_mgmt_msg_id'] = new_msg.id
+                await self.save_state()
+            elif knock_msg_id:
+                # Panel is already at the bottom — just edit in place
+                try:
+                    msg = thread.get_partial_message(knock_msg_id)
+                    await msg.edit(embed=embed, view=view)
+                    self.bot.add_view(view, message_id=knock_msg_id)
+                except discord.NotFound:
+                    # Message gone, resend
+                    new_msg = await thread.send(embed=embed, view=view)
+                    self.bot.add_view(view, message_id=new_msg.id)
+                    vc_data['knock_mgmt_msg_id'] = new_msg.id
+                    await self.save_state()
+            else:
+                # No existing panel, send fresh
+                new_msg = await thread.send(embed=embed, view=view)
+                self.bot.add_view(view, message_id=new_msg.id)
+                vc_data['knock_mgmt_msg_id'] = new_msg.id
+                await self.save_state()
+
+            shared.logger.debug(f"Updated knock panel for VC {vc_id}, pending={len(self.pending_knocks.get(vc_id, []))}, buried={panel_is_buried}")
         except discord.Forbidden:
             shared.logger.error(f"No permission to update knock panel for VC {vc_id}")
         except Exception as e:
@@ -1840,6 +1889,8 @@ class VC(commands.Cog):
             await thread.send(f"🔔 {owner.mention} You have {pending_count} pending knock request{'s' if pending_count > 1 else ''}!")
             self.last_knock_ping[vc_id] = now
             shared.logger.info(f"Sent knock ping for VC {vc_id} ({pending_count} requests)")
+            # Re-send settings panel at bottom so it doesn't get buried
+            await self.update_knock_panel(vc_id)
         except discord.Forbidden:
             shared.logger.error(f"No permission to send knock ping in thread {thread_id}")
         except Exception as e:
@@ -1855,7 +1906,13 @@ class VC(commands.Cog):
         # Another call might have created the thread while we were waiting
         if vc_data.get('thread_id'):
             existing_thread = self.bot.get_channel(vc_data['thread_id'])
-            if existing_thread and not (isinstance(existing_thread, discord.Thread) and existing_thread.archived):
+            if existing_thread:
+                if isinstance(existing_thread, discord.Thread) and existing_thread.archived:
+                    try:
+                        await existing_thread.edit(archived=False)
+                    except Exception as e:
+                        shared.logger.debug(f"Failed to unarchive existing thread for VC {vc_id}: {e}")
+
                 shared.logger.info(f"Thread already exists for VC {vc_id}, skipping recreation")
                 # Return the existing thread - try to get the knock msg too
                 knock_msg_id = vc_data.get('knock_mgmt_msg_id')
@@ -1872,7 +1929,7 @@ class VC(commands.Cog):
             return None, None
 
         guild = vc.guild
-        owner = guild.get_member(vc_data['owner_id'])
+        owner = await shared.validate_member(guild, vc_data['owner_id'])
         if not owner:
             shared.logger.warning(f"Cannot recreate thread for VC {vc_id}, owner not found")
             return None, None
@@ -1927,8 +1984,9 @@ class VC(commands.Cog):
                     )
                 shared.logger.info(f"Created new thread {thread.id} for VC {vc_id}")
 
-            # FIX: Save thread_id IMMEDIATELY after finding/creating thread
-            vc_data['thread_id'] = thread.id
+            # FIX: Save thread_id and knock_mgmt_msg_id under lock to prevent races
+            async with self._active_vcs_lock:
+                vc_data['thread_id'] = thread.id
 
             try:
                 await thread.add_user(owner)
@@ -1940,7 +1998,8 @@ class VC(commands.Cog):
             knock_msg = await thread.send(content=owner.mention, embed=embed, view=view)
             self.bot.add_view(view, message_id=knock_msg.id)
 
-            vc_data['knock_mgmt_msg_id'] = knock_msg.id
+            async with self._active_vcs_lock:
+                vc_data['knock_mgmt_msg_id'] = knock_msg.id
             await self.save_state()
 
             shared.logger.info(f"Recreated settings thread for VC {vc_id}: thread_id={thread.id}")
@@ -2020,22 +2079,31 @@ class VC(commands.Cog):
 
         if thread_id and msg_id:
             thread = self.bot.get_channel(thread_id)
+            if not thread:
+                try:
+                    thread = await self.bot.fetch_channel(thread_id)
+                except discord.NotFound:
+                    pass
             if thread:
                 try:
                     msg = thread.get_partial_message(msg_id)
                     await msg.delete()
-                except Exception:
-                    pass
+                except Exception as e:
+                    shared.logger.debug(f"Failed to delete accepted knock message {msg_id}: {e}")
 
                 try:
                     user = thread.guild.get_member(user_id)
                     if user:
                         await thread.remove_user(user)
-                except Exception:
-                    pass
+                except Exception as e:
+                    shared.logger.debug(f"Failed to remove user {user_id} from thread: {e}")
 
         if vc_id in self.accepted_knocks and not self.accepted_knocks[vc_id]:
             del self.accepted_knocks[vc_id]
+
+        # Re-send settings panel at bottom so it doesn't get buried by add/remove messages
+        if vc_id in self.active_vcs:
+            await self.update_knock_panel(vc_id)
 
     # --- COMMANDS ---
 
@@ -2092,10 +2160,10 @@ class VC(commands.Cog):
 
         hub_id = await shared.get_config(f"hub_channel_id_{message.guild.id}")
         if hub_id and message.channel.id == int(hub_id):
-            try: 
+            try:
                 await message.delete()
-            except Exception: 
-                pass
+            except Exception as e:
+                shared.logger.debug(f"Failed to delete message in hub channel: {e}")
             return
 
         if isinstance(message.channel, discord.Thread):
@@ -2133,8 +2201,14 @@ class VC(commands.Cog):
                 # FIX: Ensure user is a Member, not just a User
                 member = message.guild.get_member(user.id)
                 if not member:
-                    failed.append(f"{user.mention} (not in server)")
-                    continue
+                    try:
+                        member = await message.guild.fetch_member(user.id)
+                    except discord.NotFound:
+                        failed.append(f"{user.mention} (not in server)")
+                        continue
+                    except discord.HTTPException:
+                        failed.append(f"{user.mention} (fetch failed)")
+                        continue
                 
                 if member.id in vc_data.get('bans', []): 
                     failed.append(f"{member.mention} (banned)")
@@ -2195,8 +2269,8 @@ class VC(commands.Cog):
                 elif not is_locked and after.name.startswith(prefix):
                     self._name_update_debounce[debounce_key] = now
                     await self.safe_edit_channel(after, name=after.name.replace(prefix, "", 1))
-            except Exception:
-                pass
+            except Exception as e:
+                shared.logger.debug(f"Failed to update VC prefix for {after.id}: {e}")
             await self.update_hub_embed(after.id)
         elif isinstance(after, discord.TextChannel) and before.id in self.vc_text_channels:
             if before.category_id != after.category_id:
@@ -2219,24 +2293,7 @@ class VC(commands.Cog):
                 # Check if this thread belongs to one of our VCs
                 for vc_id, data in list(self.active_vcs.items()):
                     if data.get('thread_id') == after.id:
-                        shared.logger.warning(f"Settings thread {after.id} for VC {vc_id} was archived, clearing references")
-                        # Clear thread references since it's now archived
-                        data['thread_id'] = None
-                        data['knock_mgmt_msg_id'] = None
-                        await self.save_state()
-
-                        # FIX: Try to notify owner if they're in the VC
-                        vc = self.bot.get_channel(vc_id)
-                        if vc and data.get('owner_id'):
-                            owner = after.guild.get_member(data['owner_id'])
-                            if owner and owner in vc.members:
-                                try:
-                                    await owner.send(
-                                        f"⚠️ Your VC settings thread was archived. "
-                                        f"Use `/vc reconnect` to restore it, or it will be auto-restored when you next use settings."
-                                    )
-                                except Exception:
-                                    pass
+                        shared.logger.info(f"Settings thread {after.id} for VC {vc_id} was archived by Discord. Keeping references so it can be unarchived later.")
                         break
         except Exception as e:
             shared.logger.error(f"Error handling thread update: {e}")
@@ -2267,8 +2324,8 @@ class VC(commands.Cog):
                     try:
                         await member.send("⏱️ Please wait 30s before creating another VC.")
                         await member.move_to(None)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        shared.logger.debug(f"Failed to notify/move cooldown user {member.id}: {e}")
                     return
 
                 # Determine VC type based on trigger channel
@@ -2329,8 +2386,8 @@ class VC(commands.Cog):
                     try:
                         await member.move_to(None)
                         await member.send("❌ You already have a VC.")
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        shared.logger.debug(f"Failed to notify/move duplicate VC owner {member.id}: {e}")
                     return
             created_vc = await self.create_vc(member, guild, is_basic=is_basic)
         except Exception as e:
@@ -2345,16 +2402,16 @@ class VC(commands.Cog):
             # Try to notify user
             try:
                 await member.send("❌ Failed to create VC. Please try again.")
-            except Exception:
-                pass
+            except Exception as e:
+                shared.logger.debug(f"Failed to send VC creation failure notification to {member.id}: {e}")
         finally:
             self.creating_vcs.pop(member.id, None)
 
     async def _monitor_empty_vc_with_context(self, vc_id, guild_id):
         """Monitor empty VC with preserved guild context - uses API verification"""
         try:
-            # Wait 60 seconds before checking
-            await asyncio.sleep(60)
+            # Wait 10 seconds before checking
+            await asyncio.sleep(10)
 
             # FIX: Check if cleanup already in progress
             if vc_id in self._cleanup_in_progress:
@@ -2444,7 +2501,7 @@ class VC(commands.Cog):
                     shared.logger.debug(f"VC {vc_id} data missing during transfer, aborting")
                     return
 
-                old_owner = fresh_channel.guild.get_member(old_owner_id)
+                old_owner = await shared.validate_member(fresh_channel.guild, old_owner_id)
                 if old_owner and old_owner in fresh_channel.members:
                     shared.logger.info(f"Owner {old_owner_id} rejoined VC {vc_id}, aborting transfer")
                     return
@@ -2490,7 +2547,7 @@ class VC(commands.Cog):
                 return
 
             old_owner_id = vc_data['owner_id']
-            old_owner = voice_channel.guild.get_member(old_owner_id)
+            old_owner = await shared.validate_member(voice_channel.guild, old_owner_id)
 
             # FIX: Don't save state yet - update in memory only
             vc_data['owner_id'] = new_owner.id
@@ -2508,45 +2565,51 @@ class VC(commands.Cog):
             thread_id = vc_data.get('thread_id')
             if thread_id:
                 thread = self.bot.get_channel(thread_id)
+                if not thread:
+                    try:
+                        thread = await self.bot.fetch_channel(thread_id)
+                    except discord.NotFound:
+                        pass
                 if thread:
-                    # FIX: If thread is archived, delete it instead of unarchiving
+                    # FIX: If thread is archived, unarchive it
                     if isinstance(thread, discord.Thread) and thread.archived:
-                        await self._delete_thread(thread_id)
-                        vc_data['thread_id'] = None
-                        vc_data['knock_mgmt_msg_id'] = None
-                    else:
                         try:
-                            if old_owner:
-                                try:
-                                    await thread.remove_user(old_owner)
-                                except Exception:
-                                    pass
-                            await thread.add_user(new_owner)
-                            try:
-                                await thread.edit(name=f"🔒 {clean_name}'s VC Settings")
-                            except Exception:
-                                pass
-
-                            # FIX: Delete old knock management message BEFORE creating new one
-                            old_knock_msg_id = vc_data.get('knock_mgmt_msg_id')
-                            if old_knock_msg_id:
-                                try:
-                                    old_msg = await thread.fetch_message(old_knock_msg_id)
-                                    await old_msg.delete()
-                                    shared.logger.debug(f"Deleted old knock mgmt message {old_knock_msg_id} during transfer")
-                                except discord.NotFound:
-                                    shared.logger.debug(f"Old knock mgmt message {old_knock_msg_id} already deleted")
-                                except Exception as e:
-                                    shared.logger.warning(f"Failed to delete old knock mgmt message: {e}")
-
-                            # Now create new knock management message
-                            embed = shared.create_knock_management_embed(new_owner, self.pending_knocks.get(vc_id, []), voice_channel.guild, vc_data)
-                            view = shared.KnockManagementView(self.bot, self, new_owner.id, vc_id)
-                            knock_msg = await thread.send(content=new_owner.mention, embed=embed, view=view)
-                            self.bot.add_view(view, message_id=knock_msg.id)
-                            vc_data['knock_mgmt_msg_id'] = knock_msg.id
+                            await thread.edit(archived=False)
                         except Exception as e:
-                            shared.logger.error(f"Thread transfer failed: {e}")
+                            shared.logger.debug(f"Failed to unarchive thread {thread_id} during transfer: {e}")
+
+                    try:
+                        if old_owner:
+                            try:
+                                await thread.remove_user(old_owner)
+                            except Exception as e:
+                                shared.logger.debug(f"Failed to remove old owner from thread: {e}")
+                        await thread.add_user(new_owner)
+                        try:
+                            await thread.edit(name=f"🔒 {clean_name}'s VC Settings")
+                        except Exception as e:
+                            shared.logger.debug(f"Failed to rename thread during transfer: {e}")
+
+                        # FIX: Delete old knock management message BEFORE creating new one
+                        old_knock_msg_id = vc_data.get('knock_mgmt_msg_id')
+                        if old_knock_msg_id:
+                            try:
+                                old_msg = await thread.fetch_message(old_knock_msg_id)
+                                await old_msg.delete()
+                                shared.logger.debug(f"Deleted old knock mgmt message {old_knock_msg_id} during transfer")
+                            except discord.NotFound:
+                                shared.logger.debug(f"Old knock mgmt message {old_knock_msg_id} already deleted")
+                            except Exception as e:
+                                shared.logger.warning(f"Failed to delete old knock mgmt message: {e}")
+
+                        # Now create new knock management message
+                        embed = shared.create_knock_management_embed(new_owner, self.pending_knocks.get(vc_id, []), voice_channel.guild, vc_data)
+                        view = shared.KnockManagementView(self.bot, self, new_owner.id, vc_id)
+                        knock_msg = await thread.send(content=new_owner.mention, embed=embed, view=view)
+                        self.bot.add_view(view, message_id=knock_msg.id)
+                        vc_data['knock_mgmt_msg_id'] = knock_msg.id
+                    except Exception as e:
+                        shared.logger.error(f"Thread transfer failed: {e}")
 
             await self.delete_hub_message(vc_id)
             if not vc_data.get('ghost', False) and not vc_data.get('unlocked', False):
@@ -2794,12 +2857,12 @@ class VC(commands.Cog):
                                 try:
                                     await m.delete()
                                     shared.logger.info(f"Deleted duplicate knock message for VC {vc_id}")
-                                except Exception:
-                                    pass
+                                except Exception as e:
+                                    shared.logger.debug(f"Failed to delete duplicate knock message: {e}")
             except Exception as e:
                 shared.logger.error(f"Failed to check duplicates: {e}")
             
-            owner = voice_channel.guild.get_member(vc_data['owner_id'])
+            owner = await shared.validate_member(voice_channel.guild, vc_data['owner_id'])
             if not owner: 
                 return False
             
@@ -2920,7 +2983,7 @@ class VC(commands.Cog):
         
         try:
             msg = hub.get_partial_message(vc_data['message_id'])
-            owner = vc.guild.get_member(vc_data['owner_id'])
+            owner = await shared.validate_member(vc.guild, vc_data['owner_id'])
             if not owner:
                 return
             is_full = vc.user_limit != 0 and len(vc.members) >= vc.user_limit
@@ -2928,10 +2991,10 @@ class VC(commands.Cog):
             embed.set_author(name=vc.name, icon_url=owner.display_avatar.url)
             embed.description = "🔴 **FULL**\nClick **Knock** to request entry." if is_full else "Click **Knock** to request entry."
             await msg.edit(embed=embed)
-        except discord.NotFound: 
+        except discord.NotFound:
             await self.create_hub_message(vc)
-        except Exception: 
-            pass
+        except Exception as e:
+            shared.logger.debug(f"Failed to update hub embed for VC {vc.id}: {e}")
 
     async def get_or_create_hub(self, guild, category):
         hub_id = await shared.get_config(f"hub_channel_id_{guild.id}")
@@ -2953,7 +3016,8 @@ class VC(commands.Cog):
             hub = await guild.create_text_channel("🔑-join-locked-vcs", category=category, overwrites=overwrites)
             await shared.set_config(f'hub_channel_id_{guild.id}', hub.id)
             return hub
-        except Exception: 
+        except Exception as e:
+            shared.logger.error(f"Failed to create hub channel in guild {guild.id}: {e}")
             return None
 
     async def create_vc(self, owner, guild, is_basic=False):
@@ -2972,23 +3036,13 @@ class VC(commands.Cog):
         if len([c for c in category.channels if isinstance(c, discord.VoiceChannel)]) >= 49:
             return None
 
-        # FIX: Basic VCs don't use presets
         clean_name = shared.sanitize_name(owner.display_name, owner.id)[:20]
         if is_basic:
             vc_name = f"{clean_name}'s VC"  # No lock emoji
             vc_limit, vc_bitrate, vc_bans = 0, 64000, []
         else:
-            # Locked VCs: load presets
-            user_presets = await shared.get_user_presets(owner.id)
             vc_name = f"🔒 {clean_name}'s VC"
             vc_limit, vc_bitrate, vc_bans = 0, 64000, []
-
-            default_preset = next((v for k, v in user_presets.items() if k.lower() == "default"), None)
-            if default_preset:
-                vc_name = default_preset.get("name", vc_name)[:100]
-                vc_limit = max(0, min(default_preset.get("limit", 0), self.get_max_voice_limit(guild)))
-                vc_bitrate = min(default_preset.get("bitrate", 64000), self.get_guild_bitrate_limit(guild))
-                vc_bans = [uid for uid in default_preset.get("bans", []) if guild.get_member(uid)]
 
         # FIX: Basic VCs allow everyone to connect
         if is_basic:
@@ -3015,8 +3069,8 @@ class VC(commands.Cog):
 
             try:
                 await owner.move_to(vc)
-            except Exception:
-                pass
+            except Exception as e:
+                shared.logger.debug(f"Failed to move owner {owner.id} to new VC {vc.id}: {e}")
 
             async with self._active_vcs_lock:
                 self.active_vcs[vc.id] = {

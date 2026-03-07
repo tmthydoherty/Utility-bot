@@ -68,14 +68,6 @@ async def init_db():
                     value TEXT
                 )
             ''')
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS presets (
-                    user_id INTEGER,
-                    preset_name TEXT,
-                    data TEXT,
-                    PRIMARY KEY (user_id, preset_name)
-                )
-            ''')
 
             # FIX: Table for persisting accepted knocks across restarts
             await db.execute('''
@@ -163,7 +155,8 @@ async def load_active_vcs():
                                         bans_list = []
                                     # Ensure all bans are integers
                                     bans_list = [int(b) for b in bans_list if isinstance(b, (int, str)) and str(b).isdigit()]
-                                except (json.JSONDecodeError, TypeError):
+                                except (json.JSONDecodeError, TypeError) as e:
+                                    logger.warning(f"Corrupted bans data for VC {row[0]}, resetting to empty: {e}")
                                     bans_list = []
                             else:
                                 bans_list = []
@@ -410,8 +403,8 @@ def sanitize_name(name, user_id=None):
 def create_knock_management_embed(owner, pending_knocks, guild, vc_data=None):
     """Create the knock management embed for the private thread"""
     embed = discord.Embed(
-        title="⚙️ VC Control Panel",
-        color=discord.Color.blue()
+        title="🚨 NEW KNOCK REQUEST 🚨" if pending_knocks else "⚙️ VC Control Panel",
+        color=discord.Color.orange() if pending_knocks else discord.Color.blue()
     )
     
     if pending_knocks:
@@ -419,14 +412,18 @@ def create_knock_management_embed(owner, pending_knocks, guild, vc_data=None):
         for user_id in pending_knocks[:5]:  # Show max 5
             member = guild.get_member(user_id)
             if member:
-                knock_list.append(f"• {member.mention}")
+                knock_list.append(f"**> {member.mention}**")
             else:
-                knock_list.append(f"• User {user_id} (left server)")
+                knock_list.append(f"**> User {user_id} (left server)**")
         
         if len(pending_knocks) > 5:
-            knock_list.append(f"• *...and {len(pending_knocks) - 5} more*")
+            knock_list.append(f"**> *...and {len(pending_knocks) - 5} more***")
         
-        embed.description = f"**🔔 Knock Requests ({len(pending_knocks)}):**\n" + "\n".join(knock_list)
+        embed.description = (
+            f"### Someone wants to join your VC!\n"
+            f"**Please Accept or Deny below.**\n\n"
+            f"{chr(10).join(knock_list)}"
+        )
     else:
         if vc_data:
             lock_status = "🔒 **LOCKED**" if not vc_data.get('unlocked', False) else "🔓 **UNLOCKED**"
@@ -474,6 +471,15 @@ async def delete_thread_safe(bot, thread_id):
         return
     try:
         thread = bot.get_channel(thread_id)
+        if not thread:
+            try:
+                thread = await bot.fetch_channel(thread_id)
+            except discord.NotFound:
+                logger.debug(f"Thread {thread_id} already deleted (not found via fetch)")
+                return
+            except Exception as e:
+                logger.error(f"Error fetching thread {thread_id} for deletion: {e}")
+                return
         if thread:
             await thread.delete()
             logger.debug(f"Deleted thread {thread_id}")
@@ -483,14 +489,20 @@ async def delete_thread_safe(bot, thread_id):
         logger.error(f"Failed to delete thread {thread_id}: {e}")
 
 async def check_thread_valid(bot, thread_id):
-    """Check if thread is valid and not archived. If archived, delete it."""
+    """Check if thread is valid. If archived, unarchive it."""
     if not thread_id:
         return None
 
     thread = bot.get_channel(thread_id)
     if not thread:
-        logger.debug(f"Thread {thread_id} not found in cache")
-        return None
+        try:
+            thread = await bot.fetch_channel(thread_id)
+        except discord.NotFound:
+            logger.debug(f"Thread {thread_id} not found via fetch")
+            return None
+        except Exception as e:
+            logger.debug(f"Error fetching thread {thread_id}: {e}")
+            return None
 
     # Verify it's actually a thread
     if not isinstance(thread, discord.Thread):
@@ -498,10 +510,13 @@ async def check_thread_valid(bot, thread_id):
         return None
 
     if thread.archived:
-        # Thread is archived - delete it instead of unarchiving
-        logger.info(f"Thread {thread_id} is archived, deleting")
-        await delete_thread_safe(bot, thread_id)
-        return None
+        # Thread is archived - unarchive it instead of deleting
+        logger.info(f"Thread {thread_id} is archived, unarchiving")
+        try:
+            await thread.edit(archived=False)
+        except Exception as e:
+            logger.error(f"Failed to unarchive thread {thread_id}: {e}")
+            return None
 
     return thread
 
@@ -527,8 +542,14 @@ async def validate_member(guild, user_id):
 
     member = guild.get_member(user_id)
     if not member:
-        logger.debug(f"User {user_id} is not a member of guild {guild.id}")
-        return None
+        try:
+            member = await guild.fetch_member(user_id)
+        except discord.NotFound:
+            logger.debug(f"User {user_id} is not a member of guild {guild.id}")
+            return None
+        except Exception as e:
+            logger.debug(f"Failed to fetch member {user_id} from guild {guild.id}: {e}")
+            return None
 
     return member
 
@@ -973,8 +994,14 @@ class UserSelectView(discord.ui.View):
                     # FIX: Ensure user is a Member
                     member = interaction.guild.get_member(user.id)
                     if not member:
-                        failed.append(f"{user.mention} (not in server)")
-                        continue
+                        try:
+                            member = await interaction.guild.fetch_member(user.id)
+                        except discord.NotFound:
+                            failed.append(f"{user.mention} (not in server)")
+                            continue
+                        except discord.HTTPException:
+                            failed.append(f"{user.mention} (fetch error)")
+                            continue
                     
                     # FIX: Ensure bans list exists
                     if 'bans' not in vc_data:
@@ -991,10 +1018,10 @@ class UserSelectView(discord.ui.View):
                             vc_data['bans'].append(member.id)
                         if await self.cog_ref.safe_set_permissions(vc, member, connect=False):
                             if member in vc.members:
-                                try: 
+                                try:
                                     await member.move_to(None)
-                                except Exception: 
-                                    pass
+                                except Exception as e:
+                                    logger.debug(f"Failed to disconnect banned user {member.id}: {e}")
                             banned.append(member.mention)
                         else:
                             failed.append(f"{member.mention} (permission error)")
@@ -1019,8 +1046,14 @@ class UserSelectView(discord.ui.View):
                     # FIX: Ensure user is a Member
                     member = interaction.guild.get_member(user.id)
                     if not member:
-                        failed.append(f"{user.mention} (not in server)")
-                        continue
+                        try:
+                            member = await interaction.guild.fetch_member(user.id)
+                        except discord.NotFound:
+                            failed.append(f"{user.mention} (not in server)")
+                            continue
+                        except discord.HTTPException:
+                            failed.append(f"{user.mention} (fetch error)")
+                            continue
                     
                     if member in vc.members:
                         try:
@@ -1051,8 +1084,14 @@ class UserSelectView(discord.ui.View):
                     # FIX: Ensure user is a Member, not just a User
                     member = interaction.guild.get_member(user.id)
                     if not member:
-                        failed.append(f"{user.mention} (not in server)")
-                        continue
+                        try:
+                            member = await interaction.guild.fetch_member(user.id)
+                        except discord.NotFound:
+                            failed.append(f"{user.mention} (not in server)")
+                            continue
+                        except discord.HTTPException:
+                            failed.append(f"{user.mention} (fetch error)")
+                            continue
                     
                     if member.id in vc_data.get('bans', []): 
                         skipped.append(f"{member.mention} (banned)")
@@ -1200,6 +1239,10 @@ class HubEntryView(discord.ui.View):
         if user.id in cog.pending_knocks[self.voice_id]:
             return await interaction.response.send_message("⏳ You already have a pending knock request.", ephemeral=True)
 
+        # Cap pending knocks to prevent resource exhaustion
+        if len(cog.pending_knocks[self.voice_id]) >= 25:
+            return await interaction.response.send_message("❌ This VC has too many pending knocks. Try again later.", ephemeral=True)
+
         # Add to pending knocks
         cog.pending_knocks[self.voice_id].append(user.id)
 
@@ -1225,6 +1268,7 @@ class KnockManagementView(discord.ui.View):
         self.accept_btn.custom_id = f"knock_accept:{voice_id}"
         self.deny_btn.custom_id = f"knock_deny:{voice_id}"
         self.settings_select.custom_id = f"knock_settings:{voice_id}"
+        self.reconnect_btn.custom_id = f"knock_reconnect:{voice_id}"
     
     def _get_cog(self):
         """Get cog reference - ALWAYS get fresh from bot to handle reloads"""
@@ -1390,7 +1434,6 @@ class KnockManagementView(discord.ui.View):
             discord.SelectOption(label="Add VIPs", description="Grant access to specific users", emoji="⭐"),
             discord.SelectOption(label="Kick Users", description="Remove users from VC", emoji="👢"),
             discord.SelectOption(label="Ban/Unban", description="Ban or unban users", emoji="⛔"),
-            discord.SelectOption(label="Manage Presets", description="Save/load VC presets", emoji="💾"),
         ],
         row=1
     )
@@ -1533,124 +1576,6 @@ class KnockManagementView(discord.ui.View):
         
         elif choice == "Kick Users":
             await interaction.response.send_message("Select to Kick:", view=UserSelectView('kick', vc, cog), ephemeral=True)
-        
-        elif choice == "Manage Presets":
-            view = discord.ui.View(timeout=60)
-            # Store voice_id for callbacks to use (more stable than vc object)
-            voice_id = self.voice_id
-
-            async def save_cb(inter):
-                # FIX: Refresh cog and vc references inside callback
-                fresh_cog = get_cog_safe(self.bot)
-                if not fresh_cog:
-                    return await inter.response.send_message("❌ System unavailable.", ephemeral=True)
-                fresh_vc = inter.guild.get_channel(voice_id)
-                if not fresh_vc:
-                    return await inter.response.send_message("❌ VC no longer exists.", ephemeral=True)
-                fresh_vc_data = fresh_cog.get_vc_data(voice_id)
-                if not fresh_vc_data:
-                    return await inter.response.send_message("❌ VC data not found.", ephemeral=True)
-                await inter.response.send_modal(SavePresetModal(fresh_vc, fresh_vc_data.get('bans', [])))
-
-            save_btn = discord.ui.Button(label="Save New", style=discord.ButtonStyle.success)
-            save_btn.callback = save_cb
-            view.add_item(save_btn)
-
-            user_presets = await get_user_presets(interaction.user.id)
-            if user_presets:
-                options = [discord.SelectOption(label=name[:100]) for name in list(user_presets.keys())[:25]]
-
-                async def load_cb(inter):
-                    p_name = select_load.values[0]
-                    data = user_presets.get(p_name)
-                    if not data or not isinstance(data, dict):
-                        return await inter.response.send_message("❌ Corrupted preset data.", ephemeral=True)
-
-                    # FIX: Refresh cog reference inside callback
-                    fresh_cog = get_cog_safe(self.bot)
-                    if not fresh_cog:
-                        return await inter.response.send_message("❌ System unavailable.", ephemeral=True)
-
-                    # FIX: Refresh vc reference inside callback
-                    fresh_vc = inter.guild.get_channel(voice_id)
-                    if not fresh_vc:
-                        return await inter.response.send_message("❌ VC no longer exists.", ephemeral=True)
-
-                    # FIX: Refresh vc_data reference
-                    fresh_vc_data = fresh_cog.get_vc_data(voice_id)
-                    if not fresh_vc_data:
-                        return await inter.response.send_message("❌ VC data not found.", ephemeral=True)
-
-                    # FIX: Better validation of preset data
-                    safe_name = str(data.get("name", "VC"))[:100]
-                    try:
-                        safe_limit = max(0, min(int(data.get("limit", 0)), fresh_cog.get_max_voice_limit(inter.guild)))
-                    except (ValueError, TypeError):
-                        safe_limit = 0
-                    try:
-                        safe_bitrate = min(int(data.get("bitrate", 64000)), fresh_cog.get_guild_bitrate_limit(inter.guild))
-                    except (ValueError, TypeError):
-                        safe_bitrate = 64000
-
-                    # FIX: Preserve lock prefix when loading preset name
-                    # If VC is locked, ensure the lock emoji is preserved
-                    is_locked = not fresh_vc_data.get('unlocked', False)
-                    prefix = "🔒 "
-
-                    if is_locked:
-                        # Remove any existing prefix from preset name, then add correct prefix
-                        clean_preset_name = safe_name.replace(prefix, "").strip()
-                        final_name = f"{prefix}{clean_preset_name}"
-                    else:
-                        # Unlocked VC - remove prefix if present
-                        final_name = safe_name.replace(prefix, "").strip()
-
-                    # FIX: Set debounce key BEFORE editing channel to prevent on_guild_channel_update interference
-                    import time
-                    debounce_key = f"preset_load_{voice_id}"
-                    fresh_cog._name_update_debounce[debounce_key] = time.time()
-
-                    await fresh_cog.safe_edit_channel(fresh_vc, name=final_name, user_limit=safe_limit, bitrate=safe_bitrate)
-
-                    if 'bans' in data and isinstance(data['bans'], list):
-                        current_bans = set(fresh_vc_data.get('bans', []))
-                        valid_preset_bans = set()
-                        for b in data['bans']:
-                            try:
-                                valid_preset_bans.add(int(b))
-                            except (ValueError, TypeError):
-                                continue
-
-                        new_bans = list(current_bans.union(valid_preset_bans))
-                        fresh_vc_data['bans'] = new_bans
-                        await fresh_cog.save_state()
-                        bans_to_apply = valid_preset_bans - current_bans
-                        ops = []
-                        for bid in bans_to_apply:
-                            m = inter.guild.get_member(bid)
-                            if m:
-                                ops.append(fresh_cog.safe_set_permissions(fresh_vc, m, connect=False))
-                        if ops:
-                            await fresh_cog.batch_operations(ops)
-
-                    await fresh_cog.update_hub_embed(voice_id)
-                    await inter.response.send_message(f"✅ Loaded **{p_name}**.", ephemeral=True)
-
-                async def delete_cb(inter):
-                    if not select_load.values:
-                        return await inter.response.send_message("❌ Select preset.", ephemeral=True)
-                    p_name = select_load.values[0]
-                    await delete_preset(inter.user.id, p_name)
-                    await inter.response.send_message(f"🗑️ Deleted **{p_name}**.", ephemeral=True)
-
-                select_load = discord.ui.Select(placeholder="Load Preset...", options=options)
-                select_load.callback = load_cb
-                view.add_item(select_load)
-                delete_btn = discord.ui.Button(label="Delete", style=discord.ButtonStyle.danger, emoji="🗑️")
-                delete_btn.callback = delete_cb
-                view.add_item(delete_btn)
-
-            await interaction.response.send_message("💾 **Preset Manager**", view=view, ephemeral=True)
 
     @discord.ui.button(label="Reconnect VC", style=discord.ButtonStyle.secondary, emoji="🔄", row=2)
     async def reconnect_btn(self, interaction: discord.Interaction, button: discord.ui.Button):

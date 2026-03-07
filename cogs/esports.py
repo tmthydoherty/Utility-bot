@@ -601,6 +601,187 @@ class StrafeClient:
         return maps
 
 
+def _match_event_str(m: dict) -> str:
+    """Return a short event label for a PandaScore match: 'VCT Masters Santiago 2026 — Group Stage'."""
+    league = (m.get('league') or {}).get('name', '')
+    serie = (m.get('serie') or {}).get('full_name', '')
+    tournament = (m.get('tournament') or {}).get('name', '')
+    event = serie or league
+    if event and tournament:
+        return f"{event} — {tournament}"
+    return event or tournament or 'Unknown Event'
+
+
+def _match_serie_key(slug: str, m: dict) -> str:
+    """Stable key for grouping matches by their parent event (game + serie)."""
+    serie_id = (m.get('serie') or {}).get('id', 0)
+    league_id = (m.get('league') or {}).get('id', 0)
+    return f"{slug}:{league_id}:{serie_id}"
+
+
+class ForcePublishModeView(discord.ui.View):
+    """First step after clicking Force Publish: choose single match or entire event."""
+
+    def __init__(self, cog, sorted_matches: dict):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.sorted_matches = sorted_matches
+
+    @discord.ui.button(label="Single Match", style=discord.ButtonStyle.primary, row=0)
+    async def single_match(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = ForcePublishView(self.cog, self.sorted_matches)
+        await interaction.response.edit_message(content="Select a match to post:", view=view)
+
+    @discord.ui.button(label="Post Entire Event", style=discord.ButtonStyle.green, row=0)
+    async def entire_event(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = ForcePublishEventView(self.cog, self.sorted_matches)
+        await interaction.response.edit_message(
+            content="Select an event to bulk-post all its upcoming matches:",
+            view=view
+        )
+
+
+class ForcePublishView(discord.ui.View):
+    """Lets admins select and force-post a specific upcoming match that was never published."""
+
+    def __init__(self, cog, matches_by_id: dict):
+        # matches_by_id: {mid_str: (game_slug, match_dict)}
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.matches_by_id = matches_by_id
+        self.selected_id = None
+
+        options = []
+        for mid, (slug, m) in list(matches_by_id.items())[:25]:
+            opps = m.get('opponents', [])
+            name_a = opps[0]['opponent']['name'] if len(opps) > 0 else "TBD"
+            name_b = opps[1]['opponent']['name'] if len(opps) > 1 else "TBD"
+            label = f"{name_a} vs {name_b}"[:100]
+            dt = safe_parse_datetime(m.get('begin_at', ''))
+            time_str = dt.strftime("%b %d %H:%M UTC") if dt else "TBD"
+            event = _match_event_str(m)
+            desc = f"{event} · {time_str}"[:100]
+            options.append(discord.SelectOption(label=label, value=mid, description=desc))
+
+        self.select = discord.ui.Select(
+            placeholder="Select match to force-publish...",
+            options=options,
+            row=0
+        )
+        self.select.callback = self.on_select
+        self.add_item(self.select)
+
+        self.confirm_btn = discord.ui.Button(
+            label="Select a match first",
+            style=discord.ButtonStyle.green,
+            disabled=True,
+            row=1
+        )
+        self.confirm_btn.callback = self.on_confirm
+        self.add_item(self.confirm_btn)
+
+    async def on_select(self, interaction: discord.Interaction):
+        self.selected_id = self.select.values[0]
+        slug, m = self.matches_by_id[self.selected_id]
+        opps = m.get('opponents', [])
+        name_a = opps[0]['opponent']['name'] if len(opps) > 0 else "TBD"
+        name_b = opps[1]['opponent']['name'] if len(opps) > 1 else "TBD"
+        self.confirm_btn.disabled = False
+        self.confirm_btn.label = f"Post: {name_a} vs {name_b}"[:80]
+        await interaction.response.edit_message(view=self)
+
+    async def on_confirm(self, interaction: discord.Interaction):
+        if not self.selected_id:
+            await interaction.response.send_message("Please select a match first.", ephemeral=True)
+            return
+        slug, m = self.matches_by_id[self.selected_id]
+        await interaction.response.defer(ephemeral=True)
+        success = await self.cog._post_match_to_channel(m, slug)
+        opps = m.get('opponents', [])
+        name_a = opps[0]['opponent']['name'] if len(opps) > 0 else "TBD"
+        name_b = opps[1]['opponent']['name'] if len(opps) > 1 else "TBD"
+        if success:
+            await interaction.followup.send(f"✅ Posted **{name_a} vs {name_b}**!", ephemeral=True)
+        else:
+            await interaction.followup.send("❌ Failed to post match. Check bot logs.", ephemeral=True)
+        self.stop()
+
+
+class ForcePublishEventView(discord.ui.View):
+    """Groups unposted matches by event; lets admins bulk-post all matches for one event."""
+
+    def __init__(self, cog, matches_by_id: dict):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.selected_key = None
+
+        # Group matches by their parent event (league + serie)
+        self.events: Dict[str, List[tuple]] = {}
+        for mid, (slug, m) in matches_by_id.items():
+            key = _match_serie_key(slug, m)
+            self.events.setdefault(key, []).append((slug, m))
+
+        options = []
+        for key, entries in list(self.events.items())[:25]:
+            slug, m = entries[0]
+            league = (m.get('league') or {}).get('name', '')
+            serie = (m.get('serie') or {}).get('full_name', '')
+            event_label = (serie or league or 'Unknown Event')[:100]
+            count = len(entries)
+            desc = f"{GAMES.get(slug, slug)} · {count} match{'es' if count != 1 else ''}"[:100]
+            options.append(discord.SelectOption(label=event_label, value=key, description=desc))
+
+        self.select = discord.ui.Select(
+            placeholder="Select event to bulk-post...",
+            options=options,
+            row=0
+        )
+        self.select.callback = self.on_select
+        self.add_item(self.select)
+
+        self.confirm_btn = discord.ui.Button(
+            label="Select an event first",
+            style=discord.ButtonStyle.green,
+            disabled=True,
+            row=1
+        )
+        self.confirm_btn.callback = self.on_confirm
+        self.add_item(self.confirm_btn)
+
+    async def on_select(self, interaction: discord.Interaction):
+        self.selected_key = self.select.values[0]
+        entries = self.events[self.selected_key]
+        count = len(entries)
+        slug, m = entries[0]
+        serie = (m.get('serie') or {}).get('full_name', '') or (m.get('league') or {}).get('name', '')
+        self.confirm_btn.disabled = False
+        self.confirm_btn.label = f"Post All {count} Match{'es' if count != 1 else ''}: {serie}"[:80]
+        await interaction.response.edit_message(view=self)
+
+    async def on_confirm(self, interaction: discord.Interaction):
+        if not self.selected_key:
+            await interaction.response.send_message("Please select an event first.", ephemeral=True)
+            return
+        entries = self.events[self.selected_key]
+        await interaction.response.defer(ephemeral=True)
+
+        posted, skipped = 0, 0
+        for slug, m in entries:
+            success = await self.cog._post_match_to_channel(m, slug)
+            if success:
+                posted += 1
+            else:
+                skipped += 1
+
+        slug, m = entries[0]
+        serie = (m.get('serie') or {}).get('full_name', '') or (m.get('league') or {}).get('name', '')
+        msg = f"✅ Posted **{posted}** match{'es' if posted != 1 else ''} for **{serie}**."
+        if skipped:
+            msg += f"\n⚠️ {skipped} already posted or failed — check bot logs."
+        await interaction.followup.send(msg, ephemeral=True)
+        self.stop()
+
+
 class Esports(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -860,26 +1041,26 @@ class Esports(commands.Cog):
                 return False
 
         # 2. Check if it's a major league for this game
-        if game_slug and game_slug in MAJOR_LEAGUE_KEYWORDS:
+        # EXCEPTION: International LAN events (Masters, Majors, World Championship, etc.) bypass
+        # this check so they always pass through regardless of which region hosts them.
+        is_international_lan = any(k in event_name for k in INTERNATIONAL_LAN_KEYWORDS)
+        if game_slug and game_slug in MAJOR_LEAGUE_KEYWORDS and not is_international_lan:
             is_major_league = any(k in event_name for k in MAJOR_LEAGUE_KEYWORDS[game_slug])
             if not is_major_league:
                 return False
 
-        # 3. RLCS early round filtering - skip Swiss/early matches, only show top 16+
+        # 3. RLCS early round filtering - only applied to REGIONAL events, never LANs
+        # At LAN events (Majors/Worlds) every round is worth showing.
         if game_slug == "rl":
-            is_early_round = any(k in event_name for k in RLCS_EARLY_ROUND_KEYWORDS)
-            if is_early_round:
-                return False
-            # For LAN events (Majors/Worlds), apply extra filtering (day 2)
-            # LANs have Swiss stage spanning multiple days, so filter more aggressively
             is_rlcs_lan = any(k in event_name for k in RLCS_LAN_IDENTIFIERS)
-            # Don't classify regional qualifiers as LANs even if the series contains "major"
-            # e.g. "RLCS 2026 Major 1 NA Regional Open 3 Day 2" is a regional, NOT a LAN
+            # Regional qualifiers can contain "major" in series name - don't treat them as LANs
+            # e.g. "RLCS 2026 Major 1 NA Regional Open 3 Day 1" is NOT a LAN
             if is_rlcs_lan and any(k in event_name for k in ["regional", "open", "qualifier", "closed"]):
                 is_rlcs_lan = False
-            if is_rlcs_lan:
-                is_lan_early_round = any(k in event_name for k in RLCS_LAN_EXTRA_KEYWORDS)
-                if is_lan_early_round:
+            # For regional events only, filter out early rounds (day 1, group stage, etc.)
+            if not is_rlcs_lan:
+                is_early_round = any(k in event_name for k in RLCS_EARLY_ROUND_KEYWORDS)
+                if is_early_round:
                     return False
 
         # 4. VCT Challengers sub-regional filtering - ALWAYS exclude these
@@ -1808,6 +1989,110 @@ class Esports(commands.Cog):
         for mid, info in data.get("active_matches", {}).items():
             t = info.get('teams', [])
             if len(t) >= 2: self.bot.add_view(PredictionView(mid, t[0], t[1]))
+
+    # --- FORCE PUBLISH ---
+
+    async def _post_match_to_channel(self, m: dict, game_slug: str) -> bool:
+        """Post a single match to the configured feed channel. Returns True on success."""
+        mid = str(m['id'])
+        name = GAMES.get(game_slug, game_slug)
+
+        data = load_data_sync()
+        chan_id = data.get("channel_id")
+        if not chan_id:
+            logger.warning("Force publish: no channel set")
+            return False
+
+        channel = self.bot.get_channel(chan_id)
+        if not channel:
+            logger.warning("Force publish: channel not found")
+            return False
+
+        async with self.data_lock:
+            d = load_data_sync()
+            if mid in d.get("active_matches", {}) or mid in d.get("processed_matches", []):
+                logger.info(f"Force publish: match {mid} already posted/processed")
+                return False
+
+        try:
+            opps = m.get('opponents', [])
+            if len(opps) < 2:
+                return False
+            t_a_base, t_b_base = opps[0]['opponent'], opps[1]['opponent']
+            t_a = {
+                "name": t_a_base['name'], "acronym": t_a_base.get('acronym'),
+                "id": t_a_base['id'],
+                "roster": await self.fetch_roster(t_a_base['id'], t_a_base['name'], game_slug),
+                "flag": t_a_base.get('location'), "image_url": t_a_base.get('image_url')
+            }
+            t_b = {
+                "name": t_b_base['name'], "acronym": t_b_base.get('acronym'),
+                "id": t_b_base['id'],
+                "roster": await self.fetch_roster(t_b_base['id'], t_b_base['name'], game_slug),
+                "flag": t_b_base.get('location'), "image_url": t_b_base.get('image_url')
+            }
+            f = await self.generate_banner(t_a.get('image_url'), t_b.get('image_url'), GAME_LOGOS[game_slug], game_slug)
+            e = self.build_match_embed(game_slug, name, m, t_a, t_b, {}, m.get('official_stream_url'), f is not None)
+            msg = await channel.send(embed=e, file=f, view=PredictionView(mid, t_a, t_b))
+            async with self.data_lock:
+                d = load_data_sync()
+                d["active_matches"][mid] = {
+                    "message_id": msg.id, "channel_id": chan_id, "game_slug": game_slug,
+                    "start_time": m['begin_at'], "teams": [t_a, t_b], "votes": {},
+                    "fail_count": 0, "stream_url": m.get('official_stream_url'), "status": "active"
+                }
+                save_data_sync(d)
+            logger.info(f"Force published match {mid}: {t_a['name']} vs {t_b['name']}")
+            return True
+        except Exception as e:
+            logger.error(f"Force publish match {mid} failed: {e}")
+            return False
+
+    async def show_force_publish_menu(self, interaction: discord.Interaction):
+        """Fetch upcoming unposted matches and show an admin menu to force-post one."""
+        await interaction.response.defer(ephemeral=True)
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+        all_matches: Dict[str, tuple] = {}  # {mid: (slug, match_dict)}
+
+        for slug in GAMES:
+            params = {
+                "filter[status]": "not_started",
+                "sort": "begin_at",
+                "range[begin_at]": f"{now.isoformat()},{(now + datetime.timedelta(hours=48)).isoformat()}"
+            }
+            matches = await self.get_pandascore_data(f"/{slug}/matches", params=params)
+            if not matches:
+                continue
+            async with self.data_lock:
+                d = load_data_sync()
+                active = d.get("active_matches", {})
+                processed = d.get("processed_matches", [])
+            for m in matches:
+                mid = str(m['id'])
+                if len(m.get('opponents', [])) < 2:
+                    continue
+                if mid not in active and mid not in processed:
+                    all_matches[mid] = (slug, m)
+
+        if not all_matches:
+            await interaction.followup.send("No upcoming unposted matches found in the next 48 hours.", ephemeral=True)
+            return
+
+        # Sort by start time
+        def _sort_key(item):
+            _, m = item[1]
+            dt = safe_parse_datetime(m.get('begin_at', ''))
+            return dt or datetime.datetime(9999, 1, 1, tzinfo=datetime.timezone.utc)
+
+        sorted_matches = dict(sorted(all_matches.items(), key=_sort_key))
+        view = ForcePublishModeView(self, sorted_matches)
+        await interaction.followup.send(
+            f"Found **{len(sorted_matches)}** upcoming unposted match(es) in the next 48h.\n"
+            "Post a **single match** or all matches for an **entire event**?",
+            view=view,
+            ephemeral=True
+        )
 
     # --- ADMIN / TEST ---
     async def test_strafe_direct(self, interaction: discord.Interaction):

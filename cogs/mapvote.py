@@ -21,8 +21,25 @@ EMBED_COLOR_MAP = 0xE91E63
 ADMIN_EMBED_COLOR = 0x3498DB
 VOTE_MAP_COUNT = 3
 MAPS_ASSETS_DIR = Path(__file__).parent.parent / "assets" / "maps"
+MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10MB limit for thumbnail downloads
+_MAP_NAME_RE = None  # lazy-compiled regex
 
 log_map = logging.getLogger(__name__)
+
+
+def _safe_map_path(map_name: str) -> Optional[Path]:
+    """Get a safe file path for a map image, preventing path traversal."""
+    global _MAP_NAME_RE
+    if _MAP_NAME_RE is None:
+        import re
+        _MAP_NAME_RE = re.compile(r'[^\w\s\-\.]', flags=re.UNICODE)
+    sanitized = _MAP_NAME_RE.sub('', map_name).strip().rstrip('.')
+    if not sanitized or sanitized != map_name.strip():
+        return None
+    filepath = (MAPS_ASSETS_DIR / f"{sanitized}.png").resolve()
+    if not str(filepath).startswith(str(MAPS_ASSETS_DIR.resolve())):
+        return None
+    return filepath
 AdminAction = Literal["remove_game", "remove_maps", "set_thumbnail", "set_max_votes", "map_stats", "view_maps"]
 
 
@@ -181,20 +198,18 @@ class FinalInputModal(discord.ui.Modal):
         elif self.action == "set_max_votes": await self.cog.logic_set_max_votes(interaction, self.game_name, self.final_value.value)
 
 class AdminActionView(discord.ui.View):
-    def __init__(self, cog: 'MapVote', action: AdminAction, interaction: discord.Interaction):
+    def __init__(self, cog: 'MapVote', action: AdminAction, interaction: discord.Interaction, games: List[str]):
         super().__init__(timeout=180)
         self.cog, self.action, self.original_interaction = cog, action, interaction
         self.game_name: Optional[str] = None
-        self.add_item(GameSelect(cog, action, interaction))
+        self.add_item(GameSelect(cog, action, games))
     async def on_timeout(self):
         try: await self.original_interaction.edit_original_response(content="This panel has timed out.", view=None)
         except discord.NotFound: pass
 
 class GameSelect(discord.ui.Select):
-    def __init__(self, cog: 'MapVote', action: AdminAction, interaction: discord.Interaction):
+    def __init__(self, cog: 'MapVote', action: AdminAction, games: List[str]):
         self.cog, self.action = cog, action
-        # Get games from the universal config
-        games = list(self.cog._get_games_config_sync().keys())
         options = [discord.SelectOption(label=game) for game in games] or [discord.SelectOption(label="No games configured", value="_placeholder")]
         super().__init__(placeholder="Select a game...", options=options)
     async def callback(self, interaction: discord.Interaction):
@@ -211,21 +226,20 @@ class GameSelect(discord.ui.Select):
             await interaction.response.send_modal(modal)
             self.view.stop(); await interaction.edit_original_response(view=None)
         elif self.action in ["remove_maps", "set_thumbnail"]:
+            async with self.cog.config_lock:
+                self.cog._ensure_latest_game_format(self.view.game_name)
+                game_data = self.cog._get_games_config_sync().get(self.view.game_name, {})
+                maps_list = list(game_data.get("maps", {}).keys())
             self.view.clear_items()
-            self.view.add_item(MapSelect(self.cog, self.action, self.view.game_name, interaction))
+            self.view.add_item(MapSelect(self.cog, self.action, self.view.game_name, maps_list))
             await interaction.response.edit_message(view=self.view)
         elif self.action == "view_maps":
             await self.cog.logic_view_maps(interaction, self.view.game_name)
             self.view.stop()
 
 class MapSelect(discord.ui.Select):
-    def __init__(self, cog: 'MapVote', action: AdminAction, game_name: str, interaction: discord.Interaction):
+    def __init__(self, cog: 'MapVote', action: AdminAction, game_name: str, maps: List[str]):
         self.cog, self.action, self.game_name = cog, action, game_name
-        # Ensure format in universal config
-        self.cog._ensure_latest_game_format(game_name)
-        # Get maps from universal config
-        game_data = self.cog._get_games_config_sync().get(game_name, {})
-        maps = list(game_data.get("maps", {}).keys())
         options = [discord.SelectOption(label=m) for m in maps] or [discord.SelectOption(label="No maps for this game", value="_placeholder")]
         super().__init__(placeholder="Select a map...", min_values=1, max_values=len(options) if action == "remove_maps" else 1, options=options)
     async def callback(self, interaction: discord.Interaction):
@@ -295,7 +309,10 @@ class AdminPanelView(discord.ui.View):
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("You don't have permission to use this panel.", ephemeral=True); return False
         return True
-    async def _start_action(self, inter: discord.Interaction, act: AdminAction, title: str): await inter.response.send_message(f"**{title}**", view=AdminActionView(self.cog, act, inter), ephemeral=True)
+    async def _start_action(self, inter: discord.Interaction, act: AdminAction, title: str):
+        async with self.cog.config_lock:
+            games = list(self.cog._get_games_config_sync().keys())
+        await inter.response.send_message(f"**{title}**", view=AdminActionView(self.cog, act, inter, games), ephemeral=True)
     @discord.ui.button(label="Add Game", style=discord.ButtonStyle.green, row=0)
     async def add_game(self, inter, button): await inter.response.send_modal(GameModal(self.cog))
     @discord.ui.button(label="Remove Game", style=discord.ButtonStyle.red, row=0)
@@ -402,30 +419,37 @@ class MapVote(commands.Cog, name="mapvote"):
         embed = discord.Embed(title=f"🗺️ {game} Map Vote", color=EMBED_COLOR_MAP, description=desc)
         return embed
 
-    def _get_local_map_image(self, map_name: str) -> Optional[io.BytesIO]:
-        """Load a map image from the local assets directory."""
-        filepath = MAPS_ASSETS_DIR / f"{map_name}.png"
-        try:
-            if filepath.exists():
-                return io.BytesIO(filepath.read_bytes())
-            log_map.warning(f"Local map image not found: {filepath}")
-        except Exception as e:
-            log_map.error(f"Error reading local map image {filepath}: {e}")
+    def _get_local_map_path(self, map_name: str) -> Optional[Path]:
+        """Return the path to a local map image if it exists, or None."""
+        filepath = _safe_map_path(map_name)
+        if filepath is None:
+            log_map.warning(f"Unsafe map name rejected: {map_name}")
+            return None
+        if filepath.exists():
+            return filepath
         return None
 
     async def _download_and_save_map_image(self, map_name: str, url: str) -> bool:
         """Download an image from a URL and save it locally as {map_name}.png. Returns True on success."""
+        filepath = _safe_map_path(map_name)
+        if filepath is None:
+            log_map.warning(f"Unsafe map name rejected for download: {map_name}")
+            return False
         try:
             MAPS_ASSETS_DIR.mkdir(parents=True, exist_ok=True)
-            filepath = MAPS_ASSETS_DIR / f"{map_name}.png"
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                     if resp.status != 200:
                         log_map.warning(f"Failed to download thumbnail for '{map_name}': HTTP {resp.status}")
                         return False
+                    if resp.content_length and resp.content_length > MAX_IMAGE_SIZE:
+                        log_map.warning(f"Thumbnail for '{map_name}' too large: {resp.content_length} bytes")
+                        return False
                     image_data = await resp.read()
+                    if len(image_data) > MAX_IMAGE_SIZE:
+                        log_map.warning(f"Thumbnail for '{map_name}' too large: {len(image_data)} bytes")
+                        return False
 
-            # Convert to PNG via Pillow (handles JPEG, WebP, etc.) in a thread
             def convert_to_png():
                 img = Image.open(io.BytesIO(image_data)).convert("RGBA")
                 img.save(filepath, "PNG")
@@ -440,21 +464,24 @@ class MapVote(commands.Cog, name="mapvote"):
     async def create_composite_image(self, map_names: List[str]) -> Optional[discord.File]:
         log_map.info(f"Attempting to create composite image for: {map_names}")
 
-        buffers = [self._get_local_map_image(name) for name in map_names]
-        valid_buffers = [b for b in buffers if b]
+        # Collect valid file paths (no I/O yet)
+        paths = [(name, self._get_local_map_path(name)) for name in map_names]
+        valid_paths = [(name, p) for name, p in paths if p is not None]
 
-        if len(valid_buffers) != len(map_names):
-            failed_maps = [name for name, buf in zip(map_names, buffers) if not buf]
-            log_map.warning(f"Failed to load images for maps: {failed_maps}")
+        if len(valid_paths) != len(map_names):
+            failed_maps = [name for name, p in paths if p is None]
+            log_map.warning(f"Failed to find images for maps: {failed_maps}")
 
-        if not valid_buffers:
-            log_map.warning("No valid image buffers found to create composite image.")
+        if not valid_paths:
+            log_map.warning("No valid image paths found to create composite image.")
             return None
 
-        log_map.info(f"Found {len(valid_buffers)} valid image(s) to process.")
+        log_map.info(f"Found {len(valid_paths)} valid image(s) to process.")
+
         def run_pil():
+            """Read files and compose image entirely in a thread."""
             try:
-                images = [Image.open(buf).convert("RGBA") for buf in valid_buffers]
+                images = [Image.open(str(p)).convert("RGBA") for _, p in valid_paths]
                 h = 200
                 w = sum(int(h * (img.width / img.height)) for img in images)
                 resized = [img.resize((int(h * (img.width / img.height)), h), Image.Resampling.LANCZOS) for img in images]
@@ -466,6 +493,7 @@ class MapVote(commands.Cog, name="mapvote"):
             except Exception as e:
                 log_map.error(f"Pillow failed to process images: {e}")
                 return None
+
         try:
             final_buffer = await asyncio.to_thread(run_pil)
             if final_buffer:
@@ -515,6 +543,9 @@ class MapVote(commands.Cog, name="mapvote"):
                 if not is_allowed:
                     return False, "Only match players can vote in this map vote.", None, False
 
+            if map_idx >= len(vote["maps"]):
+                return False, "Invalid map selection.", None, False
+
             new_vote, votes = vote["maps"][map_idx], vote["votes"]
             old_vote = next((m for m, v in votes.items() if uid in v), None)
 
@@ -540,6 +571,7 @@ class MapVote(commands.Cog, name="mapvote"):
             return True, msg, copy.deepcopy(vote), should_conclude
 
     async def update_vote_display(self, message: discord.Message, vote_data: Dict[str, Any]):
+        """Update only the embed text and button labels — the image doesn't change between votes."""
         try:
             view = VotingView(self)
             maps, votes = vote_data.get("maps", []), vote_data.get("votes", {})
@@ -552,15 +584,11 @@ class MapVote(commands.Cog, name="mapvote"):
 
             embed = self._generate_vote_embed(vote_data)
 
-            img_file = await self.create_composite_image(maps)
-            if img_file:
-                embed.set_image(url="attachment://map_vote.png")
-                await message.edit(embed=embed, view=view, attachments=[img_file])
-            else:
-                # Preserve existing image when composite generation fails instead of clearing it
-                if message.embeds and message.embeds[0].image and message.embeds[0].image.url:
-                    embed.set_image(url=message.embeds[0].image.url)
-                await message.edit(embed=embed, view=view)
+            # Preserve the existing image URL — maps don't change during a vote,
+            # so there's no need to regenerate and re-upload the composite image.
+            if message.embeds and message.embeds[0].image and message.embeds[0].image.url:
+                embed.set_image(url=message.embeds[0].image.url)
+            await message.edit(embed=embed, view=view)
 
         except discord.NotFound:
             log_map.error(f"Message {message.id} not found for update")
@@ -599,11 +627,83 @@ class MapVote(commands.Cog, name="mapvote"):
                 return int(mid)
         return None
 
+    async def bump_vote_embed(self, guild_id: int, match_id: int, channel: discord.TextChannel):
+        """Resend the map vote embed to a channel after a reshuffle, preserving all vote data."""
+        # Mark the vote as "bumping" under lock so vote_check_loop and conclude_vote skip it
+        vote_mid = None
+        vote_data = None
+        async with self.config_lock:
+            guild_cfg = self._get_guild_config_sync(str(guild_id))
+            active_votes = guild_cfg.get("active_votes", {})
+            for mid, vote in list(active_votes.items()):
+                if vote.get("match_id") == match_id:
+                    if vote.get("_bumping"):
+                        return  # Another bump is already in progress
+                    vote["_bumping"] = True
+                    vote_mid = mid
+                    vote_data = copy.deepcopy(vote)
+                    break
+
+        if not vote_data:
+            return
+
+        maps = vote_data.get("maps", [])
+
+        view = VotingView(self)
+        map_buttons = [
+            c for c in view.children
+            if getattr(c, "custom_id", None) and c.custom_id.startswith("map_vote_")
+        ]
+        for i, child in enumerate(map_buttons):
+            if i < len(maps):
+                vote_count = len(vote_data.get("votes", {}).get(maps[i], []))
+                child.label = f"{maps[i]} ({vote_count})" if vote_count else maps[i]
+
+        embed = self._generate_vote_embed(vote_data)
+        img_file = await self.create_composite_image(maps)
+
+        try:
+            if img_file:
+                embed.set_image(url="attachment://map_vote.png")
+                new_msg = await channel.send(embed=embed, view=view, file=img_file)
+            else:
+                new_msg = await channel.send(embed=embed, view=view)
+        except Exception as e:
+            log_map.error(f"Failed to bump vote embed for match {match_id}: {e}")
+            # Clear bumping flag on failure
+            async with self.config_lock:
+                guild_cfg = self._get_guild_config_sync(str(guild_id))
+                av = guild_cfg.get("active_votes", {}).get(vote_mid)
+                if av:
+                    av.pop("_bumping", None)
+            return
+
+        # Atomically remap old message ID → new message ID
+        async with self.config_lock:
+            guild_cfg = self._get_guild_config_sync(str(guild_id))
+            active_votes = guild_cfg.get("active_votes", {})
+            if vote_mid in active_votes:
+                vote_entry = active_votes.pop(vote_mid)
+                vote_entry.pop("_bumping", None)
+                vote_entry["channel_id"] = channel.id
+                active_votes[str(new_msg.id)] = vote_entry
+                await self._save_config()
+
+        try:
+            old_msg = await channel.fetch_message(int(vote_mid))
+            await old_msg.delete()
+        except discord.NotFound:
+            pass
+        except Exception as e:
+            log_map.warning(f"Failed to delete old vote message {vote_mid}: {e}")
+
     async def conclude_vote(self, guild_id_str: str, message_id_str: str, ended_by: Optional[discord.User] = None):
         async with self.config_lock:
             guild_cfg = self._get_guild_config_sync(guild_id_str)
-            if not (vote := guild_cfg.get("active_votes", {}).pop(message_id_str, None)):
+            vote = guild_cfg.get("active_votes", {}).get(message_id_str)
+            if not vote or vote.get("_bumping"):
                 return
+            vote = guild_cfg["active_votes"].pop(message_id_str)
 
             pool = [m for m, v in vote.get("votes", {}).items() for _ in v]
             winner = random.choice(pool) if pool else random.choice(vote["maps"])
@@ -647,10 +747,10 @@ class MapVote(commands.Cog, name="mapvote"):
         for m, v in sorted(vote.get("votes", {}).items(), key=lambda i: len(i[1]), reverse=True):
             res_embed.add_field(name=m, value=f"{len(v)} Votes ({(len(v)/total_v*100) if total_v else 0:.1f}% chance)")
 
-        winner_buf = self._get_local_map_image(winner)
+        winner_path = self._get_local_map_path(winner)
         attachments = []
-        if winner_buf:
-            attachments.append(discord.File(winner_buf, filename="winner.png"))
+        if winner_path:
+            attachments.append(discord.File(str(winner_path), filename="winner.png"))
             res_embed.set_image(url="attachment://winner.png")
 
         try:
@@ -722,18 +822,24 @@ class MapVote(commands.Cog, name="mapvote"):
                 except Exception as e:
                     log_map.error(f"Error parsing timestamp for vote {mid} in guild {gid}: {e}")
 
-        # --- CRITICAL FIX 7 ---
-        # Add try/except block to loop
-        for gid, mid, vote in to_process:
+        for gid, mid, _vote in to_process:
             try:
-                voter_count = len({u for ul in vote.get("votes", {}).values() for u in ul})
-                if voter_count >= vote.get("min_users", 1):
+                # Re-read current state under lock to avoid stale-copy race
+                async with self.config_lock:
+                    guild_cfg = self._get_guild_config_sync(gid)
+                    live_vote = guild_cfg.get("active_votes", {}).get(mid)
+                    if not live_vote or live_vote.get("_bumping"):
+                        continue  # Already concluded/cancelled/being bumped
+                    voter_count = len({u for ul in live_vote.get("votes", {}).values() for u in ul})
+                    min_users = live_vote.get("min_users", 1)
+                    vote_snapshot = copy.deepcopy(live_vote)
+
+                if voter_count >= min_users:
                     await self.conclude_vote(gid, mid)
                 else:
-                    await self.cancel_vote(gid, mid, vote)
+                    await self.cancel_vote(gid, mid, vote_snapshot)
             except Exception as e:
                 log_map.error(f"Error processing vote {mid} in guild {gid}: {e}", exc_info=True)
-        # --- END FIX ---
 
     @vote_check_loop.before_loop
     async def before_loops(self): await self.bot.wait_until_ready();
@@ -746,82 +852,79 @@ class MapVote(commands.Cog, name="mapvote"):
     @app_commands.describe(game="The game to vote on.", duration="Vote duration in minutes (1-10).", min_users="Minimum users required for the vote to pass.")
     async def start(self, inter: discord.Interaction, game: str, duration: app_commands.Range[int, 1, 10]=2, min_users: app_commands.Range[int, 1, 12]=6):
         await inter.response.defer(ephemeral=True)
-        
-        # The entire /start command is wrapped in a lock to prevent
-        # the race condition from Point 6.
+
+        # Phase 1: Acquire lock, validate, pick maps, prepare vote_data, release lock
         async with self.config_lock:
             guild_cfg = self._get_guild_config_sync(inter.guild_id)
             games_cfg = self._get_games_config_sync()
-            
+
             self._ensure_latest_game_format(game)
             gd = games_cfg.get(game)
-            
+
             if not gd: return await inter.followup.send(f"❌ Game '{game}' not configured.", ephemeral=True)
             if min_users > gd.get("max_votes", 10): return await inter.followup.send(f"❌ Minimum users ({min_users}) cannot be greater than the max votes for this game ({gd.get('max_votes', 10)}).", ephemeral=True)
-            
+
             unseen = gd.get("unseen_maps", [])
             seen = gd.get("seen_maps", [])
 
             if len(unseen) + len(seen) < VOTE_MAP_COUNT:
                 return await inter.followup.send(f"❌ '{game}' needs at least {VOTE_MAP_COUNT} maps.", ephemeral=True)
 
-            # FIX: Check for reserved maps from cancelled vote (anti-reroll)
             reserved_maps = guild_cfg.get("reserved_maps", {}).get(game)
             chosen_maps = []
 
             if reserved_maps and len(reserved_maps) == VOTE_MAP_COUNT:
-                # Validate that all reserved maps still exist in the game's map pool
                 all_maps = set(unseen + seen)
                 valid_reserved = [m for m in reserved_maps if m in all_maps]
 
                 if len(valid_reserved) == VOTE_MAP_COUNT:
-                    # Use the reserved maps from the cancelled vote
                     chosen_maps = valid_reserved
                     log_map.info(f"Using reserved maps {chosen_maps} for {game} vote in guild {inter.guild_id}")
-
-                    # Clear the reservation now that we're using them
                     guild_cfg.get("reserved_maps", {}).pop(game, None)
-
-                    # Update seen/unseen pools to reflect these maps being used
                     gd["unseen_maps"] = [m for m in unseen if m not in chosen_maps]
                     gd["seen_maps"] = list(set(seen).union(chosen_maps))
                 else:
-                    # Some reserved maps were removed, clear the reservation and pick randomly
                     log_map.warning(f"Reserved maps invalid for {game} (some maps removed), picking randomly")
                     guild_cfg.get("reserved_maps", {}).pop(game, None)
-                    reserved_maps = None  # Fall through to random selection
-            elif len(unseen) >= VOTE_MAP_COUNT:
-                chosen_maps = random.sample(unseen, VOTE_MAP_COUNT)
-                gd["unseen_maps"] = [m for m in unseen if m not in chosen_maps]
-                gd["seen_maps"].extend(chosen_maps)
-            else:
-                chosen_maps.extend(unseen)
-                needed = VOTE_MAP_COUNT - len(chosen_maps)
-                fillers = random.sample(seen, needed)
-                chosen_maps.extend(fillers)
-                gd["unseen_maps"] = [m for m in seen if m not in fillers]
-                gd["seen_maps"] = chosen_maps
+                    reserved_maps = None
+
+            if not chosen_maps:
+                if len(unseen) >= VOTE_MAP_COUNT:
+                    chosen_maps = random.sample(unseen, VOTE_MAP_COUNT)
+                    gd["unseen_maps"] = [m for m in unseen if m not in chosen_maps]
+                    gd["seen_maps"].extend(chosen_maps)
+                else:
+                    chosen_maps.extend(unseen)
+                    needed = VOTE_MAP_COUNT - len(chosen_maps)
+                    fillers = random.sample(seen, needed)
+                    chosen_maps.extend(fillers)
+                    gd["unseen_maps"] = [m for m in seen if m not in fillers]
+                    gd["seen_maps"] = chosen_maps
 
             guild_cfg["vote_counter"] = guild_cfg.get("vote_counter", 0) + 1
             vote_data = {"channel_id": inter.channel_id, "end_time_iso": (datetime.now(timezone.utc) + timedelta(minutes=duration)).isoformat(), "maps": chosen_maps, "votes": {m:[] for m in chosen_maps}, "game": game, "short_id": guild_cfg['vote_counter'], "min_users": min_users, "max_votes": gd.get('max_votes', 10)}
-            
-            img_file = await self.create_composite_image(chosen_maps)
-            embed = self._generate_vote_embed(vote_data)
-            view = VotingView(self)
+            await self._save_config()
 
-            for i, child in enumerate(c for c in view.children if c.custom_id and c.custom_id.startswith("map_vote_")):
-                if i < len(chosen_maps): child.label = f"{chosen_maps[i]} (0)"; child.disabled = False
-                else: child.disabled = True
+        # Phase 2: I/O outside the lock (image generation + Discord API)
+        img_file = await self.create_composite_image(chosen_maps)
+        embed = self._generate_vote_embed(vote_data)
+        view = VotingView(self)
 
-            msg = None
-            if img_file:
-                embed.set_image(url=f"attachment://{img_file.filename}")
-                msg = await inter.channel.send(file=img_file, embed=embed, view=view)
-            else:
-                msg = await inter.channel.send(embed=embed, view=view)
+        for i, child in enumerate(c for c in view.children if c.custom_id and c.custom_id.startswith("map_vote_")):
+            if i < len(chosen_maps): child.label = f"{chosen_maps[i]} (0)"; child.disabled = False
+            else: child.disabled = True
 
-            await inter.followup.send("Vote started!", ephemeral=True)
+        if img_file:
+            embed.set_image(url=f"attachment://{img_file.filename}")
+            msg = await inter.channel.send(file=img_file, embed=embed, view=view)
+        else:
+            msg = await inter.channel.send(embed=embed, view=view)
 
+        await inter.followup.send("Vote started!", ephemeral=True)
+
+        # Phase 3: Re-acquire lock to store the message ID
+        async with self.config_lock:
+            guild_cfg = self._get_guild_config_sync(inter.guild_id)
             guild_cfg.setdefault("active_votes", {})[str(msg.id)] = vote_data
             await self._save_config()
 
@@ -854,9 +957,19 @@ class MapVote(commands.Cog, name="mapvote"):
         
     async def logic_add_maps(self, inter: discord.Interaction, game: str, maps_str: str):
         await inter.response.defer(ephemeral=True)
-        added, existing = [], []
+        added, existing, rejected = [], [], []
         map_names = [m.strip() for m in maps_str.split(',') if m.strip()]
         if not map_names: return await inter.followup.send("❌ No map names provided.", ephemeral=True)
+        # Validate map names are safe for filesystem use
+        safe_names = []
+        for name in map_names:
+            if _safe_map_path(name) is not None:
+                safe_names.append(name)
+            else:
+                rejected.append(name)
+        map_names = safe_names
+        if not map_names and rejected:
+            return await inter.followup.send(f"❌ Invalid map name(s): `{'`, `'.join(rejected)}`. Use only letters, numbers, spaces, and hyphens.", ephemeral=True)
         async with self.config_lock:
             games_cfg = self._get_games_config_sync()
             if not (gd := games_cfg.get(game)): return await inter.followup.send(f"❌ Game '{game}' not found.", ephemeral=True)
@@ -866,7 +979,7 @@ class MapVote(commands.Cog, name="mapvote"):
                 if name not in pool: gd["unseen_maps"].append(name); gd["maps"][name] = {"url": None}; added.append(name)
                 else: existing.append(name)
             if added: await self._save_config()
-        desc = (f"✅ Added: `{'`, `'.join(added)}`\n" if added else "") + (f"⚠️ Existed: `{'`, `'.join(existing)}`" if existing else "")
+        desc = (f"✅ Added: `{'`, `'.join(added)}`\n" if added else "") + (f"⚠️ Existed: `{'`, `'.join(existing)}`\n" if existing else "") + (f"❌ Rejected (invalid names): `{'`, `'.join(rejected)}`" if rejected else "")
         await inter.followup.send(embed=discord.Embed(title=f"Add Maps to {game}", description=desc.strip(), color=EMBED_COLOR_MAP), ephemeral=True)
 
     async def logic_remove_maps(self, inter: discord.Interaction, game: str, maps_str: str):
@@ -889,7 +1002,11 @@ class MapVote(commands.Cog, name="mapvote"):
         await inter.response.defer(ephemeral=True)
         if url and not url.startswith('http'): return await inter.followup.send("❌ Invalid URL.", ephemeral=True)
         async with self.config_lock:
-            self._get_games_config_sync()[game]["maps"][map_name]["url"] = url if url else None
+            games_cfg = self._get_games_config_sync()
+            game_data = games_cfg.get(game)
+            if not game_data or map_name not in game_data.get("maps", {}):
+                return await inter.followup.send(f"❌ Game or map no longer exists.", ephemeral=True)
+            game_data["maps"][map_name]["url"] = url if url else None
             await self._save_config()
 
         download_note = ""
@@ -1036,6 +1153,7 @@ class MapVote(commands.Cog, name="mapvote"):
             match_id: Optional match ID from custommatch cog (for storing selected map)
         """
         try:
+            # Phase 1: Acquire lock, validate, pick maps, prepare vote_data, release lock
             async with self.config_lock:
                 guild_cfg = self._get_guild_config_sync(guild_id)
                 games_cfg = self._get_games_config_sync()
@@ -1054,7 +1172,6 @@ class MapVote(commands.Cog, name="mapvote"):
                     log_map.warning(f"Programmatic vote failed: '{game_name}' needs at least {VOTE_MAP_COUNT} maps")
                     return None
 
-                # Select maps
                 if len(unseen) >= VOTE_MAP_COUNT:
                     chosen_maps = random.sample(unseen, VOTE_MAP_COUNT)
                     gd["unseen_maps"] = [m for m in unseen if m not in chosen_maps]
@@ -1081,30 +1198,34 @@ class MapVote(commands.Cog, name="mapvote"):
                     "allowed_role_ids": [r for r in [red_role_id, blue_role_id] if r],
                     "match_id": match_id
                 }
+                await self._save_config()
 
-                img_file = await self.create_composite_image(chosen_maps)
-                embed = self._generate_vote_embed(vote_data)
-                view = VotingView(self)
+            # Phase 2: I/O outside the lock
+            img_file = await self.create_composite_image(chosen_maps)
+            embed = self._generate_vote_embed(vote_data)
+            view = VotingView(self)
 
-                for i, child in enumerate(c for c in view.children if c.custom_id and c.custom_id.startswith("map_vote_")):
-                    if i < len(chosen_maps):
-                        child.label = f"{chosen_maps[i]} (0)"
-                        child.disabled = False
-                    else:
-                        child.disabled = True
-
-                msg = None
-                if img_file:
-                    embed.set_image(url=f"attachment://{img_file.filename}")
-                    msg = await channel.send(file=img_file, embed=embed, view=view)
+            for i, child in enumerate(c for c in view.children if c.custom_id and c.custom_id.startswith("map_vote_")):
+                if i < len(chosen_maps):
+                    child.label = f"{chosen_maps[i]} (0)"
+                    child.disabled = False
                 else:
-                    msg = await channel.send(embed=embed, view=view)
+                    child.disabled = True
 
+            if img_file:
+                embed.set_image(url=f"attachment://{img_file.filename}")
+                msg = await channel.send(file=img_file, embed=embed, view=view)
+            else:
+                msg = await channel.send(embed=embed, view=view)
+
+            # Phase 3: Re-acquire lock to store message ID
+            async with self.config_lock:
+                guild_cfg = self._get_guild_config_sync(guild_id)
                 guild_cfg.setdefault("active_votes", {})[str(msg.id)] = vote_data
                 await self._save_config()
 
-                log_map.info(f"Programmatic vote started for {game_name} in channel {channel.id}")
-                return msg.id
+            log_map.info(f"Programmatic vote started for {game_name} in channel {channel.id}")
+            return msg.id
 
         except Exception as e:
             log_map.error(f"Error starting programmatic vote: {e}", exc_info=True)

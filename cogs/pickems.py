@@ -90,8 +90,8 @@ class AsyncPickemsDB:
                 PRIMARY KEY (user_id, match_id)
             )''')
             
-            # Auto-cleanup orphaned drafts that never received images
-            await db.execute("DELETE FROM matches WHERE status = 'draft' AND (logo_path IS NULL OR map_path IS NULL)")
+            # Auto-cleanup orphaned drafts that never received team logos
+            await db.execute("DELETE FROM matches WHERE status = 'draft' AND logo_path IS NULL")
             await db.commit()
 
     async def set_config(self, key: str, value: str):
@@ -305,25 +305,42 @@ def stitch_team_logos(logo1_path: str, logo2_path: str, dest_path: str):
     
     canvas.save(dest_path)
 
-def build_match_embed(match: dict) -> discord.Embed:
+async def build_match_embed(match: dict) -> discord.Embed:
     """Dynamically builds the embed based on the current match state."""
     if not isinstance(match, dict):
         match = dict(match)
         
-    embed = discord.Embed(title=match['title'], description=match['body_text'], color=COLOR_PRIMARY)
+    twitch_emoji = await db.get_config('twitch_emoji') or ""
+    prefix = f"{twitch_emoji} " if twitch_emoji else ""
     
-    team1_display = f"[{match['team1']}]({match['team1_stream_url']})" if match.get('team1_stream_url') else match['team1']
-    team2_display = f"[{match['team2']}]({match['team2_stream_url']})" if match.get('team2_stream_url') else match['team2']
+    desc_lines = []
+    desc_lines.append(f"**{match['team1']} vs {match['team2']}**")
+    if match.get('title'):
+        desc_lines.append(match['title'])
     
-    embed.add_field(name="Matchup", value=f"{team1_display} vs {team2_display}", inline=False)
-    
-    if match['stream_url']:
-        embed.add_field(name="Main Broadcast", value=f"[Watch the Casted Stream Here]({match['stream_url']})", inline=False)
+    if match.get('body_text'):
+        desc_lines.append("")
+        desc_lines.append(match['body_text'])
+
+    streams = []
+    if match.get('stream_url'):
+        streams.append(f"{prefix}[Main Broadcast]({match['stream_url']})")
+    if match.get('team1_stream_url'):
+        streams.append(f"{prefix}[{match['team1']}]({match['team1_stream_url']})")
+    if match.get('team2_stream_url'):
+        streams.append(f"{prefix}[{match['team2']}]({match['team2_stream_url']})")
+
+    if streams:
+        desc_lines.append("")
+        desc_lines.append("Stream(s):")
+        desc_lines.extend(streams)
+
+    embed = discord.Embed(description="\n".join(desc_lines), color=COLOR_PRIMARY)
         
     # Voting Status (Now in Footer)
     footer_text = ""
     if match['status'] == 'published':
-        if match['close_time']:
+        if match.get('close_time'):
             # We use a standard timestamp in footer because footers don't support dynamic Discord markdown timestamps
             t_str = time.strftime('%H:%M %p UTC', time.gmtime(match['close_time']))
             footer_text = f"🟢 Pick'em Open • Closes at {t_str}"
@@ -338,9 +355,9 @@ def build_match_embed(match: dict) -> discord.Embed:
         embed.set_footer(text=footer_text)
 
     # Re-attach local asset URLs structurally
-    if match['logo_path'] and os.path.exists(match['logo_path']):
+    if match.get('logo_path') and os.path.exists(match['logo_path']):
         embed.set_thumbnail(url="attachment://logo.png")
-    if match['map_path'] and os.path.exists(match['map_path']):
+    if match.get('map_path') and os.path.exists(match['map_path']):
         embed.set_image(url="attachment://map.png")
         
     return embed
@@ -358,7 +375,7 @@ async def update_match_message(bot: commands.Bot, match_id: int):
     
     try:
         msg = await channel.fetch_message(int(match['message_id']))
-        embed = build_match_embed(match)
+        embed = await build_match_embed(match)
         
         # If published, keep the button. If closed or resolved, remove the UI completely.
         view = PersistentMatchVoteView() if match['status'] == 'published' else None
@@ -644,7 +661,7 @@ class DraftInfoModal(discord.ui.Modal):
     body_text = discord.ui.TextInput(label='Custom Body Text', style=discord.TextStyle.paragraph, required=False)
 
     def __init__(self, match_data=None, prefill=None):
-        title = 'Edit Draft Info' if match_data else 'Draft New Matchup'
+        title = 'Edit Draft Info' if match_data else 'Draft New Match'
         super().__init__(title=title)
         self.match_data = dict(match_data) if match_data else None
         self.prefill = prefill
@@ -695,7 +712,7 @@ class DraftInfoModal(discord.ui.Modal):
             
             embed_skip = discord.Embed(
                 title="Draft: Step 1/1 (Logos Pre-stitched!)",
-                description=f"Logos for **{self.team1.value}** and **{self.team2.value}** were used. Now send **ONE** image for the Map Bans.\n\n*Awaiting map image for 3 minutes.*",
+                description=f"Logos for **{self.team1.value}** and **{self.team2.value}** were used. Now send **ONE** image for the Map Bans.\n\n*Awaiting map image for 3 minutes. Type `skip` to save without one.*",
                 color=COLOR_PRIMARY
             )
             await interaction.channel.send(content=interaction.user.mention, embed=embed_skip, delete_after=60)
@@ -737,7 +754,11 @@ class DraftInfoModal(discord.ui.Modal):
                 loop = asyncio.get_event_loop()
                 await loop.run_in_executor(None, stitch_team_logos, l1_temp, l2_temp, final_logo_path)
 
-                embed2 = discord.Embed(title="Draft: Step 2/2", description="Logos stitched! Now send **ONE** image for the Map Bans.", color=COLOR_PRIMARY)
+                embed2 = discord.Embed(
+                    title="Draft: Step 2/2", 
+                    description="Logos stitched! Now send **ONE** image for the Map Bans.\n\n*Awaiting map image for 3 minutes. Type `skip` to save without one.*", 
+                    color=COLOR_PRIMARY
+                )
                 await interaction.channel.send(content=interaction.user.mention, embed=embed2, delete_after=60)
             except asyncio.TimeoutError:
                 await db.delete_draft(match_id)
@@ -749,6 +770,12 @@ class DraftInfoModal(discord.ui.Modal):
 
         try:
             msg2 = await interaction.client.wait_for('message', check=check_map, timeout=180.0)
+            
+            if msg2.content.lower() == 'skip':
+                try: await msg2.delete() 
+                except: pass
+                await db.update_draft_images(match_id, final_logo_path, None)
+                return await interaction.channel.send(f"✅ {interaction.user.mention} Draft saved without map image! Use 'Edit Images' later to add it.", delete_after=30)
             
             if not msg2.attachments:
                 try: await msg2.delete() 
@@ -822,15 +849,58 @@ class DraftManagementView(discord.ui.View):
     async def edit_images(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
         match_id = self.match_data['id']
+        
+        def check(m):
+            return m.author == interaction.user and m.channel == interaction.channel
+
+        has_logos = self.match_data.get('logo_path') and os.path.exists(self.match_data['logo_path'])
+
+        if has_logos:
+            # Skip asking for logos if they already exist for this draft
+            embed_skip = discord.Embed(
+                title="Update Images: Map Bans",
+                description="Team logos are already set for this match. Send **ONE** image to update the Map Bans.\n\n*Awaiting map image for 3 minutes. Type `cancel` to abort.*",
+                color=COLOR_PRIMARY
+            )
+            await interaction.channel.send(content=interaction.user.mention, embed=embed_skip, delete_after=60)
+            
+            try:
+                msg2 = await interaction.client.wait_for('message', check=check, timeout=180.0)
+                if msg2.content.lower() == 'cancel':
+                    try: await msg2.delete() 
+                    except: pass
+                    return await interaction.channel.send(f"{interaction.user.mention} Image update cancelled.", delete_after=10)
+
+                if not msg2.attachments:
+                    try: await msg2.delete() 
+                    except: pass
+                    return await interaction.channel.send(f"{interaction.user.mention} Error: Map attachment required.", delete_after=10)
+
+                map_path = os.path.join(ASSETS_DIR, f"{match_id}_map_{int(time.time())}_{msg2.attachments[0].filename}")
+                await msg2.attachments[0].save(map_path)
+                try: await msg2.delete() 
+                except: pass 
+
+                await db.update_draft_images(match_id, self.match_data['logo_path'], map_path)
+                self.match_data['map_path'] = map_path
+                
+                await interaction.channel.send(f"✅ {interaction.user.mention} Map image updated! " + ("Use 'Apply Live Updates' to push." if self.is_published else ""), delete_after=30)
+            except asyncio.TimeoutError:
+                try: await interaction.channel.send(f"⏰ {interaction.user.mention} Image update timed out.", delete_after=10)
+                except: pass
+            except Exception as e:
+                logger.error(f"Error in map image update: {e}")
+                try: await interaction.channel.send(f"❌ {interaction.user.mention} An error occurred: {e}", delete_after=10)
+                except: pass
+            return
+
+        # Original flow if no logos exist
         embed = discord.Embed(
             title="Update Images: Step 1/2",
             description="Send **TWO** team logos to be stitched.\n\n*Awaiting logos for 3 minutes. Type `cancel` to abort.*",
             color=COLOR_PRIMARY
         )
         await interaction.channel.send(content=interaction.user.mention, embed=embed, delete_after=60)
-
-        def check(m):
-            return m.author == interaction.user and m.channel == interaction.channel
 
         try:
             # Step 1: Logos
@@ -905,7 +975,7 @@ class DraftManagementView(discord.ui.View):
     @discord.ui.button(label="Preview", style=discord.ButtonStyle.secondary)
     async def preview_draft(self, interaction: discord.Interaction, button: discord.ui.Button):
         match = await db.get_match_by_id(self.match_data['id'])
-        embed = build_match_embed(match)
+        embed = await build_match_embed(match)
         
         files = []
         if match['logo_path'] and os.path.exists(match['logo_path']):
@@ -950,7 +1020,7 @@ class ApplyLiveUpdatesButton(discord.ui.Button):
 
         try:
             msg = await channel.fetch_message(int(match['message_id']))
-            embed = build_match_embed(match)
+            embed = await build_match_embed(match)
             
             # Since images might have changed, we MUST re-upload them to bypass Discord's caching
             files = []
@@ -1041,6 +1111,18 @@ class ResolveModal(discord.ui.Modal):
         await interaction.response.send_message(f"Match resolved: {self.match_data['team1']} {s1} - {s2} {self.match_data['team2']}.", ephemeral=True)
 
 
+class EmojiModal(discord.ui.Modal, title='Set Twitch Emoji'):
+    emoji_input = discord.ui.TextInput(label='Twitch Emoji (e.g. <:twitch:1234567>)', required=True)
+
+    def __init__(self, current_emoji: str = ""):
+        super().__init__()
+        self.emoji_input.default = current_emoji
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await db.set_config('twitch_emoji', self.emoji_input.value.strip())
+        await interaction.response.send_message(f"Twitch emoji updated to {self.emoji_input.value.strip()}", ephemeral=True)
+
+
 class AdminPanelView(discord.ui.View):
     def __init__(self, bot: commands.Bot):
         super().__init__(timeout=None)
@@ -1055,6 +1137,11 @@ class AdminPanelView(discord.ui.View):
     async def select_leaderboard_channel(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
         await db.set_config('leaderboard_channel', str(select.values[0].id))
         await interaction.response.send_message(f"Leaderboard channel bound to {select.values[0].mention}", ephemeral=True)
+
+    @discord.ui.button(label="Set Twitch Emoji", style=discord.ButtonStyle.secondary, row=3)
+    async def set_emoji_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        current_emoji = await db.get_config('twitch_emoji') or ""
+        await interaction.response.send_modal(EmojiModal(current_emoji))
 
     @discord.ui.button(label="Draft Match", style=discord.ButtonStyle.primary, row=2)
     async def draft_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1133,7 +1220,7 @@ class AdminPanelView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
 
         for match in drafts:
-            embed = build_match_embed(match)
+            embed = await build_match_embed(match)
             
             # Attaching files on fresh send
             files = []
@@ -1224,7 +1311,7 @@ class AdminPanelView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
 
         for match in published:
-            embed = build_match_embed(match)
+            embed = await build_match_embed(match)
             files = []
             if match['logo_path'] and os.path.exists(match['logo_path']):
                 files.append(discord.File(match['logo_path'], filename="logo.png"))

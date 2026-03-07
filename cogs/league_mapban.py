@@ -287,7 +287,7 @@ class AgentRoleSelectView(discord.ui.View):
     """View with role buttons for agent selection (one per row)."""
 
     def __init__(self, cog: "MapBanCog", session_id: str, captain_id: int, action_type: str, available_agents: List[str]):
-        super().__init__(timeout=60)
+        super().__init__(timeout=180)
         self.cog = cog
         self.session_id = session_id
         self.captain_id = captain_id
@@ -325,7 +325,7 @@ class AgentButtonsView(discord.ui.View):
     AGENTS_PER_PAGE = 8  # 4 rows x 2 per row, leaving row 4 for nav
 
     def __init__(self, cog: "MapBanCog", session_id: str, captain_id: int, action_type: str, agents: List[str], all_available: List[str], page: int = 0):
-        super().__init__(timeout=60)
+        super().__init__(timeout=180)
         self.cog = cog
         self.session_id = session_id
         self.captain_id = captain_id
@@ -400,7 +400,7 @@ class ConfirmAgentSelectView(discord.ui.View):
     def __init__(self, cog: "MapBanCog", session_id: str, captain_id: int,
                  agent_name: str, action_type: str, agents: List[str],
                  all_available: List[str], page: int):
-        super().__init__(timeout=30)
+        super().__init__(timeout=60)
         self.cog = cog
         self.session_id = session_id
         self.captain_id = captain_id
@@ -1276,6 +1276,39 @@ def build_spectator_embed(session: Dict) -> discord.Embed:
     if len(remaining) > 1:
         pool_text = build_remaining_pool_text(remaining)
         embed.add_field(name="**Remaining Pool**", value=pool_text, inline=False)
+
+    # Agent selection history
+    agent_protects_all = json.loads(session.get("agent_protects", "{}")) if isinstance(session.get("agent_protects"), str) else session.get("agent_protects", {})
+    agent_bans_all = json.loads(session.get("agent_bans", "{}")) if isinstance(session.get("agent_bans"), str) else session.get("agent_bans", {})
+
+    if agent_protects_all or agent_bans_all:
+        picked_in_order = [a["map"] for a in actions if a.get("type") == "pick"]
+        decider_map = remaining[0] if remaining else None
+        maps_in_order = picked_in_order + ([decider_map] if decider_map else [])
+        all_agent_maps_set = set(list(agent_protects_all.keys()) + list(agent_bans_all.keys()))
+        all_agent_maps = [m for m in maps_in_order if m in all_agent_maps_set]
+        all_agent_maps += [m for m in all_agent_maps_set if m not in all_agent_maps]
+
+        if all_agent_maps:
+            history_lines = []
+            for map_name in all_agent_maps:
+                map_protects_hist = agent_protects_all.get(map_name, {})
+                map_bans_hist = agent_bans_all.get(map_name, {})
+                if map_protects_hist or map_bans_hist:
+                    history_lines.append(f"**{map_name}:**")
+                    for cid, agent in map_protects_hist.items():
+                        cname = truncate_name(session.get("captain1_name" if int(cid) == session["captain1_id"] else "captain2_name", "Captain"))
+                        history_lines.append(f"🟢{agent} ({cname})")
+                    for cid, agent in map_bans_hist.items():
+                        cname = truncate_name(session.get("captain1_name" if int(cid) == session["captain1_id"] else "captain2_name", "Captain"))
+                        history_lines.append(f"🔴{agent} ({cname})")
+
+            if history_lines:
+                embed.add_field(
+                    name="**Agent Selection**",
+                    value="\n".join(history_lines),
+                    inline=False
+                )
 
     # Status
     if phase == "ready":
@@ -3523,6 +3556,9 @@ class MapBanCog(commands.Cog):
                     session["current_turn"] = side_chooser  # Side chooser protects first
                 else:
                     session["current_turn"] = other_captain  # Then the other captain
+                # Reset the turn timer for whoever goes next
+                session["turn_start_time"] = datetime.now(timezone.utc).isoformat()
+                session["reminder_sent"] = 0
             else:
                 # Both protected, move to ban phase
                 session["current_phase"] = "agent_ban"
@@ -3537,6 +3573,9 @@ class MapBanCog(commands.Cog):
                     session["current_turn"] = side_chooser  # Side chooser bans first
                 else:
                     session["current_turn"] = other_captain  # Then the other captain
+                # Reset the turn timer for whoever goes next
+                session["turn_start_time"] = datetime.now(timezone.utc).isoformat()
+                session["reminder_sent"] = 0
             else:
                 # Both banned, move to next map
                 session["current_agent_map_index"] = current_index + 1
@@ -3959,6 +3998,17 @@ class MapBanCog(commands.Cog):
             if current_phase not in ("banning", "picking", "side_select", "agent_protect", "agent_ban"):
                 return
 
+            # Recalculate time_remaining from the fresh session's turn_start_time.
+            # The stale value computed before the lock can be from a previous turn that
+            # already had its timer reset (e.g., after an auto-ban), which would
+            # incorrectly trigger an immediate second auto-ban for the next captain.
+            fresh_turn_start = session.get("turn_start_time")
+            if fresh_turn_start:
+                if isinstance(fresh_turn_start, str):
+                    fresh_turn_start = datetime.fromisoformat(fresh_turn_start.replace("Z", "+00:00"))
+                fresh_elapsed = (datetime.now(timezone.utc) - fresh_turn_start).total_seconds()
+                time_remaining = max(0, int(turn_timeout - fresh_elapsed))
+
             # Send reminder at 1 minute remaining
             if time_remaining <= REMINDER_TIME and not session.get("reminder_sent"):
                 await self._send_reminder(guild, session)
@@ -4063,11 +4113,12 @@ class MapBanCog(commands.Cog):
             action_type = "protect" if phase == "agent_protect" else "ban"
             available_agents = self.get_available_agents(session, current_turn, action_type)
 
+            maps_to_play = self._get_maps_to_play(session)
+            current_index = session.get("current_agent_map_index", 0)
+            current_map = maps_to_play[current_index] if current_index < len(maps_to_play) else ""
+
             if available_agents:
                 random_agent = random.choice(available_agents)
-                maps_to_play = self._get_maps_to_play(session)
-                current_index = session.get("current_agent_map_index", 0)
-                current_map = maps_to_play[current_index] if current_index < len(maps_to_play) else ""
 
                 if action_type == "protect":
                     agent_protects = json.loads(session.get("agent_protects", "{}")) if isinstance(session.get("agent_protects"), str) else session.get("agent_protects", {})
@@ -4102,27 +4153,38 @@ class MapBanCog(commands.Cog):
                         await thread.send(f"Time's up! Auto-{'protected' if action_type == 'protect' else 'banned'} **{random_agent}** for {current_map}")
                     except Exception:
                         pass
-
-                # Advance agent phase
-                await self._advance_agent_phase(guild, session)
-
-                # Delete reminder if exists
-                if session["session_id"] in self.reminder_messages:
+            else:
+                # No available agents — skip this action and notify
+                print(f"[MapBan] Timeout: no available agents for {action_type} on {current_map} "
+                      f"(captain={current_turn}, session={session['session_id']})")
+                thread_id = session["thread1_id"] if current_turn == session["captain1_id"] else session["thread2_id"]
+                thread = await self._get_thread(guild, thread_id)
+                if thread:
                     try:
-                        thread_id = session["thread1_id"] if current_turn == session["captain1_id"] else session["thread2_id"]
-                        thread = await self._get_thread(guild, thread_id)
-                        if thread:
-                            msg = await thread.fetch_message(self.reminder_messages[session["session_id"]])
-                            await msg.delete()
+                        await thread.send(f"⏰ Time's up! No agents available to {action_type} — skipping.")
                     except Exception:
                         pass
-                    del self.reminder_messages[session["session_id"]]
 
-                # Save and update cache
-                self.active_sessions[session["session_id"]] = session
-                await self.save_session(session)
-                await self.update_all_embeds(guild, session)
-                return  # Don't fall through to advance_session for agent phases
+            # Advance agent phase (regardless of whether an agent was selected)
+            await self._advance_agent_phase(guild, session)
+
+            # Delete reminder if exists
+            if session["session_id"] in self.reminder_messages:
+                try:
+                    thread_id = session["thread1_id"] if current_turn == session["captain1_id"] else session["thread2_id"]
+                    thread = await self._get_thread(guild, thread_id)
+                    if thread:
+                        msg = await thread.fetch_message(self.reminder_messages[session["session_id"]])
+                        await msg.delete()
+                except Exception:
+                    pass
+                del self.reminder_messages[session["session_id"]]
+
+            # Save and update cache
+            self.active_sessions[session["session_id"]] = session
+            await self.save_session(session)
+            await self.update_all_embeds(guild, session)
+            return  # Don't fall through to advance_session for agent phases
 
         # Delete reminder if exists
         if session["session_id"] in self.reminder_messages:

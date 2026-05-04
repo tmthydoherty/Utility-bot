@@ -32,7 +32,7 @@ def _safe_map_path(map_name: str) -> Optional[Path]:
     global _MAP_NAME_RE
     if _MAP_NAME_RE is None:
         import re
-        _MAP_NAME_RE = re.compile(r'[^\w\s\-\.]', flags=re.UNICODE)
+        _MAP_NAME_RE = re.compile(r"[^\w\s\-\.']", flags=re.UNICODE)
     sanitized = _MAP_NAME_RE.sub('', map_name).strip().rstrip('.')
     if not sanitized or sanitized != map_name.strip():
         return None
@@ -411,11 +411,10 @@ class MapVote(commands.Cog, name="mapvote"):
 
     def _generate_vote_embed(self, vote_data: Dict[str, Any]) -> discord.Embed:
         game, end_time = vote_data.get("game", "Unknown Game"), datetime.fromisoformat(vote_data["end_time_iso"])
-        min_users, vote_id, max_votes = vote_data.get("min_users", 1), vote_data.get("short_id", "N/A"), vote_data.get("max_votes", 10)
-        voter_ids = {uid for v_list in vote_data.get("votes", {}).values() for uid in v_list}
+        min_users, max_votes = vote_data.get("min_users", 1), vote_data.get("max_votes", 10)
         desc = (f"Vote for the map to play! Winner is random, weighted by votes.\n**You can change your vote at any time.**\n\n"
                 f"🕒 Concludes <t:{int(end_time.timestamp())}:R> or at **{max_votes}** votes.\n"
-                f"👥 **{len(voter_ids)}/{max_votes}** voted. Needs **{min_users}** to be valid.")
+                f"👥 Needs **{min_users}** to be valid.")
         embed = discord.Embed(title=f"🗺️ {game} Map Vote", color=EMBED_COLOR_MAP, description=desc)
         return embed
 
@@ -562,7 +561,10 @@ class MapVote(commands.Cog, name="mapvote"):
             voter_ids = {uid for v_list in votes.values() for uid in v_list}
             current_voters = len(voter_ids)
             max_votes = vote.get("max_votes", 10)
-            should_conclude = current_voters >= max_votes
+            # Conclude if all players voted OR if in overtime and majority reached
+            majority = (max_votes // 2) + 1
+            should_conclude = (current_voters >= max_votes
+                               or (vote.get("overtime") and current_voters >= majority))
             # --- END FIX ---
 
             await self._save_config()
@@ -575,6 +577,8 @@ class MapVote(commands.Cog, name="mapvote"):
         try:
             view = VotingView(self)
             maps, votes = vote_data.get("maps", []), vote_data.get("votes", {})
+            voter_ids = {uid for v_list in votes.values() for uid in v_list}
+            max_votes = vote_data.get("max_votes", 10)
             for i, child in enumerate(c for c in view.children if c.custom_id and c.custom_id.startswith("map_vote_")):
                 if i < len(maps):
                     child.label = f"{maps[i]} ({len(votes.get(maps[i], []))})"
@@ -582,13 +586,14 @@ class MapVote(commands.Cog, name="mapvote"):
                 else:
                     child.disabled = True
 
-            embed = self._generate_vote_embed(vote_data)
+            # Put voter count on the End Vote button since editing the embed
+            # breaks the attachment/embed image association on Discord.
+            for child in view.children:
+                if getattr(child, "custom_id", None) == "end_vote_early":
+                    child.label = f"End Vote · {len(voter_ids)}/{max_votes}"
+                    break
 
-            # Preserve the existing image URL — maps don't change during a vote,
-            # so there's no need to regenerate and re-upload the composite image.
-            if message.embeds and message.embeds[0].image and message.embeds[0].image.url:
-                embed.set_image(url=message.embeds[0].image.url)
-            await message.edit(embed=embed, view=view)
+            await message.edit(view=view)
 
         except discord.NotFound:
             log_map.error(f"Message {message.id} not found for update")
@@ -654,18 +659,25 @@ class MapVote(commands.Cog, name="mapvote"):
             c for c in view.children
             if getattr(c, "custom_id", None) and c.custom_id.startswith("map_vote_")
         ]
+        voter_ids = {uid for v_list in vote_data.get("votes", {}).values() for uid in v_list}
+        max_votes = vote_data.get("max_votes", 10)
         for i, child in enumerate(map_buttons):
             if i < len(maps):
                 vote_count = len(vote_data.get("votes", {}).get(maps[i], []))
                 child.label = f"{maps[i]} ({vote_count})" if vote_count else maps[i]
+        for child in view.children:
+            if getattr(child, "custom_id", None) == "end_vote_early":
+                child.label = f"End Vote · {len(voter_ids)}/{max_votes}"
+                break
 
         embed = self._generate_vote_embed(vote_data)
         img_file = await self.create_composite_image(maps)
 
         try:
             if img_file:
-                embed.set_image(url="attachment://map_vote.png")
-                new_msg = await channel.send(embed=embed, view=view, file=img_file)
+                new_msg = await channel.send(file=img_file)
+                embed.set_image(url=f"attachment://{new_msg.attachments[0].filename}")
+                await new_msg.edit(embed=embed, view=view)
             else:
                 new_msg = await channel.send(embed=embed, view=view)
         except Exception as e:
@@ -738,7 +750,14 @@ class MapVote(commands.Cog, name="mapvote"):
              return
 
         voters = {u for ul in vote.get("votes", {}).values() for u in ul}
-        desc = f"The chosen map is **{winner}**!"
+        vote_counts = {m: len(v) for m, v in vote.get("votes", {}).items()}
+        non_zero_counts = [c for c in vote_counts.values() if c > 0]
+        winner_count = vote_counts.get(winner, 0)
+        # If the least-voted map (above 0) wins and another map had more votes, rub it in
+        is_underdog = (winner_count > 0 and non_zero_counts
+                       and winner_count == min(non_zero_counts)
+                       and max(non_zero_counts) > winner_count)
+        desc = f"The chosen map is **{winner}**!" + (" ||Cry about it||" if is_underdog else "")
         if ended_by: desc += f"\n\n*Ended early by {ended_by.mention}.*"
         elif len(voters) >= vote.get("max_votes", 999): desc += f"\n\n*Concluded at {vote.get('max_votes')} votes.*"
 
@@ -762,8 +781,46 @@ class MapVote(commands.Cog, name="mapvote"):
                 if i < len(maps): child.label = f"{maps[i]} ({len(final_votes.get(maps[i], []))})"
                 child.disabled = True
             for item in disabled_view.children: item.disabled = True
-            await msg.edit(view=disabled_view); await msg.reply(embed=res_embed, files=attachments)
+            await msg.edit(view=disabled_view)
+            result_msg = await msg.reply(embed=res_embed, files=attachments)
         except (discord.NotFound, discord.Forbidden) as e: log_map.warning(f"Failed conclude reply: {e}")
+
+    async def _enter_overtime(self, gid_str: str, mid_str: str, vote: dict):
+        """Timer expired without majority — mark vote as overtime and ping
+        remaining non-voters. The vote will conclude the moment majority is
+        reached via process_vote."""
+        async with self.config_lock:
+            guild_cfg = self._get_guild_config_sync(gid_str)
+            live_vote = guild_cfg.get("active_votes", {}).get(mid_str)
+            if not live_vote:
+                return
+            live_vote["overtime"] = True
+            await self._save_config()
+
+        channel_id = vote.get("channel_id")
+        if not channel_id:
+            return
+        channel = self.bot.get_channel(channel_id)
+        if not channel:
+            return
+
+        # Build set of users who have already voted
+        voters = {u for ul in vote.get("votes", {}).values() for u in ul}
+        # Build set of all allowed voters (match players)
+        allowed = set(vote.get("allowed_voters") or [])
+        non_voters = allowed - voters
+
+        if non_voters:
+            mentions = " ".join(f"<@{uid}>" for uid in non_voters)
+            max_votes = vote.get("max_votes", 10)
+            majority = (max_votes // 2) + 1
+            try:
+                await channel.send(
+                    f"{mentions}\nThe map vote timer has ended but we need at least "
+                    f"**{majority}** votes to decide. Please vote now!"
+                )
+            except Exception as e:
+                log_map.error(f"Failed to ping non-voters for overtime vote {mid_str}: {e}")
 
     async def cancel_vote(self, gid_str: str, mid_str: str, vote: dict):
         async with self.config_lock:
@@ -830,14 +887,20 @@ class MapVote(commands.Cog, name="mapvote"):
                     live_vote = guild_cfg.get("active_votes", {}).get(mid)
                     if not live_vote or live_vote.get("_bumping"):
                         continue  # Already concluded/cancelled/being bumped
+                    # Skip votes already in overtime (they conclude via process_vote)
+                    if live_vote.get("overtime"):
+                        continue
                     voter_count = len({u for ul in live_vote.get("votes", {}).values() for u in ul})
-                    min_users = live_vote.get("min_users", 1)
+                    max_votes = live_vote.get("max_votes", 10)
+                    majority = (max_votes // 2) + 1
                     vote_snapshot = copy.deepcopy(live_vote)
 
-                if voter_count >= min_users:
+                if voter_count >= majority:
                     await self.conclude_vote(gid, mid)
                 else:
-                    await self.cancel_vote(gid, mid, vote_snapshot)
+                    # Not enough votes yet — enter overtime: ping non-voters
+                    # and wait for majority before concluding
+                    await self._enter_overtime(gid, mid, vote_snapshot)
             except Exception as e:
                 log_map.error(f"Error processing vote {mid} in guild {gid}: {e}", exc_info=True)
 
@@ -849,8 +912,8 @@ class MapVote(commands.Cog, name="mapvote"):
 
     @mapvote.command(name="start", description="Start a vote to pick a map for a game.")
     @app_commands.autocomplete(game=game_autocomplete)
-    @app_commands.describe(game="The game to vote on.", duration="Vote duration in minutes (1-10).", min_users="Minimum users required for the vote to pass.")
-    async def start(self, inter: discord.Interaction, game: str, duration: app_commands.Range[int, 1, 10]=2, min_users: app_commands.Range[int, 1, 12]=6):
+    @app_commands.describe(game="The game to vote on.", duration="Vote duration in minutes (1-10).", min_users="Minimum users required for the vote to pass (default: majority of max votes).")
+    async def start(self, inter: discord.Interaction, game: str, duration: app_commands.Range[int, 1, 10]=2, min_users: Optional[app_commands.Range[int, 1, 12]]=None):
         await inter.response.defer(ephemeral=True)
 
         # Phase 1: Acquire lock, validate, pick maps, prepare vote_data, release lock
@@ -862,7 +925,10 @@ class MapVote(commands.Cog, name="mapvote"):
             gd = games_cfg.get(game)
 
             if not gd: return await inter.followup.send(f"❌ Game '{game}' not configured.", ephemeral=True)
-            if min_users > gd.get("max_votes", 10): return await inter.followup.send(f"❌ Minimum users ({min_users}) cannot be greater than the max votes for this game ({gd.get('max_votes', 10)}).", ephemeral=True)
+            game_max_votes = gd.get('max_votes', 10)
+            if min_users is None:
+                min_users = (game_max_votes // 2) + 1
+            if min_users > game_max_votes: return await inter.followup.send(f"❌ Minimum users ({min_users}) cannot be greater than the max votes for this game ({game_max_votes}).", ephemeral=True)
 
             unseen = gd.get("unseen_maps", [])
             seen = gd.get("seen_maps", [])
@@ -913,10 +979,18 @@ class MapVote(commands.Cog, name="mapvote"):
         for i, child in enumerate(c for c in view.children if c.custom_id and c.custom_id.startswith("map_vote_")):
             if i < len(chosen_maps): child.label = f"{chosen_maps[i]} (0)"; child.disabled = False
             else: child.disabled = True
+        for child in view.children:
+            if getattr(child, "custom_id", None) == "end_vote_early":
+                child.label = f"End Vote · 0/{vote_data.get('max_votes', 10)}"
+                break
 
         if img_file:
-            embed.set_image(url=f"attachment://{img_file.filename}")
-            msg = await inter.channel.send(file=img_file, embed=embed, view=view)
+            # Send the file first, then edit to add the embed referencing it.
+            # This lets Discord consolidate the attachment into the embed image
+            # instead of showing both a standalone preview and an embed image.
+            msg = await inter.channel.send(file=img_file)
+            embed.set_image(url=f"attachment://{msg.attachments[0].filename}")
+            await msg.edit(embed=embed, view=view)
         else:
             msg = await inter.channel.send(embed=embed, view=view)
 
@@ -1129,7 +1203,7 @@ class MapVote(commands.Cog, name="mapvote"):
         channel: discord.TextChannel,
         game_name: str,
         duration: int = 3,
-        min_users: int = 1,
+        min_users: Optional[int] = None,
         max_votes: int = 10,
         allowed_voters: Optional[List[int]] = None,
         red_role_id: Optional[int] = None,
@@ -1145,13 +1219,15 @@ class MapVote(commands.Cog, name="mapvote"):
             channel: The channel to post the vote in
             game_name: The game to vote on
             duration: Vote duration in minutes (default 3)
-            min_users: Minimum users required for vote to pass (default 1)
+            min_users: Minimum users required for vote to pass (default: majority of max_votes)
             max_votes: Maximum votes before auto-conclude (default 10)
             allowed_voters: List of user IDs who can vote (if None, anyone can vote)
             red_role_id: Optional role ID for red team (alternative voter restriction)
             blue_role_id: Optional role ID for blue team (alternative voter restriction)
             match_id: Optional match ID from custommatch cog (for storing selected map)
         """
+        if min_users is None:
+            min_users = (max_votes // 2) + 1
         try:
             # Phase 1: Acquire lock, validate, pick maps, prepare vote_data, release lock
             async with self.config_lock:
@@ -1211,10 +1287,15 @@ class MapVote(commands.Cog, name="mapvote"):
                     child.disabled = False
                 else:
                     child.disabled = True
+            for child in view.children:
+                if getattr(child, "custom_id", None) == "end_vote_early":
+                    child.label = f"End Vote · 0/{vote_data.get('max_votes', 10)}"
+                    break
 
             if img_file:
-                embed.set_image(url=f"attachment://{img_file.filename}")
-                msg = await channel.send(file=img_file, embed=embed, view=view)
+                msg = await channel.send(file=img_file)
+                embed.set_image(url=f"attachment://{msg.attachments[0].filename}")
+                await msg.edit(embed=embed, view=view)
             else:
                 msg = await channel.send(embed=embed, view=view)
 

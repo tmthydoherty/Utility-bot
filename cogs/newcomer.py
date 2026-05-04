@@ -38,11 +38,31 @@ class IntroCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.db_path = DB_NAME
+        # In-memory cache for hot settings read on every message.
+        # Populated lazily by _get_setting and invalidated by _set_setting.
+        # Sentinel distinguishes "cached as missing" from "not yet cached".
+        self._settings_cache = {}
+        self._settings_missing = object()
         self.bot.loop.create_task(self.init_db())
         self.decay_task.start()
 
+    async def _get_setting(self, db, key):
+        """Cached read of a settings row. Returns the string value or None."""
+        cached = self._settings_cache.get(key, self._settings_missing)
+        if cached is not self._settings_missing:
+            return cached
+        cursor = await db.execute("SELECT value FROM settings WHERE key = ?", (key,))
+        row = await cursor.fetchone()
+        value = row[0] if row else None
+        self._settings_cache[key] = value
+        return value
+
+    def _invalidate_setting(self, key):
+        self._settings_cache.pop(key, None)
+
     async def init_db(self):
         async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL")
             await db.execute('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)')
             
             # Updated: Added is_optional column logic
@@ -361,20 +381,137 @@ class IntroCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message):
-        if message.author.bot:
+        if message.author.bot or not message.guild:
             return
 
-        # Only process messages in threads
+        # Shared low-effort filter (also applied to replies now)
+        content = message.content or ""
+        is_low_effort = len(content) < 3 or len(content.split()) < 2
+
+        # Determine if this message is inside an intro thread so we can
+        # avoid double-dipping reply points + thread points on the same message.
+        in_intro_thread = False
+        if isinstance(message.channel, discord.Thread):
+            async with aiosqlite.connect(self.db_path) as db:
+                thread_parent_setting = await self._get_setting(db, 'thread_channel_id')
+            if thread_parent_setting:
+                try:
+                    in_intro_thread = message.channel.parent_id == int(thread_parent_setting)
+                except ValueError:
+                    in_intro_thread = False
+
+        # VIP Role Reply Logic
+        # Only run when we have a reply reference, and skip low-effort content
+        # and any reply inside an intro thread (thread-points branch handles it).
+        if (
+            message.reference
+            and message.reference.message_id
+            and not is_low_effort
+            and not in_intro_thread
+        ):
+            # Resolve the replied-to message. `resolved` is often None when the
+            # target wasn't in the gateway payload cache, so fall back to fetch.
+            replied_to = message.reference.resolved
+            if not isinstance(replied_to, discord.Message):
+                try:
+                    replied_to = await message.channel.fetch_message(message.reference.message_id)
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    replied_to = None
+
+            if (
+                replied_to
+                and not replied_to.author.bot
+                and replied_to.author.id != message.author.id
+            ):
+                # Resolve the target as a Member via the guild so we can read .roles.
+                # replied_to.author may be a User, not a Member.
+                target_member = message.guild.get_member(replied_to.author.id)
+
+                async with aiosqlite.connect(self.db_path) as db:
+                    role_value = await self._get_setting(db, 'newcomer_role')
+                    if role_value and target_member:
+                        try:
+                            vip_role_id = int(role_value)
+                        except ValueError:
+                            vip_role_id = None
+
+                        if vip_role_id and any(r.id == vip_role_id for r in target_member.roles):
+                            pts_value = await self._get_setting(db, 'reply_points')
+                            try:
+                                reply_pts = float(pts_value) if pts_value else 0.5
+                            except ValueError:
+                                reply_pts = 0.5
+
+                            # Apply hourly cap to reply points too
+                            cap_value = await self._get_setting(db, 'hourly_point_cap')
+                            try:
+                                hourly_cap = int(cap_value) if cap_value else 0
+                            except ValueError:
+                                hourly_cap = 0
+
+                            hour_key = datetime.datetime.now().strftime("%Y-%m-%d-%H")
+                            award = reply_pts
+                            if hourly_cap > 0:
+                                cursor = await db.execute(
+                                    "SELECT points_earned FROM hourly_points WHERE user_id = ? AND hour_key = ?",
+                                    (message.author.id, hour_key),
+                                )
+                                hrow = await cursor.fetchone()
+                                hourly_earned = hrow[0] if hrow else 0
+                                remaining = hourly_cap - hourly_earned
+                                if remaining <= 0:
+                                    award = 0
+                                elif award > remaining:
+                                    award = remaining
+
+                            if award > 0:
+                                today = datetime.date.today().isoformat()
+                                expires_at = (datetime.date.today() + datetime.timedelta(days=30)).isoformat()
+
+                                await db.execute(
+                                    "INSERT INTO user_points (user_id, points) VALUES (?, ?) "
+                                    "ON CONFLICT(user_id) DO UPDATE SET points = points + ?",
+                                    (message.author.id, award, award),
+                                )
+                                cursor = await db.execute(
+                                    "SELECT id FROM point_ledger WHERE user_id = ? AND earned_at = ? AND decayed = 0",
+                                    (message.author.id, today),
+                                )
+                                ledger_row = await cursor.fetchone()
+                                if ledger_row:
+                                    await db.execute(
+                                        "UPDATE point_ledger SET points = points + ? WHERE id = ?",
+                                        (award, ledger_row[0]),
+                                    )
+                                else:
+                                    await db.execute(
+                                        "INSERT INTO point_ledger (user_id, points, earned_at, expires_at) VALUES (?, ?, ?, ?)",
+                                        (message.author.id, award, today, expires_at),
+                                    )
+                                await db.execute(
+                                    "INSERT INTO hourly_points (user_id, hour_key, points_earned) VALUES (?, ?, ?) "
+                                    "ON CONFLICT(user_id, hour_key) DO UPDATE SET points_earned = points_earned + ?",
+                                    (message.author.id, hour_key, award, award),
+                                )
+                                await db.commit()
+                                logger.debug(
+                                    f"VIP reply: awarded {award} to {message.author} for replying to {target_member}"
+                                )
+                                await self.check_role_upgrade(message.author, db)
+
+        # Only process messages in threads for thread-points branch
         if not isinstance(message.channel, discord.Thread):
             return
 
         # Intro Thread Points Logic
         async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute("SELECT value FROM settings WHERE key = 'thread_channel_id'")
-            row = await cursor.fetchone()
-            if not row:
+            thread_parent_setting = await self._get_setting(db, 'thread_channel_id')
+            if not thread_parent_setting:
                 return
-            thread_parent_id = int(row[0])
+            try:
+                thread_parent_id = int(thread_parent_setting)
+            except ValueError:
+                return
 
             # Must be a thread under the intro channel
             if message.channel.parent_id != thread_parent_id:
@@ -398,9 +535,11 @@ class IntroCog(commands.Cog):
 
             # Check hourly cap
             hour_key = datetime.datetime.now().strftime("%Y-%m-%d-%H")
-            cursor = await db.execute("SELECT value FROM settings WHERE key = 'hourly_point_cap'")
-            cap_row = await cursor.fetchone()
-            hourly_cap = int(cap_row[0]) if cap_row else 0  # 0 = no cap
+            cap_value = await self._get_setting(db, 'hourly_point_cap')
+            try:
+                hourly_cap = int(cap_value) if cap_value else 0  # 0 = no cap
+            except ValueError:
+                hourly_cap = 0
 
             if hourly_cap > 0:
                 cursor = await db.execute("SELECT points_earned FROM hourly_points WHERE user_id = ? AND hour_key = ?", (user_id, hour_key))
@@ -970,13 +1109,27 @@ class AdminPanelView(ui.View):
     async def questions_btn(self, interaction, button):
         await interaction.response.send_message("Manage Questions:", view=QuestionManagerView(self.cog), ephemeral=True)
 
+    @ui.button(label="Newcomer Role", style=discord.ButtonStyle.secondary, row=0)
+    async def newcomer_role_btn(self, interaction, button):
+        await interaction.response.send_message("Select Newcomer Role to Track:", view=NewcomerRoleSelectView(self.cog), ephemeral=True)
+
     @ui.button(label="Role Config", style=discord.ButtonStyle.secondary, row=1)
     async def roles_btn(self, interaction, button):
         await interaction.response.send_message("Configure Roles:", view=RoleConfigMainView(self.cog), ephemeral=True)
 
     @ui.button(label="Points/Tiers", style=discord.ButtonStyle.secondary, row=1)
     async def points_btn(self, interaction, button):
-        await interaction.response.send_modal(PointThresholdModal(self.cog))
+        async with aiosqlite.connect(self.cog.db_path) as db:
+            cursor = await db.execute("SELECT tier, points_required FROM point_config")
+            rows = await cursor.fetchall()
+            pts = {1: 0, 2: 0, 3: 0}
+            for t, p in rows:
+                pts[t] = p
+            cursor = await db.execute("SELECT value FROM settings WHERE key = 'reply_points'")
+            res = await cursor.fetchone()
+            reply_pts = res[0] if res else "0.5"
+            
+        await interaction.response.send_modal(PointThresholdModal(self.cog, pts[1], pts[2], pts[3], reply_pts))
 
     @ui.button(label="Hourly Cap", style=discord.ButtonStyle.secondary, row=1)
     async def hourly_cap_btn(self, interaction, button):
@@ -986,10 +1139,11 @@ class AdminPanelView(ui.View):
     async def bl_btn(self, interaction, button):
         await interaction.response.send_message("Select User to Block:", view=UserSelectView(self.cog, "blacklist"), ephemeral=True)
 
-    @ui.button(label="History", style=discord.ButtonStyle.secondary, row=2)
+    @ui.button(label="Leaderboard", style=discord.ButtonStyle.secondary, row=2)
     async def history_btn(self, interaction, button):
-        view = HistoryMonthSelectView(self.cog)
-        await interaction.response.send_message("**Select a month to view:**", view=view, ephemeral=True)
+        view = LeaderboardPaginatedView(self.cog, interaction.guild)
+        await view.load_data("30days")
+        await interaction.response.send_message(content=await view.build_page(), view=view, ephemeral=True)
 
     @ui.button(label="Welcome Message", style=discord.ButtonStyle.success, row=2)
     async def msg_btn(self, interaction, button):
@@ -1042,6 +1196,7 @@ class ChannelSelectView(ui.View):
         async with aiosqlite.connect(self.cog.db_path) as db:
             await db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('thread_channel_id', ?)", (str(ch.id),))
             await db.commit()
+        self.cog._invalidate_setting('thread_channel_id')
         await interaction.response.send_message(f"Thread Parent set to {ch.mention}", ephemeral=True)
 
 class QuestionManagerView(ui.View):
@@ -1142,22 +1297,46 @@ class TierConfigView(ui.View):
             await db.commit()
         await interaction.response.send_message(f"Base {self.base_rank} Tier {tier} set to {role.name}", ephemeral=True)
 
+class NewcomerRoleSelectView(ui.View):
+    def __init__(self, cog):
+        super().__init__()
+        self.cog = cog
+
+    @ui.select(cls=ui.RoleSelect, placeholder="Select Newcomer Role", min_values=1, max_values=1)
+    async def nc_role(self, interaction, select):
+        role = select.values[0]
+        async with aiosqlite.connect(self.cog.db_path) as db:
+            await db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('newcomer_role', ?)", (str(role.id),))
+            await db.commit()
+        self.cog._invalidate_setting('newcomer_role')
+        await interaction.response.send_message(f"Newcomer role set to {role.name}", ephemeral=True)
+
 class PointThresholdModal(ui.Modal, title="Points Required per Tier"):
     t1 = ui.TextInput(label="Tier 1 Points", max_length=4)
     t2 = ui.TextInput(label="Tier 2 Points", max_length=4)
     t3 = ui.TextInput(label="Tier 3 Points", max_length=4)
-    def __init__(self, cog):
+    reply_pts = ui.TextInput(label="Points per Reply", max_length=6)
+
+    def __init__(self, cog, p1, p2, p3, p_reply):
         super().__init__()
         self.cog = cog
+        self.t1.default = str(p1)
+        self.t2.default = str(p2)
+        self.t3.default = str(p3)
+        self.reply_pts.default = str(p_reply)
+
     async def on_submit(self, interaction):
         try:
             p1, p2, p3 = int(self.t1.value), int(self.t2.value), int(self.t3.value)
-        except Exception: return await interaction.response.send_message("Must be numbers.", ephemeral=True)
+            p_reply = float(self.reply_pts.value)
+        except Exception: return await interaction.response.send_message("Must be valid numbers.", ephemeral=True)
         async with aiosqlite.connect(self.cog.db_path) as db:
             for t, p in [(1, p1), (2, p2), (3, p3)]:
                 await db.execute("INSERT OR REPLACE INTO point_config (tier, points_required) VALUES (?, ?)", (t, p))
+            await db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('reply_points', ?)", (str(p_reply),))
             await db.commit()
-        await interaction.response.send_message("Thresholds updated.", ephemeral=True)
+        self.cog._invalidate_setting('reply_points')
+        await interaction.response.send_message("Thresholds and reply points updated.", ephemeral=True)
 
 class HourlyCapModal(ui.Modal, title="Hourly Point Cap"):
     cap = ui.TextInput(label="Max Points Per Hour (0 = no limit)", max_length=4, placeholder="e.g. 10")
@@ -1177,6 +1356,7 @@ class HourlyCapModal(ui.Modal, title="Hourly Point Cap"):
         async with aiosqlite.connect(self.cog.db_path) as db:
             await db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('hourly_point_cap', ?)", (str(cap_val),))
             await db.commit()
+        self.cog._invalidate_setting('hourly_point_cap')
 
         if cap_val == 0:
             await interaction.response.send_message("Hourly cap disabled (no limit).", ephemeral=True)
@@ -1355,112 +1535,73 @@ class PointAmountModal(ui.Modal, title="Enter Amount"):
 
         await interaction.response.send_message(msg, ephemeral=True)
 
-class HistoryMonthSelectView(ui.View):
-    """View to select which month to view history for"""
-    def __init__(self, cog):
-        super().__init__(timeout=60)
-        self.cog = cog
+class LeaderboardPaginatedView(ui.View):
+    """Paginated view for showing points leaderboard"""
+    ITEMS_PER_PAGE = 20
 
-        # Build month options: current month + last 3 months
-        now = datetime.datetime.now()
-        options = []
-
-        # Current month (active points)
-        current_month = now.strftime("%Y-%m")
-        options.append(discord.SelectOption(
-            label=now.strftime("%B %Y") + " (Current)",
-            value=f"current:{current_month}",
-            description="View active points this month"
-        ))
-
-        # Previous 3 months
-        for i in range(1, 4):
-            # Go back i months
-            year = now.year
-            month = now.month - i
-            while month <= 0:
-                month += 12
-                year -= 1
-            past_date = datetime.datetime(year, month, 1)
-            month_str = past_date.strftime("%Y-%m")
-            options.append(discord.SelectOption(
-                label=past_date.strftime("%B %Y"),
-                value=f"history:{month_str}",
-                description=f"View archived points for {past_date.strftime('%B %Y')}"
-            ))
-
-        self.select = ui.Select(placeholder="Select a month...", options=options)
-        self.select.callback = self.select_callback
-        self.add_item(self.select)
-
-    async def select_callback(self, interaction: discord.Interaction):
-        value = self.select.values[0]
-        source, month_str = value.split(":", 1)
-
-        # Fetch data based on source
-        async with aiosqlite.connect(self.cog.db_path) as db:
-            if source == "current":
-                # Get from user_points (active)
-                cursor = await db.execute(
-                    "SELECT user_id, points FROM user_points WHERE points > 0 ORDER BY points DESC"
-                )
-            else:
-                # Get from point_history (archived)
-                cursor = await db.execute(
-                    "SELECT user_id, points FROM point_history WHERE month_str = ? ORDER BY points DESC",
-                    (month_str,)
-                )
-            rows = await cursor.fetchall()
-
-        if not rows:
-            return await interaction.response.edit_message(content="No point data for this month.", view=None)
-
-        # Parse month for display
-        try:
-            display_date = datetime.datetime.strptime(month_str, "%Y-%m")
-            display_name = display_date.strftime("%B %Y")
-            if source == "current":
-                display_name += " (Active)"
-        except:
-            display_name = month_str
-
-        # Show paginated view
-        view = HistoryPaginatedView(self.cog, rows, display_name, interaction.guild)
-        await interaction.response.edit_message(content=await view.build_page(), view=view)
-
-class HistoryPaginatedView(ui.View):
-    """Paginated view for showing point history leaderboard"""
-    ITEMS_PER_PAGE = 10
-
-    def __init__(self, cog, data, month_name, guild):
+    def __init__(self, cog, guild, current_mode="30days"):
         super().__init__(timeout=120)
         self.cog = cog
-        self.data = data  # List of (user_id, points)
-        self.month_name = month_name
         self.guild = guild
+        self.current_mode = current_mode
+        self.data = []
         self.page = 0
-        self.max_page = max(0, (len(data) - 1) // self.ITEMS_PER_PAGE)
+        self.max_page = 0
+
+    async def load_data(self, mode):
+        self.current_mode = mode
+        self.page = 0
+        async with aiosqlite.connect(self.cog.db_path) as db:
+            if mode == "30days":
+                cursor = await db.execute("SELECT user_id, points FROM user_points WHERE points > 0 ORDER BY points DESC")
+                self.data = await cursor.fetchall()
+            elif mode == "60days":
+                thirty_days_ago = (datetime.date.today() - datetime.timedelta(days=30)).isoformat()
+                sixty_days_ago = (datetime.date.today() - datetime.timedelta(days=60)).isoformat()
+                cursor = await db.execute(
+                    "SELECT user_id, SUM(points) FROM point_ledger WHERE earned_at >= ? AND earned_at < ? GROUP BY user_id HAVING SUM(points) > 0 ORDER BY SUM(points) DESC",
+                    (sixty_days_ago, thirty_days_ago)
+                )
+                self.data = await cursor.fetchall()
+            elif mode == "alltime":
+                cursor = await db.execute(
+                    "SELECT user_id, SUM(points) FROM point_ledger GROUP BY user_id HAVING SUM(points) > 0 ORDER BY SUM(points) DESC"
+                )
+                self.data = await cursor.fetchall()
+
+        self.max_page = max(0, (len(self.data) - 1) // self.ITEMS_PER_PAGE)
         self.update_buttons()
 
     def update_buttons(self):
         self.prev_btn.disabled = self.page == 0
         self.next_btn.disabled = self.page >= self.max_page
+        self.mode_30_btn.style = discord.ButtonStyle.primary if self.current_mode == "30days" else discord.ButtonStyle.secondary
+        self.mode_60_btn.style = discord.ButtonStyle.primary if self.current_mode == "60days" else discord.ButtonStyle.secondary
+        self.mode_all_btn.style = discord.ButtonStyle.primary if self.current_mode == "alltime" else discord.ButtonStyle.secondary
 
     async def build_page(self):
         start = self.page * self.ITEMS_PER_PAGE
         end = start + self.ITEMS_PER_PAGE
         page_data = self.data[start:end]
 
-        lines = [f"**{self.month_name} - Points Leaderboard**\n"]
+        mode_titles = {
+            "30days": "Past 30 Days",
+            "60days": "31-60 Days Ago",
+            "alltime": "All-Time"
+        }
+        title = mode_titles.get(self.current_mode, "Leaderboard")
+
+        lines = [f"**{title} - Points Leaderboard**\n"]
+
+        if not page_data:
+            lines.append("No data available.")
 
         for i, (user_id, points) in enumerate(page_data, start=start + 1):
-            # Try to get member name
             member = self.guild.get_member(user_id)
-            if member:
-                name = member.display_name
-            else:
-                name = f"User {user_id}"
-            lines.append(f"`{i}.` **{name}** - {points} pts")
+            name = member.display_name if member else f"User {user_id}"
+            pt_str = f"{points:.1f}" if isinstance(points, float) else str(points)
+            if pt_str.endswith(".0"): pt_str = pt_str[:-2]
+            lines.append(f"`{i}.` **{name}** - {pt_str} pts")
 
         lines.append(f"\nPage {self.page + 1}/{self.max_page + 1}")
         return "\n".join(lines)
@@ -1475,6 +1616,21 @@ class HistoryPaginatedView(ui.View):
     async def next_btn(self, interaction: discord.Interaction, button: ui.Button):
         self.page = min(self.max_page, self.page + 1)
         self.update_buttons()
+        await interaction.response.edit_message(content=await self.build_page(), view=self)
+
+    @ui.button(label="Past 30 Days", style=discord.ButtonStyle.secondary, row=1)
+    async def mode_30_btn(self, interaction: discord.Interaction, button: ui.Button):
+        await self.load_data("30days")
+        await interaction.response.edit_message(content=await self.build_page(), view=self)
+
+    @ui.button(label="31-60 Days", style=discord.ButtonStyle.secondary, row=1)
+    async def mode_60_btn(self, interaction: discord.Interaction, button: ui.Button):
+        await self.load_data("60days")
+        await interaction.response.edit_message(content=await self.build_page(), view=self)
+
+    @ui.button(label="All-Time", style=discord.ButtonStyle.secondary, row=1)
+    async def mode_all_btn(self, interaction: discord.Interaction, button: ui.Button):
+        await self.load_data("alltime")
         await interaction.response.edit_message(content=await self.build_page(), view=self)
 
 async def setup(bot):

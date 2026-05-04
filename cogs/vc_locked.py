@@ -32,6 +32,12 @@ class VC(commands.Cog):
         
         # Hub Messaging
         self._hub_message_locks = {}
+
+        # Persistent knock hub embed (single embed per guild)
+        self._knock_hub_locks = {}           # guild_id -> asyncio.Lock
+        self._knock_embed_msg_ids = {}       # guild_id -> message_id (cache)
+        self._knock_hub_pending = set()      # guild_ids with pending updates
+        self._knock_hub_last_state = {}      # guild_id -> fingerprint tuple (skip edits if unchanged)
         
         # Hub Renaming & Rate Limits
         self._hub_name_lock = asyncio.Lock()
@@ -91,7 +97,6 @@ class VC(commands.Cog):
             
             # FIX: Re-register persistent views with comprehensive validation
             view_count = 0
-            hub_view_count = 0
             state_modified = False
 
             for vc_id, data in list(self.active_vcs.items()):
@@ -113,7 +118,7 @@ class VC(commands.Cog):
                         else:
                             try:
                                 await thread.fetch_message(data['knock_mgmt_msg_id'])
-                                view = shared.KnockManagementView(self.bot, self, data['owner_id'], vc_id)
+                                view = shared.KnockManagementView(self.bot, self, data['owner_id'], vc_id, show_knock_buttons=True)
                                 self.bot.add_view(view, message_id=data['knock_mgmt_msg_id'])
                                 view_count += 1
                             except discord.NotFound:
@@ -128,23 +133,10 @@ class VC(commands.Cog):
                         shared.logger.warning(f"Thread missing for VC {vc_id}, cleared references")
                         state_modified = True
 
-                # FIX: Also re-register HubEntryView for hub messages
-                if data.get('message_id') and data.get('guild_id'):
-                    hub_id = await shared.get_config(f"hub_channel_id_{data['guild_id']}")
-                    if hub_id:
-                        hub = self.bot.get_channel(int(hub_id))
-                        if hub:
-                            try:
-                                await hub.fetch_message(data['message_id'])
-                                hub_view = shared.HubEntryView(self.bot, self, data['owner_id'], vc_id)
-                                self.bot.add_view(hub_view, message_id=data['message_id'])
-                                hub_view_count += 1
-                            except discord.NotFound:
-                                data['message_id'] = None
-                                shared.logger.warning(f"Hub message missing for VC {vc_id}, cleared reference")
-                                state_modified = True
-                            except Exception as e:
-                                shared.logger.error(f"Failed to validate hub message for VC {vc_id}: {e}")
+                # Clear per-VC message_id (no longer used - replaced by single knock hub embed)
+                if data.get('message_id'):
+                    data['message_id'] = None
+                    state_modified = True
 
             # FIX: Save state if any references were cleared
             if state_modified:
@@ -187,14 +179,25 @@ class VC(commands.Cog):
                             asyncio.create_task(self.cleanup_accepted_knock(vc_id, user_id))
             shared.logger.info(f"Restored {sum(len(v) for v in self.accepted_knocks.values())} accepted knocks")
 
-            # FIX: Force hub name update for all guilds after restoration
+            # Initialize persistent knock hub embed for all guilds
             for guild in self.bot.guilds:
                 try:
                     await self.update_hub_name(guild, force=True)
                 except Exception as e:
                     shared.logger.error(f"Failed initial hub rename for {guild.id}: {e}")
-            
-            shared.logger.info(f"VC Cog loaded successfully. {len(self.active_vcs)} VCs restored, {view_count} knock views + {hub_view_count} hub views registered")
+                try:
+                    # Load cached knock embed message ID
+                    msg_id = await shared.get_config(f"knock_embed_msg_id_{guild.id}")
+                    if msg_id:
+                        self._knock_embed_msg_ids[guild.id] = int(msg_id)
+                    # Create/update the persistent knock hub embed
+                    await self.update_knock_hub_embed(guild)
+                    # One-time migration: clean up old per-VC knock messages
+                    await self._migrate_old_knock_messages(guild)
+                except Exception as e:
+                    shared.logger.error(f"Failed to initialize knock hub embed for {guild.id}: {e}")
+
+            shared.logger.info(f"VC Cog loaded successfully. {len(self.active_vcs)} VCs restored, {view_count} knock views registered")
         except Exception as e:
             shared.logger.error(f"Critical error during cog_load: {e}", exc_info=True)
             raise
@@ -377,9 +380,18 @@ class VC(commands.Cog):
                                         # Message missing, recreate it
                                         owner = await shared.validate_member(guild, data['owner_id'])
                                         if owner:
+                                            # Clean old settings embeds first
+                                            try:
+                                                async for old_msg in thread.history(limit=20):
+                                                    if old_msg.author.id == self.bot.user.id and old_msg.embeds:
+                                                        title = old_msg.embeds[0].title or ""
+                                                        if "VC Control Panel" in title or "NEW KNOCK REQUEST" in title:
+                                                            await old_msg.delete()
+                                            except Exception:
+                                                pass
                                             embed = shared.create_knock_management_embed(owner, [], guild, data)
                                             view = shared.KnockManagementView(self.bot, self, owner.id, vc_id)
-                                            msg = await thread.send(content=owner.mention, embed=embed, view=view)
+                                            msg = await thread.send(embed=embed, view=view)
                                             self.bot.add_view(view, message_id=msg.id)
                                             data['knock_mgmt_msg_id'] = msg.id
                                             shared.logger.info(f"Recreated knock management message for VC {vc_id}")
@@ -473,7 +485,6 @@ class VC(commands.Cog):
         view_count = 0
         knock_mgmt_count = 0
         knock_mgmt_recreated = 0
-        hub_msg_count = 0
 
         try:
             # Re-register knock management views (in private threads)
@@ -500,7 +511,7 @@ class VC(commands.Cog):
                         try:
                             # Verify message still exists
                             await thread.fetch_message(data['knock_mgmt_msg_id'])
-                            view = shared.KnockManagementView(self.bot, self, data['owner_id'], vc_id)
+                            view = shared.KnockManagementView(self.bot, self, data['owner_id'], vc_id, show_knock_buttons=True)
                             self.bot.add_view(view, message_id=data['knock_mgmt_msg_id'])
                             knock_mgmt_count += 1
                         except discord.NotFound:
@@ -512,6 +523,16 @@ class VC(commands.Cog):
                                 owner = await shared.validate_member(guild, data['owner_id'])
                                 if owner:
                                     try:
+                                        # Clean up any old settings embeds first
+                                        try:
+                                            async for old_msg in thread.history(limit=20):
+                                                if old_msg.author.id == self.bot.user.id and old_msg.embeds:
+                                                    title = old_msg.embeds[0].title or ""
+                                                    if "VC Control Panel" in title or "NEW KNOCK REQUEST" in title:
+                                                        await old_msg.delete()
+                                        except Exception:
+                                            pass
+
                                         embed = shared.create_knock_management_embed(owner, [], guild, data)
                                         view = shared.KnockManagementView(self.bot, self, owner.id, vc_id)
                                         msg = await thread.send(embed=embed, view=view)
@@ -528,33 +549,22 @@ class VC(commands.Cog):
                         data['thread_id'] = None
                         data['knock_mgmt_msg_id'] = None
 
-                # Re-register hub entry views (knock buttons in hub channel)
-                if data.get('message_id') and not data.get('unlocked', False) and not data.get('ghost', False):
-                    if vc and vc.guild:
-                        hub_id = await shared.get_config(f"hub_channel_id_{vc.guild.id}")
-                        if hub_id:
-                            hub = vc.guild.get_channel(int(hub_id))
-                            if hub:
-                                try:
-                                    # Verify message still exists
-                                    await hub.fetch_message(data['message_id'])
-                                    view = shared.HubEntryView(self.bot, self, data['owner_id'], vc_id)
-                                    self.bot.add_view(view, message_id=data['message_id'])
-                                    hub_msg_count += 1
-                                except discord.NotFound:
-                                    shared.logger.warning(f"Hub message {data['message_id']} missing for VC {vc_id}")
-                                    data['message_id'] = None
-                                    # Try to recreate the message
-                                    await self.create_hub_message(vc)
-                                except Exception as e:
-                                    shared.logger.error(f"Failed to re-register hub view for VC {vc_id}: {e}")
+                # Per-VC hub messages replaced by single knock hub embed (handled below)
 
             # Re-register global persistent views
             self.bot.add_view(shared.AdminPanelView(self.bot))
             self.bot.add_view(shared.RulesView(self.bot))
-            view_count = knock_mgmt_count + knock_mgmt_recreated + hub_msg_count + 2
 
-            shared.logger.info(f"Re-registered {view_count} views ({knock_mgmt_count} knock mgmt, {knock_mgmt_recreated} recreated, {hub_msg_count} hub, 2 global)")
+            # Re-register persistent knock hub embed for all guilds
+            for guild in self.bot.guilds:
+                try:
+                    await self.update_knock_hub_embed(guild)
+                except Exception as e:
+                    shared.logger.error(f"Failed to re-register knock hub embed for {guild.id}: {e}")
+
+            view_count = knock_mgmt_count + knock_mgmt_recreated + 2
+
+            shared.logger.info(f"Re-registered {view_count} views ({knock_mgmt_count} knock mgmt, {knock_mgmt_recreated} recreated, 2 global) + knock hub embeds")
             await self.save_state()
 
         except Exception as e:
@@ -651,27 +661,8 @@ class VC(commands.Cog):
                         except Exception as e:
                             shared.logger.debug(f"Failed to unarchive thread {data['thread_id']}: {e}")
 
-                # Check hub message for locked VCs
-                if not data.get('unlocked', False) and not data.get('ghost', False) and not data.get('is_basic', False):
-                    if not data.get('message_id'):
-                        shared.logger.warning(f"Health check: Locked VC {vc_id} missing hub message, recreating")
-                        await self.create_hub_message(vc)
-                        issues_found += 1
-                        issues_fixed += 1
-                    else:
-                        # Verify hub message still exists
-                        hub_id = await shared.get_config(f"hub_channel_id_{guild.id}")
-                        if hub_id:
-                            hub = guild.get_channel(int(hub_id))
-                            if hub:
-                                try:
-                                    await hub.fetch_message(data['message_id'])
-                                except discord.NotFound:
-                                    shared.logger.warning(f"Health check: Hub message {data['message_id']} missing for VC {vc_id}, recreating")
-                                    data['message_id'] = None
-                                    await self.create_hub_message(vc)
-                                    issues_found += 1
-                                    issues_fixed += 1
+                # Knock hub embed is managed as a single persistent message per guild
+                # No per-VC hub message health check needed
 
                 # Check owner still in guild
                 owner = await shared.validate_member(guild, data['owner_id'])
@@ -695,6 +686,13 @@ class VC(commands.Cog):
                     await self.safe_set_permissions(vc, guild.default_role, connect=expected_connect)
                     issues_found += 1
                     issues_fixed += 1
+
+            # Ensure knock hub embed is up to date for all guilds
+            for guild in self.bot.guilds:
+                try:
+                    await self.update_knock_hub_embed(guild)
+                except Exception as e:
+                    shared.logger.error(f"Health check: Failed to update knock hub embed for guild {guild.id}: {e}")
 
             if issues_found > 0:
                 shared.logger.info(f"Health check complete: {issues_found} issues found, {issues_fixed} fixed")
@@ -1796,12 +1794,9 @@ class VC(commands.Cog):
             return
 
         try:
-            embed = shared.create_knock_management_embed(owner, self.pending_knocks.get(vc_id, []), guild, vc_data)
-            view = shared.KnockManagementView(self.bot, self, owner.id, vc_id)
-
             has_pending = len(self.pending_knocks.get(vc_id, [])) > 0
-            view.accept_btn.disabled = not has_pending
-            view.deny_btn.disabled = not has_pending
+            embed = shared.create_knock_management_embed(owner, self.pending_knocks.get(vc_id, []), guild, vc_data)
+            view = shared.KnockManagementView(self.bot, self, owner.id, vc_id, show_knock_buttons=has_pending)
 
             # Check if panel is buried — compare panel msg ID to thread's last message
             # If buried, delete + resend at bottom; otherwise just edit in place
@@ -1993,9 +1988,22 @@ class VC(commands.Cog):
             except discord.Forbidden:
                 await thread.send(f"⚠️ {owner.mention} - Access VC settings here!")
 
-            view = shared.KnockManagementView(self.bot, self, owner.id, vc_id)
-            embed = shared.create_knock_management_embed(owner, self.pending_knocks.get(vc_id, []), guild, vc_data)
-            knock_msg = await thread.send(content=owner.mention, embed=embed, view=view)
+            # Clean up any existing settings embeds to prevent duplicates
+            try:
+                async for old_msg in thread.history(limit=20):
+                    if old_msg.author.id == self.bot.user.id and old_msg.embeds:
+                        title = old_msg.embeds[0].title or ""
+                        if "VC Control Panel" in title or "NEW KNOCK REQUEST" in title:
+                            await old_msg.delete()
+                            shared.logger.debug(f"Deleted old settings embed {old_msg.id} in thread {thread.id}")
+            except Exception as e:
+                shared.logger.debug(f"Failed to clean old embeds in thread {thread.id}: {e}")
+
+            pending = self.pending_knocks.get(vc_id, [])
+            has_pending = len(pending) > 0
+            view = shared.KnockManagementView(self.bot, self, owner.id, vc_id, show_knock_buttons=has_pending)
+            embed = shared.create_knock_management_embed(owner, pending, guild, vc_data)
+            knock_msg = await thread.send(embed=embed, view=view)
             self.bot.add_view(view, message_id=knock_msg.id)
 
             async with self._active_vcs_lock:
@@ -2031,7 +2039,7 @@ class VC(commands.Cog):
                 shared.logger.warning(f"Cannot notify user {user_id}, not in guild")
                 return
 
-            # Try to add user to thread
+            # Add user to thread so they can see the notification
             try:
                 await thread.add_user(user)
             except discord.Forbidden:
@@ -2040,20 +2048,8 @@ class VC(commands.Cog):
                 shared.logger.debug(f"Failed to add user {user_id} to thread: {e}")
 
             # Send acceptance notification
-            msg = await thread.send(f"✅ {user.mention} Your knock was accepted! You can now join **{vc.name}**.")
+            await thread.send(f"✅ {user.mention} Your knock was accepted! You can now join **{vc.name}**.")
 
-            if vc_id not in self.accepted_knocks:
-                self.accepted_knocks[vc_id] = {}
-
-            # FIX: Save to database for persistence across restarts
-            await shared.save_accepted_knock(vc_id, user_id)
-
-            task = asyncio.create_task(self._delayed_accepted_knock_cleanup(vc_id, user_id, 300))
-            self.accepted_knocks[vc_id][user_id] = {
-                'msg_id': msg.id,
-                'thread_id': thread.id,
-                'task': task
-            }
             shared.logger.info(f"Sent knock acceptance notification to user {user_id} for VC {vc_id}")
         except discord.Forbidden:
             shared.logger.error(f"No permission to send knock acceptance message in thread {thread.id}")
@@ -2061,7 +2057,7 @@ class VC(commands.Cog):
             shared.logger.error(f"Failed to handle knock accepted for VC {vc_id}, user {user_id}: {e}")
 
     async def cleanup_accepted_knock(self, vc_id, user_id):
-        # FIX: Delete from database first (always, even if not in memory)
+        """Clean up accepted knock tracking data"""
         await shared.delete_accepted_knock(vc_id, user_id)
 
         if vc_id not in self.accepted_knocks or user_id not in self.accepted_knocks[vc_id]:
@@ -2074,36 +2070,8 @@ class VC(commands.Cog):
         if data.get('task') and not data['task'].done():
             data['task'].cancel()
 
-        thread_id = data.get('thread_id')
-        msg_id = data.get('msg_id')
-
-        if thread_id and msg_id:
-            thread = self.bot.get_channel(thread_id)
-            if not thread:
-                try:
-                    thread = await self.bot.fetch_channel(thread_id)
-                except discord.NotFound:
-                    pass
-            if thread:
-                try:
-                    msg = thread.get_partial_message(msg_id)
-                    await msg.delete()
-                except Exception as e:
-                    shared.logger.debug(f"Failed to delete accepted knock message {msg_id}: {e}")
-
-                try:
-                    user = thread.guild.get_member(user_id)
-                    if user:
-                        await thread.remove_user(user)
-                except Exception as e:
-                    shared.logger.debug(f"Failed to remove user {user_id} from thread: {e}")
-
         if vc_id in self.accepted_knocks and not self.accepted_knocks[vc_id]:
             del self.accepted_knocks[vc_id]
-
-        # Re-send settings panel at bottom so it doesn't get buried by add/remove messages
-        if vc_id in self.active_vcs:
-            await self.update_knock_panel(vc_id)
 
     # --- COMMANDS ---
 
@@ -2603,9 +2571,11 @@ class VC(commands.Cog):
                                 shared.logger.warning(f"Failed to delete old knock mgmt message: {e}")
 
                         # Now create new knock management message
-                        embed = shared.create_knock_management_embed(new_owner, self.pending_knocks.get(vc_id, []), voice_channel.guild, vc_data)
-                        view = shared.KnockManagementView(self.bot, self, new_owner.id, vc_id)
-                        knock_msg = await thread.send(content=new_owner.mention, embed=embed, view=view)
+                        pending = self.pending_knocks.get(vc_id, [])
+                        has_pending = len(pending) > 0
+                        embed = shared.create_knock_management_embed(new_owner, pending, voice_channel.guild, vc_data)
+                        view = shared.KnockManagementView(self.bot, self, new_owner.id, vc_id, show_knock_buttons=has_pending)
+                        knock_msg = await thread.send(embed=embed, view=view)
                         self.bot.add_view(view, message_id=knock_msg.id)
                         vc_data['knock_mgmt_msg_id'] = knock_msg.id
                     except Exception as e:
@@ -2812,189 +2782,215 @@ class VC(commands.Cog):
                     shared.logger.info("Hub rename queue is empty, not respawning processor")
 
     async def create_hub_message(self, voice_channel):
-        vc_id = voice_channel.id
-
-        if vc_id not in self._hub_message_locks:
-            self._hub_message_locks[vc_id] = asyncio.Lock()
-
-        async with self._hub_message_locks[vc_id]:
-            vc_data = self.active_vcs.get(vc_id)
-            # Don't create hub messages for unlocked, ghost, or basic VCs
-            if not vc_data or vc_data.get('unlocked', False) or vc_data.get('ghost', False) or vc_data.get('is_basic', False):
-                return False
-
-            hub_id = await shared.get_config(f"hub_channel_id_{voice_channel.guild.id}")
-            if not hub_id:
-                return False
-            hub = voice_channel.guild.get_channel(int(hub_id))
-            if not hub:
-                return False
-
-            # FIX: Check message_id AFTER acquiring lock to prevent race
-            if vc_data.get('message_id'):
-                try:
-                    # Verify existing message before creating new one
-                    await hub.fetch_message(vc_data['message_id'])
-                    shared.logger.debug(f"Hub message {vc_data['message_id']} already exists for VC {vc_id}")
-                    return True  # Message exists, don't create duplicate
-                except discord.NotFound:
-                    # Message was deleted, clear invalid ID
-                    vc_data['message_id'] = None
-
-            # FIX: Check for existing duplicates and delete them (scan more history)
-            try:
-                messages_checked = 0
-                max_messages = 200  # Check up to 200 messages
-                async for m in hub.history(limit=max_messages):
-                    if m.author.id != self.bot.user.id:
-                        continue
-                    if not m.components:
-                        continue
-
-                    for row in m.components:
-                        for child in row.children:
-                            if getattr(child, 'custom_id', None) == f"knock:{vc_id}":
-                                try:
-                                    await m.delete()
-                                    shared.logger.info(f"Deleted duplicate knock message for VC {vc_id}")
-                                except Exception as e:
-                                    shared.logger.debug(f"Failed to delete duplicate knock message: {e}")
-            except Exception as e:
-                shared.logger.error(f"Failed to check duplicates: {e}")
-            
-            owner = await shared.validate_member(voice_channel.guild, vc_data['owner_id'])
-            if not owner: 
-                return False
-            
-            is_full = voice_channel.user_limit != 0 and len(voice_channel.members) >= voice_channel.user_limit
-            embed = discord.Embed(color=discord.Color.red() if is_full else discord.Color.gold())
-            embed.set_author(name=voice_channel.name, icon_url=owner.display_avatar.url)
-            embed.description = "🔴 **FULL**\nClick **Knock** to request entry." if is_full else "Click **Knock** to request entry."
-            
-            view = shared.HubEntryView(self.bot, self, owner.id, vc_id)
-            try:
-                msg = await hub.send(embed=embed, view=view)
-                self.bot.add_view(view, message_id=msg.id)
-                vc_data['message_id'] = msg.id
-                await self.save_state()
-                shared.logger.info(f"Created hub message {msg.id} for VC {vc_id}")
-                return True
-            except Exception as e:
-                shared.logger.error(f"Failed to create hub message: {e}")
-                return False
+        """Delegate to persistent knock hub embed update."""
+        if voice_channel and voice_channel.guild:
+            await self.update_knock_hub_embed(voice_channel.guild)
 
     async def delete_hub_message(self, voice_id):
+        """Delegate to persistent knock hub embed update."""
         vc_data = self.active_vcs.get(voice_id)
-        if not vc_data or not vc_data.get('message_id'):
+        if not vc_data:
             return
-
-        # FIX: Add lock protection to prevent race conditions
-        if voice_id not in self._hub_message_locks:
-            self._hub_message_locks[voice_id] = asyncio.Lock()
-
-        async with self._hub_message_locks[voice_id]:
-            # Double-check message_id still exists after acquiring lock
-            if not vc_data.get('message_id'):
-                return
-
-            # FIX: Better guild resolution
-            guild = None
-            guild_id = vc_data.get('guild_id')
-            if guild_id:
-                guild = self.bot.get_guild(guild_id)
-
-            if not guild:
-                vc = self.bot.get_channel(voice_id)
-                if vc and hasattr(vc, 'guild'):
-                    guild = vc.guild
-
-            if not guild and len(self.bot.guilds) == 1:
-                guild = self.bot.guilds[0]
-
-            if not guild:
-                shared.logger.error(f"Cannot find guild for VC {voice_id}, orphaned message possible")
-                return
-
-            # FIX: Store message_id but don't clear until deletion succeeds
-            msg_id = vc_data['message_id']
-            deletion_successful = False
-
-            hub_id = await shared.get_config(f"hub_channel_id_{guild.id}")
-            if hub_id:
-                hub = guild.get_channel(int(hub_id))
-                if hub:
-                    try:
-                        msg = hub.get_partial_message(msg_id)
-                        await msg.delete()
-                        shared.logger.info(f"Deleted hub message {msg_id} for VC {voice_id}")
-                        deletion_successful = True
-                    except discord.NotFound:
-                        # Already deleted - that's fine, mark as successful
-                        shared.logger.debug(f"Hub message {msg_id} already deleted")
-                        deletion_successful = True
-                    except discord.Forbidden:
-                        # No permission - still clear the reference to avoid retries
-                        shared.logger.error(f"No permission to delete hub message {msg_id}")
-                        deletion_successful = True  # Clear ref to avoid infinite retries
-                    except Exception as e:
-                        # Other error - keep the reference for retry
-                        shared.logger.error(f"Failed to delete hub message {msg_id}: {e}")
-                else:
-                    # Hub channel doesn't exist, clear the reference
-                    shared.logger.warning(f"Hub channel {hub_id} not found, clearing message reference")
-                    deletion_successful = True
-            else:
-                # No hub configured, clear the reference
-                deletion_successful = True
-
-            # FIX: Only clear message_id after successful deletion (or if message is confirmed gone)
-            if deletion_successful:
-                vc_data['message_id'] = None
-                await self.save_state()
+        guild_id = vc_data.get('guild_id')
+        if not guild_id:
+            return
+        guild = self.bot.get_guild(guild_id)
+        if not guild:
+            vc = self.bot.get_channel(voice_id)
+            if vc and hasattr(vc, 'guild'):
+                guild = vc.guild
+        if not guild and len(self.bot.guilds) == 1:
+            guild = self.bot.guilds[0]
+        if guild:
+            await self.update_knock_hub_embed(guild)
 
     async def update_hub_embed(self, voice_id):
-        cooldown_key = f"hub_update_{voice_id}"
-        now = time.time()
-        if now - self._hub_update_cooldowns.get(cooldown_key, 0) < 10: 
-            return
-        self._hub_update_cooldowns[cooldown_key] = now 
-        
+        """Delegate to persistent knock hub embed update."""
         vc_data = self.active_vcs.get(voice_id)
-        if not vc_data or vc_data.get('ghost', False) or vc_data.get('unlocked', False): 
+        if not vc_data:
             return
-            
-        vc = self.bot.get_channel(voice_id)
-        if not vc: 
-            return
-        
-        # FIX: Validate guild exists
-        if not vc.guild:
-            shared.logger.error(f"VC {voice_id} has no guild")
-            return
-        
-        if not vc_data.get('message_id'): 
-            await self.create_hub_message(vc)
-            return
-            
-        hub_id = await shared.get_config(f"hub_channel_id_{vc.guild.id}")
-        hub = self.bot.get_channel(int(hub_id or 0))
-        if not hub: 
-            return
-        
-        try:
-            msg = hub.get_partial_message(vc_data['message_id'])
-            owner = await shared.validate_member(vc.guild, vc_data['owner_id'])
-            if not owner:
-                return
+        guild = self.bot.get_guild(vc_data.get('guild_id', 0))
+        if not guild:
+            vc = self.bot.get_channel(voice_id)
+            if vc and hasattr(vc, 'guild'):
+                guild = vc.guild
+        if guild:
+            await self.update_knock_hub_embed(guild)
+
+    async def update_knock_hub_embed(self, guild):
+        """Update the single persistent knock hub embed for a guild.
+
+        Uses a drain-loop pattern: if another update is triggered while the lock
+        is held, the pending flag ensures the running update loops once more with
+        the latest state — no redundant API calls.
+        """
+        lock = self._knock_hub_locks.setdefault(guild.id, asyncio.Lock())
+
+        # Mark update as pending
+        self._knock_hub_pending.add(guild.id)
+
+        if lock.locked():
+            return  # Another update is running; it will pick up our changes
+
+        async with lock:
+            while guild.id in self._knock_hub_pending:
+                self._knock_hub_pending.discard(guild.id)
+
+                try:
+                    await self._do_knock_hub_update(guild)
+                except Exception as e:
+                    shared.logger.error(f"Failed to update knock hub embed for guild {guild.id}: {e}", exc_info=True)
+
+    async def _do_knock_hub_update(self, guild):
+        """Internal: build and edit/send the knock hub embed."""
+        # Gather all knockable VCs for this guild
+        knockable_vcs = []
+        for vc_id, data in self.active_vcs.items():
+            if data.get('guild_id') != guild.id:
+                continue
+            if data.get('ghost') or data.get('unlocked') or data.get('is_basic'):
+                continue
+            vc = self.bot.get_channel(vc_id)
+            if not vc:
+                continue
+            owner = await shared.validate_member(guild, data['owner_id'])
             is_full = vc.user_limit != 0 and len(vc.members) >= vc.user_limit
-            embed = discord.Embed(color=discord.Color.red() if is_full else discord.Color.gold())
-            embed.set_author(name=vc.name, icon_url=owner.display_avatar.url)
-            embed.description = "🔴 **FULL**\nClick **Knock** to request entry." if is_full else "Click **Knock** to request entry."
-            await msg.edit(embed=embed)
-        except discord.NotFound:
-            await self.create_hub_message(vc)
+            member_count = len(vc.members)
+            user_limit = vc.user_limit
+            knockable_vcs.append((vc_id, vc.name, is_full, member_count, user_limit, owner))
+
+        # Build a fingerprint to detect if content actually changed
+        fingerprint = tuple(
+            (vc_id, name, is_full, count, limit)
+            for vc_id, name, is_full, count, limit, _ in knockable_vcs
+        )
+        last = self._knock_hub_last_state.get(guild.id)
+        if last == fingerprint and self._knock_embed_msg_ids.get(guild.id):
+            return  # Nothing changed, skip the edit
+        self._knock_hub_last_state[guild.id] = fingerprint
+
+        # Build embed and view
+        embed = shared.build_knock_hub_embed(knockable_vcs)
+        view = shared.KnockHubView(self.bot, self, guild.id, knockable_vcs)
+
+        # Get hub channel
+        hub_id = await shared.get_config(f"hub_channel_id_{guild.id}")
+        if not hub_id:
+            return
+        hub = guild.get_channel(int(hub_id))
+        if not hub:
+            return
+
+        # Try to edit existing message
+        msg_id = self._knock_embed_msg_ids.get(guild.id)
+        if msg_id:
+            try:
+                msg = hub.get_partial_message(msg_id)
+                await msg.edit(embed=embed, view=view)
+                self.bot.add_view(view, message_id=msg_id)
+                shared.logger.debug(f"Updated knock hub embed {msg_id} for guild {guild.id}")
+                return
+            except discord.NotFound:
+                shared.logger.warning(f"Knock hub embed {msg_id} not found, will recreate")
+                self._knock_embed_msg_ids.pop(guild.id, None)
+            except Exception as e:
+                shared.logger.error(f"Failed to edit knock hub embed {msg_id}: {e}")
+                return
+
+        # Try to find existing embed by scanning recent bot messages
+        # Match by component custom_ids OR by embed description (for 0-VC state with no components)
+        try:
+            async for m in hub.history(limit=50):
+                if m.author.id != self.bot.user.id:
+                    continue
+                is_knock_hub = False
+                # Check components for knock_hub custom_ids
+                for row in m.components:
+                    for child in row.children:
+                        cid = getattr(child, 'custom_id', None) or ""
+                        if cid.startswith("knock_hub_btn:") or cid.startswith("knock_hub_select:"):
+                            is_knock_hub = True
+                            break
+                    if is_knock_hub:
+                        break
+                # Check for 0-VC state embed (no components, specific description)
+                if not is_knock_hub and m.embeds and not m.components:
+                    desc = m.embeds[0].description or ""
+                    if desc == "No active locked VCs to join.":
+                        is_knock_hub = True
+                if is_knock_hub:
+                    try:
+                        await m.edit(embed=embed, view=view)
+                        self.bot.add_view(view, message_id=m.id)
+                        self._knock_embed_msg_ids[guild.id] = m.id
+                        await shared.set_config(f"knock_embed_msg_id_{guild.id}", m.id)
+                        shared.logger.info(f"Reclaimed knock hub embed {m.id} for guild {guild.id}")
+                        return
+                    except Exception as e:
+                        shared.logger.error(f"Failed to reclaim knock hub embed: {e}")
         except Exception as e:
-            shared.logger.debug(f"Failed to update hub embed for VC {vc.id}: {e}")
+            shared.logger.error(f"Failed to scan for knock hub embed: {e}")
+
+        # Send new message (only if no existing message was found)
+        try:
+            msg = await hub.send(embed=embed, view=view)
+            self.bot.add_view(view, message_id=msg.id)
+            self._knock_embed_msg_ids[guild.id] = msg.id
+            await shared.set_config(f"knock_embed_msg_id_{guild.id}", msg.id)
+            shared.logger.info(f"Created NEW knock hub embed {msg.id} for guild {guild.id}")
+        except Exception as e:
+            shared.logger.error(f"Failed to send knock hub embed: {e}")
+
+    async def _migrate_old_knock_messages(self, guild):
+        """One-time migration: delete old per-VC knock messages from the hub channel."""
+        migrated = await shared.get_config(f"knock_hub_migrated_{guild.id}")
+        if migrated:
+            return
+        hub_id = await shared.get_config(f"hub_channel_id_{guild.id}")
+        if not hub_id:
+            return
+        hub = guild.get_channel(int(hub_id))
+        if not hub:
+            return
+
+        deleted_count = 0
+        try:
+            async for m in hub.history(limit=200):
+                if m.author.id != self.bot.user.id:
+                    continue
+                if not m.components:
+                    continue
+                # Check for old-style per-VC knock buttons
+                for row in m.components:
+                    for child in row.children:
+                        cid = getattr(child, 'custom_id', None)
+                        if cid and cid.startswith("knock:") and not cid.startswith("knock_hub"):
+                            try:
+                                await m.delete()
+                                deleted_count += 1
+                            except Exception:
+                                pass
+                            break
+                    else:
+                        continue
+                    break
+        except Exception as e:
+            shared.logger.error(f"Migration cleanup failed: {e}")
+
+        if deleted_count > 0:
+            shared.logger.info(f"Migration: deleted {deleted_count} old per-VC knock messages in guild {guild.id}")
+
+        # Clear all per-VC message_id references
+        state_modified = False
+        for vc_id, data in self.active_vcs.items():
+            if data.get('guild_id') == guild.id and data.get('message_id'):
+                data['message_id'] = None
+                state_modified = True
+        if state_modified:
+            await self.save_state()
+
+        # Mark migration as complete so it doesn't run again
+        await shared.set_config(f"knock_hub_migrated_{guild.id}", "1")
 
     async def get_or_create_hub(self, guild, category):
         hub_id = await shared.get_config(f"hub_channel_id_{guild.id}")
@@ -3118,7 +3114,7 @@ class VC(commands.Cog):
                         shared.logger.info(f"Creating initial KnockManagementView for new VC {vc.id}, owner={owner.id}")
                         view = shared.KnockManagementView(self.bot, self, owner.id, vc.id)
                         embed = shared.create_knock_management_embed(owner, [], guild, self.active_vcs[vc.id])
-                        knock_msg = await thread.send(content=owner.mention, embed=embed, view=view)
+                        knock_msg = await thread.send(embed=embed, view=view)
                         self.bot.add_view(view, message_id=knock_msg.id)
                         self.active_vcs[vc.id]['knock_mgmt_msg_id'] = knock_msg.id
                         shared.logger.info(f"VC {vc.id} fully initialized: msg_id={knock_msg.id}, thread_id={thread.id}")

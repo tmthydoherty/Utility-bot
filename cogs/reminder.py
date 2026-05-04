@@ -223,6 +223,11 @@ class Reminders(commands.Cog):
         except Exception as e:
             logger.error(f"CRITICAL SAVE ERROR: {e}")
 
+    async def async_save_reminders(self):
+        """Non-blocking save — offloads file I/O to a thread."""
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self.save_reminders)
+
     @staticmethod
     def sanitize_data(data):
         """Recursively ensures data is primitive types only (JSON-serializable)."""
@@ -277,6 +282,11 @@ class Reminders(commands.Cog):
     def save_config(self):
         """Save configuration to file."""
         save_reminders_config(self.config)
+
+    async def async_save_config(self):
+        """Non-blocking config save."""
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self.save_config)
 
     def get_guild_timezone(self, guild_id) -> ZoneInfo:
         """Get guild's timezone from config."""
@@ -524,7 +534,7 @@ class Reminders(commands.Cog):
                 if skip_next > 0:
                     self.reminders[rid]['skip_next'] = skip_next - 1
                     logger.info(f"Skipped {data['name']}")
-                    self.save_reminders()
+                    await self.async_save_reminders()
                     continue
 
                 if await self.send_reminder(data):
@@ -532,7 +542,7 @@ class Reminders(commands.Cog):
                     self.reminders[rid]['last_sent_timestamp'] = int(now_utc.timestamp())
                     if schedule_data.get('frequency') == 'biweekly':
                         schedule_data['last_biweekly_fire'] = now_utc.date().isoformat()
-                    self.save_reminders()
+                    await self.async_save_reminders()
 
     @reminder_loop.before_loop
     async def before_loop(self):
@@ -800,7 +810,7 @@ class Reminders(commands.Cog):
 
                 sticky_map[str(channel.id)] = msg.id
                 data['last_sticky_ids'] = sticky_map
-                self.save_reminders()
+                await self.async_save_reminders()
 
             except asyncio.TimeoutError:
                 logger.error(f"Timed out sending new sticky to {channel.name}")
@@ -914,7 +924,7 @@ class Reminders(commands.Cog):
                     data.pop('last_sent_date', None)
 
         self.reminders[rid] = data
-        self.save_reminders()
+        await self.async_save_reminders()
 
         guild_reminders = {k: v for k, v in self.reminders.items() if v.get('guild_id') == interaction.guild.id}
         count = len(data.get('channel_ids', []))
@@ -1263,7 +1273,7 @@ class ReminderDetailView(BaseView):
 
         elif action == "toggle":
             d['enabled'] = not d.get('enabled', True)
-            self.cog.save_reminders()
+            await self.cog.async_save_reminders()
             await interaction.response.edit_message(
                 content=None,
                 embed=build_detail_embed(self.cog, self.rid, d),
@@ -1459,7 +1469,7 @@ class DeleteConfirmView(BaseView):
                         pass
             if self.rid in self.cog.sticky_locks:
                 del self.cog.sticky_locks[self.rid]
-            self.cog.save_reminders()
+            await self.cog.async_save_reminders()
         guild_reminders = {k: v for k, v in self.cog.reminders.items() if v.get('guild_id') == self.guild.id}
         embed = build_panel_embed(guild_reminders)
         embed.set_footer(text="Reminder deleted.")
@@ -2185,7 +2195,7 @@ class SkipView(BaseView):
         if not d:
             return await interaction.response.edit_message(content="Reminder no longer exists.", embed=None, view=None)
         d['skipped_dates'] = list(self.occ_select.values)
-        self.cog.save_reminders()
+        await self.cog.async_save_reminders()
         await interaction.response.edit_message(
             embed=build_skip_embed(d), view=SkipView(self.cog, self.rid, self.guild)
         )
@@ -2201,7 +2211,7 @@ class SkipView(BaseView):
             except (ValueError, TypeError):
                 current = 0
             d['skip_next'] = current + count
-            self.cog.save_reminders()
+            await self.cog.async_save_reminders()
             await interaction.response.edit_message(
                 embed=build_skip_embed(d), view=SkipView(self.cog, self.rid, self.guild)
             )
@@ -2211,7 +2221,7 @@ class SkipView(BaseView):
         d = self.cog.reminders.get(self.rid)
         if d:
             d['skip_next'] = 0
-            self.cog.save_reminders()
+            await self.cog.async_save_reminders()
         embed = build_skip_embed(d) if d else discord.Embed(title="Not found")
         await interaction.response.edit_message(embed=embed, view=SkipView(self.cog, self.rid, self.guild))
 
@@ -2219,7 +2229,7 @@ class SkipView(BaseView):
         d = self.cog.reminders.get(self.rid)
         if d:
             d['skipped_dates'] = []
-            self.cog.save_reminders()
+            await self.cog.async_save_reminders()
         embed = build_skip_embed(d) if d else discord.Embed(title="Not found")
         await interaction.response.edit_message(embed=embed, view=SkipView(self.cog, self.rid, self.guild))
 
@@ -2228,7 +2238,7 @@ class SkipView(BaseView):
         if d:
             d['skip_next'] = 0
             d['skipped_dates'] = []
-            self.cog.save_reminders()
+            await self.cog.async_save_reminders()
         embed = build_skip_embed(d) if d else discord.Embed(title="Not found")
         await interaction.response.edit_message(embed=embed, view=SkipView(self.cog, self.rid, self.guild))
 
@@ -2307,7 +2317,7 @@ class EditChannelsView(BaseView):
                 d.get('last_sticky_ids', {}).pop(str(cid), None)
 
         d['channel_ids'] = new_cids
-        self.cog.save_reminders()
+        await self.cog.async_save_reminders()
         await interaction.response.edit_message(
             content=None, embed=build_detail_embed(self.cog, self.rid, d),
             view=ReminderDetailView(self.cog, self.rid, self.guild)
@@ -2361,7 +2371,7 @@ class ReminderSettingsView(BaseView):
         selected_role_ids = [r.id for r in self.role_select.values]
         config = self.cog.get_guild_config(interaction.guild.id)
         config['admin_role_ids'] = selected_role_ids
-        self.cog.save_config()
+        await self.cog.async_save_config()
         role_mentions = [f"<@&{rid}>" for rid in selected_role_ids]
         embed = discord.Embed(
             title="Reminder Settings",
@@ -2418,7 +2428,7 @@ class TimezoneModal(discord.ui.Modal):
             )
         config = self.cog.get_guild_config(interaction.guild.id)
         config['timezone'] = tz_str
-        self.cog.save_config()
+        await self.cog.async_save_config()
         embed = discord.Embed(
             title="Reminder Settings",
             description=f"**Timezone:** {tz_str}\n**Admin Roles:** {len(config.get('admin_role_ids', []))} configured",

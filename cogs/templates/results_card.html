@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        @font-face {{
+            font-family: 'Cinzel';
+            src: url('file://{font_path}/Cinzel-Regular.ttf') format('truetype');
+            font-weight: normal;
+        }}
+        @font-face {{
+            font-family: 'Cinzel';
+            src: url('file://{font_path}/Cinzel-Bold.ttf') format('truetype');
+            font-weight: bold;
+        }}
+
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+
+        body {{
+            width: 700px;
+            font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(145deg, #1e4b7a 0%, #143a63 25%, #0e2a4a 55%, #091c34 100%);
+            color: #ffffff;
+            padding: 0;
+            overflow: hidden;
+        }}
+
+        .card {{
+            margin: 8px;
+            border-radius: 12px;
+            overflow: hidden;
+            border: 1px solid rgba(100, 170, 255, 0.12);
+            background: rgba(0, 0, 0, 0.15);
+            backdrop-filter: blur(10px);
+        }}
+
+        /* ── Header ── */
+        .header {{
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 18px 28px;
+            background: linear-gradient(135deg, rgba(20, 60, 110, 0.8) 0%, rgba(10, 35, 70, 0.9) 100%);
+            border-bottom: 2px solid rgba(80, 150, 255, 0.25);
+            position: relative;
+        }}
+
+        .header::after {{
+            content: '';
+            position: absolute;
+            bottom: -1px;
+            left: 20%;
+            right: 20%;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, rgba(100, 180, 255, 0.4), transparent);
+        }}
+
+        .title {{
+            font-family: 'Cinzel', serif;
+            font-size: 22px;
+            font-weight: bold;
+            color: #e8f0ff;
+            letter-spacing: 4px;
+            text-transform: uppercase;
+            text-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+        }}
+
+        /* ── Column Headers ── */
+        .column-headers {{
+            display: grid;
+            grid-template-columns: 50px 56px 1fr 56px 56px 56px 56px 56px;
+            padding: 10px 16px;
+            background: rgba(0, 0, 0, 0.25);
+            font-size: 10px;
+            font-weight: 700;
+            color: rgba(140, 180, 230, 0.6);
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            border-bottom: 1px solid rgba(80, 140, 220, 0.15);
+        }}
+
+        .column-headers span {{
+            text-align: center;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }}
+
+        .column-headers span:nth-child(3) {{
+            justify-content: flex-start;
+            padding-left: 14px;
+        }}
+
+        /* ── Results List ── */
+        .results-list {{
+            display: flex;
+            flex-direction: column;
+        }}
+
+        /* ── Game Row ── */
+        .game-row {{
+            display: grid;
+            grid-template-columns: 50px 56px 1fr 56px 56px 56px 56px 56px;
+            align-items: center;
+            padding: 0 16px;
+            height: 58px;
+            border-bottom: 1px solid rgba(80, 140, 220, 0.10);
+            position: relative;
+            transition: background 0.2s;
+        }}
+
+        .game-row:last-child {{
+            border-bottom: none;
+        }}
+
+        .game-row.odd {{
+            background: rgba(255, 255, 255, 0.02);
+        }}
+
+        .game-row.even {{
+            background: rgba(0, 0, 0, 0.08);
+        }}
+
+        /* ── Winner highlight ── */
+        .game-row.rank-1 {{
+            background: linear-gradient(90deg, rgba(255, 215, 0, 0.12) 0%, rgba(255, 215, 0, 0.03) 40%, transparent 100%);
+            border-bottom: 1px solid rgba(255, 215, 0, 0.12);
+        }}
+
+        .game-row.rank-1::before {{
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 4px;
+            background: linear-gradient(180deg, #ffd700, #f0a500);
+            border-radius: 0 2px 2px 0;
+        }}
+
+        .game-row.rank-2 {{
+            background: linear-gradient(90deg, rgba(192, 210, 230, 0.07) 0%, transparent 30%);
+        }}
+
+        .game-row.rank-2::before {{
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 4px;
+            background: linear-gradient(180deg, #c0cee0, #8a9ab0);
+            border-radius: 0 2px 2px 0;
+        }}
+
+        .game-row.rank-3 {{
+            background: linear-gradient(90deg, rgba(205, 127, 50, 0.07) 0%, transparent 30%);
+        }}
+
+        .game-row.rank-3::before {{
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 4px;
+            background: linear-gradient(180deg, #cd7f32, #a06020);
+            border-radius: 0 2px 2px 0;
+        }}
+
+        /* ── Rank Number ── */
+        .rank {{
+            font-size: 22px;
+            font-weight: 800;
+            text-align: center;
+            color: rgba(140, 180, 230, 0.35);
+            font-variant-numeric: tabular-nums;
+        }}
+
+        .rank-1 .rank {{
+            color: #ffd700;
+            text-shadow: 0 0 12px rgba(255, 215, 0, 0.35);
+            font-size: 24px;
+        }}
+        .rank-2 .rank {{
+            color: #b8c8dc;
+            text-shadow: 0 0 8px rgba(192, 210, 230, 0.25);
+        }}
+        .rank-3 .rank {{
+            color: #cd7f32;
+            text-shadow: 0 0 8px rgba(205, 127, 50, 0.25);
+        }}
+
+        /* ── Game Icon ── */
+        .game-icon-wrap {{
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }}
+
+        .game-icon {{
+            width: 42px;
+            height: 42px;
+            border-radius: 8px;
+            object-fit: cover;
+            border: 2px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+        }}
+
+        .rank-1 .game-icon {{
+            border-color: rgba(255, 215, 0, 0.3);
+            box-shadow: 0 2px 12px rgba(255, 215, 0, 0.15);
+        }}
+
+        .game-icon-placeholder {{
+            width: 42px;
+            height: 42px;
+            border-radius: 8px;
+            background: linear-gradient(135deg, rgba(60, 100, 160, 0.4), rgba(40, 70, 120, 0.6));
+            border: 2px solid rgba(100, 160, 255, 0.15);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-family: 'Cinzel', serif;
+            font-size: 18px;
+            font-weight: bold;
+            color: rgba(160, 200, 255, 0.5);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+        }}
+
+        /* ── Game Name ── */
+        .game-name {{
+            font-size: 15px;
+            font-weight: 700;
+            color: #dce4f0;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            padding-left: 14px;
+            letter-spacing: 0.3px;
+        }}
+
+        .rank-1 .game-name {{
+            color: #fff;
+            text-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+        }}
+
+        /* ── Stat Cells ── */
+        .stat {{
+            font-size: 16px;
+            font-weight: 600;
+            text-align: center;
+            color: rgba(200, 220, 245, 0.7);
+            font-variant-numeric: tabular-nums;
+        }}
+
+        .stat-pts {{
+            color: #ffffff;
+            font-size: 18px;
+            font-weight: 800;
+        }}
+
+        .rank-1 .stat-pts {{
+            color: #ffd700;
+            text-shadow: 0 0 6px rgba(255, 215, 0, 0.2);
+        }}
+
+        .stat-boost {{
+            color: rgba(255, 215, 0, 0.55);
+        }}
+
+        /* ── Footer ── */
+        .footer {{
+            text-align: center;
+            padding: 10px 16px 12px;
+            background: rgba(0, 0, 0, 0.2);
+            border-top: 1px solid rgba(80, 140, 220, 0.1);
+            font-size: 10px;
+            font-weight: 600;
+            color: rgba(140, 180, 230, 0.35);
+            letter-spacing: 1.5px;
+            text-transform: uppercase;
+        }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="header">
+            <div class="title">Vote Breakdown</div>
+        </div>
+
+        <div class="column-headers">
+            <span>#</span>
+            <span></span>
+            <span>Game</span>
+            <span>Pts</span>
+            <span>3rd</span>
+            <span>2nd</span>
+            <span>1st</span>
+            <span>1st+</span>
+        </div>
+
+        <div class="results-list">
+            {rows_html}
+        </div>
+
+        <div class="footer">1st+ = Returning player's boosted 1st place vote</div>
+    </div>
+</body>
+</html>

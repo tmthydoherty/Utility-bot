@@ -181,10 +181,13 @@ class DailyGatewayView(discord.ui.View):
             if is_flagged: return await self.cog._start_cheater_test(interaction)
             
             view = PlayTriviaView(self.cog)
-            # Log for mobile robustness check
             log_trivia.debug(f"Attempting to send PlayTriviaView to {interaction.user.id}")
             msg = f"Click below to get your private question!\n\n⚠️ **You only have {int(EPHEMERAL_QUESTION_TIMEOUT)} seconds to answer.**"
             await interaction.response.send_message(msg, view=view, ephemeral=True)
+            try:
+                view.message = await interaction.original_response()
+            except discord.HTTPException:
+                pass
         except discord.HTTPException as e:
             log_trivia.warning(f"Failed to send trivia prompt to {interaction.user} ({interaction.user.id}): {e}")
 
@@ -194,8 +197,8 @@ class DailyGatewayView(discord.ui.View):
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
             async with self.cog.config_lock:
-                # Get a copy of global data for the embed builder
-                full_global_data_copy = copy.deepcopy(self.cog.get_global_data())
+                # Get a copy of global data for the embed builder (run in executor to avoid blocking event loop)
+                full_global_data_copy = await self.cog.bot.loop.run_in_executor(None, copy.deepcopy, self.cog.get_global_data())
                 recap_data = full_global_data_copy.get("yesterdays_recap_data")
 
             if recap_data and recap_data.get("daily_question"):
@@ -226,6 +229,8 @@ class PlayTriviaView(discord.ui.View):
     def __init__(self, cog: "DailyTrivia"):
         super().__init__(timeout=60)
         self.cog = cog
+        self.message = None
+
     @discord.ui.button(label="✅ Reveal Question", style=discord.ButtonStyle.primary)
     async def reveal_question(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
@@ -236,15 +241,14 @@ class PlayTriviaView(discord.ui.View):
                 return await interaction.followup.send("You have already played today's question!", ephemeral=True)
             q_data = global_data.get("daily_question_data")
         if not q_data: return await interaction.followup.send("The daily question data is missing. Please contact an admin.", ephemeral=True)
-        
-        # Note: reveal_timestamps is still guild-specific in case the bot is in multiple guilds
+
         self.cog.reveal_timestamps[(interaction.guild.id, interaction.user.id)] = datetime.now(timezone.utc)
-        
+
         answers = q_data.get("answers", [])
         if not answers:
             log_trivia.error(f"Empty answers list for daily question data: {q_data}")
             return await interaction.followup.send("Error: Question data is invalid (no answers). Please contact an admin.", ephemeral=True)
-            
+
         shuffled = random.sample(answers, len(answers))
         try:
             correct_index = shuffled.index(q_data.get("correct"))
@@ -254,43 +258,68 @@ class PlayTriviaView(discord.ui.View):
         embed = discord.Embed(description=f"**{q_data.get('question','')}**", color=discord.Color.blurple())
         embed.set_footer(text=f"You have {int(EPHEMERAL_QUESTION_TIMEOUT)} seconds.")
         view = EphemeralQuestionView(self.cog, shuffled, correct_index, interaction.guild.id, interaction.user.id)
-        
-        # FIX: Capture the returned message from followup.send instead of using original_response
-        msg = await interaction.followup.send(embed=embed, view=view, ephemeral=True)
-        view.message = msg
+
+        try:
+            msg = await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+            view.message = msg
+        except discord.HTTPException as e:
+            log_trivia.error(f"Failed to send question to {interaction.user.id}: {e}")
+            self.cog.reveal_timestamps.pop((interaction.guild.id, interaction.user.id), None)
+            try:
+                await interaction.followup.send("Failed to load your question. Please try clicking **Play Trivia** again.", ephemeral=True)
+            except discord.HTTPException:
+                pass
+
+    async def on_timeout(self):
+        if self.message:
+            try:
+                for item in self.children: item.disabled = True
+                await self.message.edit(content="⏱️ This prompt has expired. Click **Play Trivia** again to start.", view=self)
+            except discord.HTTPException: pass
         
 class EphemeralQuestionView(discord.ui.View):
     def __init__(self, cog: "DailyTrivia", answers: list[str], correct_index: int, guild_id: int, user_id: int):
         super().__init__(timeout=EPHEMERAL_QUESTION_TIMEOUT)
         self.cog, self.correct_index, self.answered, self.message = cog, correct_index, False, None
         self.guild_id, self.user_id = guild_id, user_id
-        
+
         unique_id_suffix = f"_{user_id}_{int(datetime.now(timezone.utc).timestamp())}"
-        shuffled = answers 
+        shuffled = answers
 
         for idx, ans in enumerate(shuffled):
-            # We use the index as part of the custom ID to determine the chosen answer later
             btn = discord.ui.Button(label=ans[:80], style=discord.ButtonStyle.secondary, custom_id=f"trivia_{idx}_{unique_id_suffix}")
             btn.callback = self.answer_callback
             self.add_item(btn)
 
-        # Validation that buttons were added
         if len(self.children) != len(answers):
             log_trivia.error(f"Button mismatch in EphemeralQuestionView: {len(self.children)} vs {len(answers)}")
 
     async def answer_callback(self, interaction: discord.Interaction):
-        # Race condition fix
-        if self.answered: 
-            try: return await interaction.response.send_message("You have already answered this question.", ephemeral=True, delete_after=5)
-            except discord.HTTPException: return
+        # Defer IMMEDIATELY to guarantee Discord gets a response, even if processing is slow
+        try:
+            await interaction.response.defer()
+        except discord.HTTPException as e:
+            log_trivia.warning(f"answer_callback: defer failed for {interaction.user.id}: {e}")
+            return  # Interaction expired (e.g., timeout race) — nothing we can do
+
+        if self.answered:
+            try: await interaction.followup.send("You have already answered this question.", ephemeral=True, delete_after=5)
+            except discord.HTTPException: pass
+            return
         self.answered = True
-        # The next function, handle_trivia_answer, will handle the deferral and response edit.
-        await self.cog.handle_trivia_answer(interaction, self)
+        try:
+            await self.cog.handle_trivia_answer(interaction, self)
+        except Exception as e:
+            log_trivia.error(f"answer_callback: handle_trivia_answer crashed for {interaction.user.id}: {e}", exc_info=True)
+            try: await interaction.followup.send("Something went wrong processing your answer. Please report this.", ephemeral=True)
+            except discord.HTTPException: pass
         self.stop()
 
     async def on_timeout(self):
+        # Mark as answered FIRST to prevent any in-flight answer_callback from processing
+        self.answered = True
         self.cog.reveal_timestamps.pop((self.guild_id, self.user_id), None)
-        if self.message and not self.answered:
+        if self.message:
             try:
                 for item in self.children: item.disabled = True
                 await self.message.edit(content="⌛ Time's up!", view=self, embed=None)
@@ -325,8 +354,12 @@ class DoubleOrNothingPromptView(discord.ui.View):
         
     @discord.ui.button(label="✅ Accept Challenge", style=discord.ButtonStyle.success)
     async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # We defer here because the logic involves data manipulation and sending a new message
-        await interaction.response.defer()
+        # Defer IMMEDIATELY to guarantee Discord gets a response
+        try:
+            await interaction.response.defer()
+        except discord.HTTPException as e:
+            log_trivia.warning(f"DoN accept: defer failed for {interaction.user.id}: {e}")
+            return
         
         # --- Data Prep ---
         async with self.cog.config_lock:
@@ -514,28 +547,34 @@ class DoubleOrNothingQuestionView(discord.ui.View):
             log_trivia.error(f"DoN MISMATCH: Created {buttons_created} items but expected 5!")
 
     async def answer_callback(self, interaction: discord.Interaction):
-        # Race condition fix
-        if self.answered: 
-            try: return await interaction.response.send_message("You have already answered this question.", ephemeral=True, delete_after=5)
-            except discord.HTTPException: return
+        # Defer IMMEDIATELY to guarantee Discord gets a response, even if processing is slow
+        try:
+            await interaction.response.defer()
+        except discord.HTTPException as e:
+            log_trivia.warning(f"DoN answer_callback: defer failed for {interaction.user.id}: {e}")
+            return  # Interaction expired (e.g., timeout race) — nothing we can do
+
+        if self.answered:
+            try: await interaction.followup.send("You have already answered this question.", ephemeral=True, delete_after=5)
+            except discord.HTTPException: pass
+            return
         self.answered = True
-        await interaction.response.defer()
-        
+
         answer_time = datetime.now(timezone.utc)
         chosen_button: discord.ui.Button = discord.utils.get(self.children, custom_id=interaction.data['custom_id'])
-        
+
         # Check if chosen_button is None (should not happen with proper custom IDs, but good safeguard)
         if not chosen_button:
             log_trivia.error(f"Answer callback received but button not found for custom_id: {interaction.data['custom_id']}")
             return
 
         is_correct = (getattr(chosen_button, 'full_text', None) == self.correct_answer)
-        
+
         # --- BUG FIX: Points logic update ---
         # If CORRECT: Add back (points_risked) + win bonus (1) = points_risked + 1
         # If INCORRECT: Do nothing (points were already deducted on accept)
         pts_change = (self.points_risked + 1) if is_correct else 0
-        
+
         async with self.cog.config_lock:
             global_data = self.cog.get_global_data()
             stats = self.cog.get_user_stats(interaction.user.id)
@@ -553,8 +592,12 @@ class DoubleOrNothingQuestionView(discord.ui.View):
             new_score = score_data["score"]
 
             if is_correct:
-                delta = (answer_time - self.cog.don_reveal_timestamps.pop((interaction.guild.id, interaction.user.id), answer_time)).total_seconds()
-                global_data.setdefault("daily_don_answer_times", []).append({"user_id": str(interaction.user.id), "time": delta})
+                don_reveal_ts = self.cog.don_reveal_timestamps.pop((interaction.guild.id, interaction.user.id), None)
+                if don_reveal_ts is not None:
+                    delta = (answer_time - don_reveal_ts).total_seconds()
+                    global_data.setdefault("daily_don_answer_times", []).append({"user_id": str(interaction.user.id), "time": delta})
+                else:
+                    log_trivia.warning(f"Missing DoN reveal timestamp for user {interaction.user.id} (likely bot restart); skipping answer-time recording.")
             
             self.cog.config_is_dirty = True
         
@@ -573,13 +616,17 @@ class DoubleOrNothingQuestionView(discord.ui.View):
     # Bug Report Callback
     async def report_issue_callback(self, interaction: discord.Interaction):
         """Handle bug reports from users"""
-        # Add validation for unanswered state
+        # Defer IMMEDIATELY to guarantee Discord gets a response
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except discord.HTTPException as e:
+            log_trivia.warning(f"DoN report_issue_callback: defer failed for {interaction.user.id}: {e}")
+            return
+
         if self.answered:
-            # If they already answered (either by button or another report), cancel this interaction.
-            try: return await interaction.response.send_message("This question has already been handled (answered or reported).", ephemeral=True, delete_after=5)
-            except discord.HTTPException: return
-            
-        await interaction.response.defer(ephemeral=True)
+            try: await interaction.followup.send("This question has already been handled (answered or reported).", ephemeral=True, delete_after=5)
+            except discord.HTTPException: pass
+            return
         # Mark as answered/handled immediately
         self.answered = True 
         
@@ -743,12 +790,18 @@ class EphemeralCheaterTestView(discord.ui.View):
             log_trivia.error(f"Button mismatch in EphemeralCheaterTestView: {len(self.children)} vs {len(shuffled)}")
 
     async def answer_callback(self, interaction: discord.Interaction):
-        # Race condition fix
-        if self.answered: 
-            try: return await interaction.response.send_message("You have already answered this question.", ephemeral=True, delete_after=5)
-            except discord.HTTPException: return
+        # Defer IMMEDIATELY to guarantee Discord gets a response, even if processing is slow
+        try:
+            await interaction.response.defer()
+        except discord.HTTPException as e:
+            log_trivia.warning(f"Cheater test answer_callback: defer failed for {interaction.user.id}: {e}")
+            return  # Interaction expired (e.g., timeout race) — nothing we can do
+
+        if self.answered:
+            try: await interaction.followup.send("You have already answered this question.", ephemeral=True, delete_after=5)
+            except discord.HTTPException: pass
+            return
         self.answered = True
-        await interaction.response.defer()
         await self.cog.handle_cheater_test_answer(interaction, self)
         self.stop()
 
@@ -831,15 +884,21 @@ class EphemeralBonusQuestionView(discord.ui.View):
             log_trivia.error(f"Button mismatch in EphemeralBonusQuestionView: {len(self.children)} vs {len(answers)}")
 
     async def answer_callback(self, interaction: discord.Interaction):
-        # Race condition fix
-        if self.answered: 
-            try: return await interaction.response.send_message("You have already answered this question.", ephemeral=True, delete_after=5)
-            except discord.HTTPException: return
+        # Defer IMMEDIATELY to guarantee Discord gets a response, even if processing is slow
+        try:
+            await interaction.response.defer()
+        except discord.HTTPException as e:
+            log_trivia.warning(f"Bonus answer_callback: defer failed for {interaction.user.id}: {e}")
+            return  # Interaction expired (e.g., timeout race) — nothing we can do
+
+        if self.answered:
+            try: await interaction.followup.send("You have already answered this question.", ephemeral=True, delete_after=5)
+            except discord.HTTPException: pass
+            return
         self.answered = True
-        await interaction.response.defer()
         answer_time = datetime.now(timezone.utc)
         chosen_button: discord.ui.Button = discord.utils.get(self.children, custom_id=interaction.data['custom_id'])
-        
+
         # Check if chosen_button is None
         if not chosen_button:
             log_trivia.error(f"Bonus Answer callback received but button not found for custom_id: {interaction.data['custom_id']}")
@@ -854,8 +913,12 @@ class EphemeralBonusQuestionView(discord.ui.View):
         
         await interaction.edit_original_response(content="✅ Correct!" if is_correct else "❌ Incorrect!", view=self)
         if is_correct:
-            delta = (answer_time - self.gateway_view.reveal_timestamps.pop(interaction.user.id, answer_time)).total_seconds()
-            asyncio.create_task(self.gateway_view.update_leaderboard(interaction, delta))
+            bonus_reveal_ts = self.gateway_view.reveal_timestamps.pop(interaction.user.id, None)
+            if bonus_reveal_ts is not None:
+                delta = (answer_time - bonus_reveal_ts).total_seconds()
+                asyncio.create_task(self.gateway_view.update_leaderboard(interaction, delta))
+            else:
+                log_trivia.warning(f"Missing bonus reveal timestamp for user {interaction.user.id} (likely bot restart); skipping leaderboard update.")
         self.stop()
 
     async def on_timeout(self):
@@ -998,12 +1061,16 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
         return user_stats_ref
 
     async def save_config_now(self):
-        config_to_save = None
+        json_str = None
         async with self.config_lock:
             if self.config_is_dirty:
-                config_to_save, self.config_is_dirty = copy.deepcopy(self.config), False
-        if config_to_save:
-            await self.bot.loop.run_in_executor(None, save_config_trivia, config_to_save)
+                # Serialize to JSON string in executor to avoid blocking the event loop.
+                # json.dumps produces an immutable string, so no deepcopy needed.
+                # (self.config is ~275K and serialization can stall the Pi for 500ms+)
+                json_str = await self.bot.loop.run_in_executor(None, lambda: json.dumps(self.config, indent=4))
+                self.config_is_dirty = False
+        if json_str:
+            await self.bot.loop.run_in_executor(None, lambda: Path(CONFIG_FILE_TRIVIA).write_text(json_str, encoding="utf-8"))
             log_trivia.debug("Trivia config saved to disk.")
 
     async def is_user_admin(self, interaction: discord.Interaction) -> bool:
@@ -1519,860 +1586,6 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
         all_time_acc.sort(key=lambda x: x[1], reverse=True)
         all_time_don_acc.sort(key=lambda x: x[1], reverse=True)
 
-        return {
-            "day_of_week": yesterday.strftime('%A'),
-            "question_text": dq.get("question", "N/A"),
-            "answer_text": dq.get("correct", "N/A"),
-            "don_question_text": data.get("daily_don_question", {}).get("question", "No DoN Question Played"),
-            "don_answer_text": data.get("daily_don_question", {}).get("correct", "N/A"),
-            "podium_html": podium_html,
-            "don_podium_html": don_podium_html,
-            "awards_html": "".join(awards),
-            "at_score_html": await format_at_list(all_time_scores),
-            "at_correct_html": await format_at_list(all_time_correct),
-            "at_don_wins_html": await format_at_list(all_time_don_wins[:3]),
-            "at_accuracy_html": await format_at_list(all_time_acc[:3], lambda x: f"{x*100:.1f}%"),
-            "at_don_acc_html": await format_at_list(all_time_don_acc[:3], lambda x: f"{x*100:.1f}%")
-        }
-
-    async def build_recap_image_data(self, guild: discord.Guild, data: dict, full_global_data: dict) -> dict:
-        dq = data.get("daily_question", {})
-        yesterday = datetime.now(TRIVIA_TIMEZONE) - timedelta(days=1)
-        
-        user_stats = full_global_data.get("user_stats", {})
-        
-        async def format_podium(times_data):
-            if not times_data: return '<div style="color:#aaa;">No data</div>'
-            sorted_data = sorted(times_data, key=lambda x: x['time'])[:5]
-            html = ""
-            for i, entry in enumerate(sorted_data):
-                name = await self._get_formatted_name(guild, entry['user_id'])
-                if len(name) > 15: name = name[:12] + '...'
-                html += f'<div class="rank">{i+1}. {name} ({entry["time"]:.2f}s)</div>'
-            return html
-            
-        podium_html = await format_podium(data.get("daily_answer_times", []))
-        don_podium_html = await format_podium(data.get("daily_don_answer_times", []))
-        
-        awards = []
-        def add_award(title, value, is_orange=False):
-            t_class = "stat-badge-title orange" if is_orange else "stat-badge-title"
-            awards.append(f'<div class="stat-badge"><div class="{t_class}">{title}</div><div class="stat-badge-value">{value}</div></div>')
-
-        q_cat = dq.get("category", "Unknown")
-        correct_user_ids = {i['user_id'] for i in data.get("daily_interactions", []) if i.get("correct")}
-        
-        if correct_user_ids and q_cat != "Unknown":
-            best_acc, best_uid, best_stats = 0, None, None
-            for uid in correct_user_ids:
-                cat_stats = user_stats.get(uid, {}).get("categories", {}).get(q_cat)
-                if not cat_stats: continue
-                total = cat_stats.get("correct", 0) + cat_stats.get("incorrect", 0)
-                if total >= 5:
-                    acc = cat_stats.get("correct", 0) / total
-                    if acc > best_acc:
-                        best_acc, best_uid, best_stats = acc, uid, cat_stats
-            if best_uid:
-                name = await self._get_formatted_name(guild, best_uid)
-                add_award("THE SPECIALIST", f"{name[:12]} {best_stats.get('correct')}-{best_stats.get('incorrect')} ({best_acc*100:.0f}%)", True)
-                
-        if correct_user_ids:
-            best_streak, best_uid = 0, None
-            for uid in correct_user_ids:
-                streak = user_stats.get(uid, {}).get("current_streak", 0)
-                if streak > best_streak: best_streak, best_uid = streak, uid
-            if best_streak >= 3:
-                name = await self._get_formatted_name(guild, best_uid)
-                add_award("LONGEST STREAK", f"{name[:15]} ({best_streak})", False)
-                
-        comebacks = [i for i in data.get("daily_interactions", []) if i.get("missed_before", 0) > 0 and i.get("correct")]
-        if comebacks:
-            best_cb = max(comebacks, key=lambda x: x["missed_before"])
-            name = await self._get_formatted_name(guild, best_cb["user_id"])
-            add_award("COMEBACK KID", f"{name[:15]} ({best_cb['missed_before']} missed)", True)
-            
-        leaps = [i for i in data.get("daily_interactions", []) if i.get("leap", 0) > 0]
-        if leaps:
-            best_leap = max(leaps, key=lambda x: x["leap"])
-            name = await self._get_formatted_name(guild, best_leap["user_id"])
-            add_award("BIGGEST LEAP", f"{name[:15]} (#{best_leap['old_rank']} ➔ #{best_leap['new_rank']})", False)
-            
-        scholars = [i for i in data.get("daily_interactions", []) if i.get("participation_streak", 0) >= 5]
-        if scholars:
-            best_scholar = max(scholars, key=lambda x: x["participation_streak"])
-            name = await self._get_formatted_name(guild, best_scholar["user_id"])
-            add_award("LOYAL SCHOLAR", f"{name[:15]} ({best_scholar['participation_streak']} days)", True)
-            
-        rank_ups = [i for i in data.get("daily_interactions", []) if i.get("rank_up")]
-        if rank_ups:
-            best_ru = rank_ups[0]
-            name = await self._get_formatted_name(guild, best_ru["user_id"])
-            add_award("RANK UP", f"{name[:12]} ({best_ru['rank_up']})", False)
-            
-        if len(awards) % 2 != 0:
-            awards.append('<div class="stat-badge" style="opacity:0.3;"><div class="stat-badge-title">???</div></div>')
-
-        async def format_at_list(items, value_fmt=lambda x: str(x)):
-            if not items: return '<div style="color:#aaa;">No data</div>'
-            html = ""
-            for i, (uid, val) in enumerate(items[:5]):
-                name = await self._get_formatted_name(guild, uid)
-                if len(name) > 12: name = name[:10] + '..'
-                html += f'<div><span class="at-rank">{i+1}.</span> {name} <span class="at-score">{value_fmt(val)}</span></div>'
-            return html
-
-        all_time_scores = [(uid, stats.get("all_time_score", 0)) for uid, stats in user_stats.items() if stats.get("all_time_score", 0) > 0]
-        all_time_scores.sort(key=lambda x: x[1], reverse=True)
-        
-        all_time_correct = [(uid, stats.get("correct", 0)) for uid, stats in user_stats.items() if stats.get("correct", 0) > 0]
-        all_time_correct.sort(key=lambda x: x[1], reverse=True)
-        
-        all_time_don_wins = [(uid, stats.get("don_successes", 0)) for uid, stats in user_stats.items() if stats.get("don_successes", 0) > 0]
-        all_time_don_wins.sort(key=lambda x: x[1], reverse=True)
-        
-        all_time_acc = []
-        all_time_don_acc = []
-        for uid, stats in user_stats.items():
-            tot = stats.get("correct", 0) + stats.get("incorrect", 0)
-            if tot >= 20: all_time_acc.append((uid, stats.get("correct", 0) / tot))
-            don_tot = stats.get("don_accepted", 0)
-            if don_tot >= 5: all_time_don_acc.append((uid, stats.get("don_successes", 0) / don_tot))
-                
-        all_time_acc.sort(key=lambda x: x[1], reverse=True)
-        all_time_don_acc.sort(key=lambda x: x[1], reverse=True)
-
-        return {
-            "day_of_week": yesterday.strftime('%A'),
-            "question_text": dq.get("question", "N/A"),
-            "answer_text": dq.get("correct", "N/A"),
-            "don_question_text": data.get("daily_don_question", {}).get("question", "No DoN Question Played"),
-            "don_answer_text": data.get("daily_don_question", {}).get("correct", "N/A"),
-            "podium_html": podium_html,
-            "don_podium_html": don_podium_html,
-            "awards_html": "".join(awards),
-            "at_score_html": await format_at_list(all_time_scores),
-            "at_correct_html": await format_at_list(all_time_correct),
-            "at_don_wins_html": await format_at_list(all_time_don_wins[:3]),
-            "at_accuracy_html": await format_at_list(all_time_acc[:3], lambda x: f"{x*100:.1f}%"),
-            "at_don_acc_html": await format_at_list(all_time_don_acc[:3], lambda x: f"{x*100:.1f}%")
-        }
-
-    async def build_recap_image_data(self, guild: discord.Guild, data: dict, full_global_data: dict) -> dict:
-        dq = data.get("daily_question", {})
-        yesterday = datetime.now(TRIVIA_TIMEZONE) - timedelta(days=1)
-        
-        user_stats = full_global_data.get("user_stats", {})
-        
-        async def format_podium(times_data):
-            if not times_data: return '<div style="color:#aaa;">No data</div>'
-            sorted_data = sorted(times_data, key=lambda x: x['time'])[:5]
-            html = ""
-            for i, entry in enumerate(sorted_data):
-                name = await self._get_formatted_name(guild, entry['user_id'])
-                if len(name) > 15: name = name[:12] + '...'
-                html += f'<div class="rank">{i+1}. {name} ({entry["time"]:.2f}s)</div>'
-            return html
-            
-        podium_html = await format_podium(data.get("daily_answer_times", []))
-        don_podium_html = await format_podium(data.get("daily_don_answer_times", []))
-        
-        awards = []
-        def add_award(title, value, is_orange=False):
-            t_class = "stat-badge-title orange" if is_orange else "stat-badge-title"
-            awards.append(f'<div class="stat-badge"><div class="{t_class}">{title}</div><div class="stat-badge-value">{value}</div></div>')
-
-        q_cat = dq.get("category", "Unknown")
-        correct_user_ids = {i['user_id'] for i in data.get("daily_interactions", []) if i.get("correct")}
-        
-        if correct_user_ids and q_cat != "Unknown":
-            best_acc, best_uid, best_stats = 0, None, None
-            for uid in correct_user_ids:
-                cat_stats = user_stats.get(uid, {}).get("categories", {}).get(q_cat)
-                if not cat_stats: continue
-                total = cat_stats.get("correct", 0) + cat_stats.get("incorrect", 0)
-                if total >= 5:
-                    acc = cat_stats.get("correct", 0) / total
-                    if acc > best_acc:
-                        best_acc, best_uid, best_stats = acc, uid, cat_stats
-            if best_uid:
-                name = await self._get_formatted_name(guild, best_uid)
-                add_award("THE SPECIALIST", f"{name[:12]} {best_stats.get('correct')}-{best_stats.get('incorrect')} ({best_acc*100:.0f}%)", True)
-                
-        if correct_user_ids:
-            best_streak, best_uid = 0, None
-            for uid in correct_user_ids:
-                streak = user_stats.get(uid, {}).get("current_streak", 0)
-                if streak > best_streak: best_streak, best_uid = streak, uid
-            if best_streak >= 3:
-                name = await self._get_formatted_name(guild, best_uid)
-                add_award("LONGEST STREAK", f"{name[:15]} ({best_streak})", False)
-                
-        comebacks = [i for i in data.get("daily_interactions", []) if i.get("missed_before", 0) > 0 and i.get("correct")]
-        if comebacks:
-            best_cb = max(comebacks, key=lambda x: x["missed_before"])
-            name = await self._get_formatted_name(guild, best_cb["user_id"])
-            add_award("COMEBACK KID", f"{name[:15]} ({best_cb['missed_before']} missed)", True)
-            
-        leaps = [i for i in data.get("daily_interactions", []) if i.get("leap", 0) > 0]
-        if leaps:
-            best_leap = max(leaps, key=lambda x: x["leap"])
-            name = await self._get_formatted_name(guild, best_leap["user_id"])
-            add_award("BIGGEST LEAP", f"{name[:15]} (#{best_leap['old_rank']} ➔ #{best_leap['new_rank']})", False)
-            
-        scholars = [i for i in data.get("daily_interactions", []) if i.get("participation_streak", 0) >= 5]
-        if scholars:
-            best_scholar = max(scholars, key=lambda x: x["participation_streak"])
-            name = await self._get_formatted_name(guild, best_scholar["user_id"])
-            add_award("LOYAL SCHOLAR", f"{name[:15]} ({best_scholar['participation_streak']} days)", True)
-            
-        rank_ups = [i for i in data.get("daily_interactions", []) if i.get("rank_up")]
-        if rank_ups:
-            best_ru = rank_ups[0]
-            name = await self._get_formatted_name(guild, best_ru["user_id"])
-            add_award("RANK UP", f"{name[:12]} ({best_ru['rank_up']})", False)
-            
-        if len(awards) % 2 != 0:
-            awards.append('<div class="stat-badge" style="opacity:0.3;"><div class="stat-badge-title">???</div></div>')
-
-        async def format_at_list(items, value_fmt=lambda x: str(x)):
-            if not items: return '<div style="color:#aaa;">No data</div>'
-            html = ""
-            for i, (uid, val) in enumerate(items[:5]):
-                name = await self._get_formatted_name(guild, uid)
-                if len(name) > 12: name = name[:10] + '..'
-                html += f'<div><span class="at-rank">{i+1}.</span> {name} <span class="at-score">{value_fmt(val)}</span></div>'
-            return html
-
-        all_time_scores = [(uid, stats.get("all_time_score", 0)) for uid, stats in user_stats.items() if stats.get("all_time_score", 0) > 0]
-        all_time_scores.sort(key=lambda x: x[1], reverse=True)
-        
-        all_time_correct = [(uid, stats.get("correct", 0)) for uid, stats in user_stats.items() if stats.get("correct", 0) > 0]
-        all_time_correct.sort(key=lambda x: x[1], reverse=True)
-        
-        all_time_don_wins = [(uid, stats.get("don_successes", 0)) for uid, stats in user_stats.items() if stats.get("don_successes", 0) > 0]
-        all_time_don_wins.sort(key=lambda x: x[1], reverse=True)
-        
-        all_time_acc = []
-        all_time_don_acc = []
-        for uid, stats in user_stats.items():
-            tot = stats.get("correct", 0) + stats.get("incorrect", 0)
-            if tot >= 20: all_time_acc.append((uid, stats.get("correct", 0) / tot))
-            don_tot = stats.get("don_accepted", 0)
-            if don_tot >= 5: all_time_don_acc.append((uid, stats.get("don_successes", 0) / don_tot))
-                
-        all_time_acc.sort(key=lambda x: x[1], reverse=True)
-        all_time_don_acc.sort(key=lambda x: x[1], reverse=True)
-
-        return {
-            "day_of_week": yesterday.strftime('%A'),
-            "question_text": dq.get("question", "N/A"),
-            "answer_text": dq.get("correct", "N/A"),
-            "don_question_text": data.get("daily_don_question", {}).get("question", "No DoN Question Played"),
-            "don_answer_text": data.get("daily_don_question", {}).get("correct", "N/A"),
-            "podium_html": podium_html,
-            "don_podium_html": don_podium_html,
-            "awards_html": "".join(awards),
-            "at_score_html": await format_at_list(all_time_scores),
-            "at_correct_html": await format_at_list(all_time_correct),
-            "at_don_wins_html": await format_at_list(all_time_don_wins[:3]),
-            "at_accuracy_html": await format_at_list(all_time_acc[:3], lambda x: f"{x*100:.1f}%"),
-            "at_don_acc_html": await format_at_list(all_time_don_acc[:3], lambda x: f"{x*100:.1f}%")
-        }
-
-    async def build_recap_image_data(self, guild: discord.Guild, data: dict, full_global_data: dict) -> dict:
-        dq = data.get("daily_question", {})
-        yesterday = datetime.now(TRIVIA_TIMEZONE) - timedelta(days=1)
-        
-        user_stats = full_global_data.get("user_stats", {})
-        
-        async def format_podium(times_data):
-            if not times_data: return '<div style="color:#aaa;">No data</div>'
-            sorted_data = sorted(times_data, key=lambda x: x['time'])[:5]
-            html = ""
-            for i, entry in enumerate(sorted_data):
-                name = await self._get_formatted_name(guild, entry['user_id'])
-                if len(name) > 15: name = name[:12] + '...'
-                html += f'<div class="rank">{i+1}. {name} ({entry["time"]:.2f}s)</div>'
-            return html
-            
-        podium_html = await format_podium(data.get("daily_answer_times", []))
-        don_podium_html = await format_podium(data.get("daily_don_answer_times", []))
-        
-        awards = []
-        def add_award(title, value, is_orange=False):
-            t_class = "stat-badge-title orange" if is_orange else "stat-badge-title"
-            awards.append(f'<div class="stat-badge"><div class="{t_class}">{title}</div><div class="stat-badge-value">{value}</div></div>')
-
-        q_cat = dq.get("category", "Unknown")
-        correct_user_ids = {i['user_id'] for i in data.get("daily_interactions", []) if i.get("correct")}
-        
-        if correct_user_ids and q_cat != "Unknown":
-            best_acc, best_uid, best_stats = 0, None, None
-            for uid in correct_user_ids:
-                cat_stats = user_stats.get(uid, {}).get("categories", {}).get(q_cat)
-                if not cat_stats: continue
-                total = cat_stats.get("correct", 0) + cat_stats.get("incorrect", 0)
-                if total >= 5:
-                    acc = cat_stats.get("correct", 0) / total
-                    if acc > best_acc:
-                        best_acc, best_uid, best_stats = acc, uid, cat_stats
-            if best_uid:
-                name = await self._get_formatted_name(guild, best_uid)
-                add_award("THE SPECIALIST", f"{name[:12]} {best_stats.get('correct')}-{best_stats.get('incorrect')} ({best_acc*100:.0f}%)", True)
-                
-        if correct_user_ids:
-            best_streak, best_uid = 0, None
-            for uid in correct_user_ids:
-                streak = user_stats.get(uid, {}).get("current_streak", 0)
-                if streak > best_streak: best_streak, best_uid = streak, uid
-            if best_streak >= 3:
-                name = await self._get_formatted_name(guild, best_uid)
-                add_award("LONGEST STREAK", f"{name[:15]} ({best_streak})", False)
-                
-        comebacks = [i for i in data.get("daily_interactions", []) if i.get("missed_before", 0) > 0 and i.get("correct")]
-        if comebacks:
-            best_cb = max(comebacks, key=lambda x: x["missed_before"])
-            name = await self._get_formatted_name(guild, best_cb["user_id"])
-            add_award("COMEBACK KID", f"{name[:15]} ({best_cb['missed_before']} missed)", True)
-            
-        leaps = [i for i in data.get("daily_interactions", []) if i.get("leap", 0) > 0]
-        if leaps:
-            best_leap = max(leaps, key=lambda x: x["leap"])
-            name = await self._get_formatted_name(guild, best_leap["user_id"])
-            add_award("BIGGEST LEAP", f"{name[:15]} (#{best_leap['old_rank']} ➔ #{best_leap['new_rank']})", False)
-            
-        scholars = [i for i in data.get("daily_interactions", []) if i.get("participation_streak", 0) >= 5]
-        if scholars:
-            best_scholar = max(scholars, key=lambda x: x["participation_streak"])
-            name = await self._get_formatted_name(guild, best_scholar["user_id"])
-            add_award("LOYAL SCHOLAR", f"{name[:15]} ({best_scholar['participation_streak']} days)", True)
-            
-        rank_ups = [i for i in data.get("daily_interactions", []) if i.get("rank_up")]
-        if rank_ups:
-            best_ru = rank_ups[0]
-            name = await self._get_formatted_name(guild, best_ru["user_id"])
-            add_award("RANK UP", f"{name[:12]} ({best_ru['rank_up']})", False)
-            
-        if len(awards) % 2 != 0:
-            awards.append('<div class="stat-badge" style="opacity:0.3;"><div class="stat-badge-title">???</div></div>')
-
-        async def format_at_list(items, value_fmt=lambda x: str(x)):
-            if not items: return '<div style="color:#aaa;">No data</div>'
-            html = ""
-            for i, (uid, val) in enumerate(items[:5]):
-                name = await self._get_formatted_name(guild, uid)
-                if len(name) > 12: name = name[:10] + '..'
-                html += f'<div><span class="at-rank">{i+1}.</span> {name} <span class="at-score">{value_fmt(val)}</span></div>'
-            return html
-
-        all_time_scores = [(uid, stats.get("all_time_score", 0)) for uid, stats in user_stats.items() if stats.get("all_time_score", 0) > 0]
-        all_time_scores.sort(key=lambda x: x[1], reverse=True)
-        
-        all_time_correct = [(uid, stats.get("correct", 0)) for uid, stats in user_stats.items() if stats.get("correct", 0) > 0]
-        all_time_correct.sort(key=lambda x: x[1], reverse=True)
-        
-        all_time_don_wins = [(uid, stats.get("don_successes", 0)) for uid, stats in user_stats.items() if stats.get("don_successes", 0) > 0]
-        all_time_don_wins.sort(key=lambda x: x[1], reverse=True)
-        
-        all_time_acc = []
-        all_time_don_acc = []
-        for uid, stats in user_stats.items():
-            tot = stats.get("correct", 0) + stats.get("incorrect", 0)
-            if tot >= 20: all_time_acc.append((uid, stats.get("correct", 0) / tot))
-            don_tot = stats.get("don_accepted", 0)
-            if don_tot >= 5: all_time_don_acc.append((uid, stats.get("don_successes", 0) / don_tot))
-                
-        all_time_acc.sort(key=lambda x: x[1], reverse=True)
-        all_time_don_acc.sort(key=lambda x: x[1], reverse=True)
-
-        return {
-            "day_of_week": yesterday.strftime('%A'),
-            "question_text": dq.get("question", "N/A"),
-            "answer_text": dq.get("correct", "N/A"),
-            "don_question_text": data.get("daily_don_question", {}).get("question", "No DoN Question Played"),
-            "don_answer_text": data.get("daily_don_question", {}).get("correct", "N/A"),
-            "podium_html": podium_html,
-            "don_podium_html": don_podium_html,
-            "awards_html": "".join(awards),
-            "at_score_html": await format_at_list(all_time_scores),
-            "at_correct_html": await format_at_list(all_time_correct),
-            "at_don_wins_html": await format_at_list(all_time_don_wins[:3]),
-            "at_accuracy_html": await format_at_list(all_time_acc[:3], lambda x: f"{x*100:.1f}%"),
-            "at_don_acc_html": await format_at_list(all_time_don_acc[:3], lambda x: f"{x*100:.1f}%")
-        }
-
-    async def build_recap_image_data(self, guild: discord.Guild, data: dict, full_global_data: dict) -> dict:
-        dq = data.get("daily_question", {})
-        yesterday = datetime.now(TRIVIA_TIMEZONE) - timedelta(days=1)
-        
-        user_stats = full_global_data.get("user_stats", {})
-        
-        async def format_podium(times_data):
-            if not times_data: return '<div style="color:#aaa;">No data</div>'
-            sorted_data = sorted(times_data, key=lambda x: x['time'])[:5]
-            html = ""
-            for i, entry in enumerate(sorted_data):
-                name = await self._get_formatted_name(guild, entry['user_id'])
-                if len(name) > 15: name = name[:12] + '...'
-                html += f'<div class="rank">{i+1}. {name} ({entry["time"]:.2f}s)</div>'
-            return html
-            
-        podium_html = await format_podium(data.get("daily_answer_times", []))
-        don_podium_html = await format_podium(data.get("daily_don_answer_times", []))
-        
-        awards = []
-        def add_award(title, value, is_orange=False):
-            t_class = "stat-badge-title orange" if is_orange else "stat-badge-title"
-            awards.append(f'<div class="stat-badge"><div class="{t_class}">{title}</div><div class="stat-badge-value">{value}</div></div>')
-
-        q_cat = dq.get("category", "Unknown")
-        correct_user_ids = {i['user_id'] for i in data.get("daily_interactions", []) if i.get("correct")}
-        
-        if correct_user_ids and q_cat != "Unknown":
-            best_acc, best_uid, best_stats = 0, None, None
-            for uid in correct_user_ids:
-                cat_stats = user_stats.get(uid, {}).get("categories", {}).get(q_cat)
-                if not cat_stats: continue
-                total = cat_stats.get("correct", 0) + cat_stats.get("incorrect", 0)
-                if total >= 5:
-                    acc = cat_stats.get("correct", 0) / total
-                    if acc > best_acc:
-                        best_acc, best_uid, best_stats = acc, uid, cat_stats
-            if best_uid:
-                name = await self._get_formatted_name(guild, best_uid)
-                add_award("THE SPECIALIST", f"{name[:12]} {best_stats.get('correct')}-{best_stats.get('incorrect')} ({best_acc*100:.0f}%)", True)
-                
-        if correct_user_ids:
-            best_streak, best_uid = 0, None
-            for uid in correct_user_ids:
-                streak = user_stats.get(uid, {}).get("current_streak", 0)
-                if streak > best_streak: best_streak, best_uid = streak, uid
-            if best_streak >= 3:
-                name = await self._get_formatted_name(guild, best_uid)
-                add_award("LONGEST STREAK", f"{name[:15]} ({best_streak})", False)
-                
-        comebacks = [i for i in data.get("daily_interactions", []) if i.get("missed_before", 0) > 0 and i.get("correct")]
-        if comebacks:
-            best_cb = max(comebacks, key=lambda x: x["missed_before"])
-            name = await self._get_formatted_name(guild, best_cb["user_id"])
-            add_award("COMEBACK KID", f"{name[:15]} ({best_cb['missed_before']} missed)", True)
-            
-        leaps = [i for i in data.get("daily_interactions", []) if i.get("leap", 0) > 0]
-        if leaps:
-            best_leap = max(leaps, key=lambda x: x["leap"])
-            name = await self._get_formatted_name(guild, best_leap["user_id"])
-            add_award("BIGGEST LEAP", f"{name[:15]} (#{best_leap['old_rank']} ➔ #{best_leap['new_rank']})", False)
-            
-        scholars = [i for i in data.get("daily_interactions", []) if i.get("participation_streak", 0) >= 5]
-        if scholars:
-            best_scholar = max(scholars, key=lambda x: x["participation_streak"])
-            name = await self._get_formatted_name(guild, best_scholar["user_id"])
-            add_award("LOYAL SCHOLAR", f"{name[:15]} ({best_scholar['participation_streak']} days)", True)
-            
-        rank_ups = [i for i in data.get("daily_interactions", []) if i.get("rank_up")]
-        if rank_ups:
-            best_ru = rank_ups[0]
-            name = await self._get_formatted_name(guild, best_ru["user_id"])
-            add_award("RANK UP", f"{name[:12]} ({best_ru['rank_up']})", False)
-            
-        if len(awards) % 2 != 0:
-            awards.append('<div class="stat-badge" style="opacity:0.3;"><div class="stat-badge-title">???</div></div>')
-
-        async def format_at_list(items, value_fmt=lambda x: str(x)):
-            if not items: return '<div style="color:#aaa;">No data</div>'
-            html = ""
-            for i, (uid, val) in enumerate(items[:5]):
-                name = await self._get_formatted_name(guild, uid)
-                if len(name) > 12: name = name[:10] + '..'
-                html += f'<div><span class="at-rank">{i+1}.</span> {name} <span class="at-score">{value_fmt(val)}</span></div>'
-            return html
-
-        all_time_scores = [(uid, stats.get("all_time_score", 0)) for uid, stats in user_stats.items() if stats.get("all_time_score", 0) > 0]
-        all_time_scores.sort(key=lambda x: x[1], reverse=True)
-        
-        all_time_correct = [(uid, stats.get("correct", 0)) for uid, stats in user_stats.items() if stats.get("correct", 0) > 0]
-        all_time_correct.sort(key=lambda x: x[1], reverse=True)
-        
-        all_time_don_wins = [(uid, stats.get("don_successes", 0)) for uid, stats in user_stats.items() if stats.get("don_successes", 0) > 0]
-        all_time_don_wins.sort(key=lambda x: x[1], reverse=True)
-        
-        all_time_acc = []
-        all_time_don_acc = []
-        for uid, stats in user_stats.items():
-            tot = stats.get("correct", 0) + stats.get("incorrect", 0)
-            if tot >= 20: all_time_acc.append((uid, stats.get("correct", 0) / tot))
-            don_tot = stats.get("don_accepted", 0)
-            if don_tot >= 5: all_time_don_acc.append((uid, stats.get("don_successes", 0) / don_tot))
-                
-        all_time_acc.sort(key=lambda x: x[1], reverse=True)
-        all_time_don_acc.sort(key=lambda x: x[1], reverse=True)
-
-        return {
-            "day_of_week": yesterday.strftime('%A'),
-            "question_text": dq.get("question", "N/A"),
-            "answer_text": dq.get("correct", "N/A"),
-            "don_question_text": data.get("daily_don_question", {}).get("question", "No DoN Question Played"),
-            "don_answer_text": data.get("daily_don_question", {}).get("correct", "N/A"),
-            "podium_html": podium_html,
-            "don_podium_html": don_podium_html,
-            "awards_html": "".join(awards),
-            "at_score_html": await format_at_list(all_time_scores),
-            "at_correct_html": await format_at_list(all_time_correct),
-            "at_don_wins_html": await format_at_list(all_time_don_wins[:3]),
-            "at_accuracy_html": await format_at_list(all_time_acc[:3], lambda x: f"{x*100:.1f}%"),
-            "at_don_acc_html": await format_at_list(all_time_don_acc[:3], lambda x: f"{x*100:.1f}%")
-        }
-
-    async def build_recap_image_data(self, guild: discord.Guild, data: dict, full_global_data: dict) -> dict:
-        dq = data.get("daily_question", {})
-        yesterday = datetime.now(TRIVIA_TIMEZONE) - timedelta(days=1)
-        
-        user_stats = full_global_data.get("user_stats", {})
-        
-        async def format_podium(times_data):
-            if not times_data: return '<div style="color:#aaa;">No data</div>'
-            sorted_data = sorted(times_data, key=lambda x: x['time'])[:5]
-            html = ""
-            for i, entry in enumerate(sorted_data):
-                name = await self._get_formatted_name(guild, entry['user_id'])
-                if len(name) > 15: name = name[:12] + '...'
-                html += f'<div class="rank">{i+1}. {name} ({entry["time"]:.2f}s)</div>'
-            return html
-            
-        podium_html = await format_podium(data.get("daily_answer_times", []))
-        don_podium_html = await format_podium(data.get("daily_don_answer_times", []))
-        
-        awards = []
-        def add_award(title, value, is_orange=False):
-            t_class = "stat-badge-title orange" if is_orange else "stat-badge-title"
-            awards.append(f'<div class="stat-badge"><div class="{t_class}">{title}</div><div class="stat-badge-value">{value}</div></div>')
-
-        q_cat = dq.get("category", "Unknown")
-        correct_user_ids = {i['user_id'] for i in data.get("daily_interactions", []) if i.get("correct")}
-        
-        if correct_user_ids and q_cat != "Unknown":
-            best_acc, best_uid, best_stats = 0, None, None
-            for uid in correct_user_ids:
-                cat_stats = user_stats.get(uid, {}).get("categories", {}).get(q_cat)
-                if not cat_stats: continue
-                total = cat_stats.get("correct", 0) + cat_stats.get("incorrect", 0)
-                if total >= 5:
-                    acc = cat_stats.get("correct", 0) / total
-                    if acc > best_acc:
-                        best_acc, best_uid, best_stats = acc, uid, cat_stats
-            if best_uid:
-                name = await self._get_formatted_name(guild, best_uid)
-                add_award("THE SPECIALIST", f"{name[:12]} {best_stats.get('correct')}-{best_stats.get('incorrect')} ({best_acc*100:.0f}%)", True)
-                
-        if correct_user_ids:
-            best_streak, best_uid = 0, None
-            for uid in correct_user_ids:
-                streak = user_stats.get(uid, {}).get("current_streak", 0)
-                if streak > best_streak: best_streak, best_uid = streak, uid
-            if best_streak >= 3:
-                name = await self._get_formatted_name(guild, best_uid)
-                add_award("LONGEST STREAK", f"{name[:15]} ({best_streak})", False)
-                
-        comebacks = [i for i in data.get("daily_interactions", []) if i.get("missed_before", 0) > 0 and i.get("correct")]
-        if comebacks:
-            best_cb = max(comebacks, key=lambda x: x["missed_before"])
-            name = await self._get_formatted_name(guild, best_cb["user_id"])
-            add_award("COMEBACK KID", f"{name[:15]} ({best_cb['missed_before']} missed)", True)
-            
-        leaps = [i for i in data.get("daily_interactions", []) if i.get("leap", 0) > 0]
-        if leaps:
-            best_leap = max(leaps, key=lambda x: x["leap"])
-            name = await self._get_formatted_name(guild, best_leap["user_id"])
-            add_award("BIGGEST LEAP", f"{name[:15]} (#{best_leap['old_rank']} ➔ #{best_leap['new_rank']})", False)
-            
-        scholars = [i for i in data.get("daily_interactions", []) if i.get("participation_streak", 0) >= 5]
-        if scholars:
-            best_scholar = max(scholars, key=lambda x: x["participation_streak"])
-            name = await self._get_formatted_name(guild, best_scholar["user_id"])
-            add_award("LOYAL SCHOLAR", f"{name[:15]} ({best_scholar['participation_streak']} days)", True)
-            
-        rank_ups = [i for i in data.get("daily_interactions", []) if i.get("rank_up")]
-        if rank_ups:
-            best_ru = rank_ups[0]
-            name = await self._get_formatted_name(guild, best_ru["user_id"])
-            add_award("RANK UP", f"{name[:12]} ({best_ru['rank_up']})", False)
-            
-        if len(awards) % 2 != 0:
-            awards.append('<div class="stat-badge" style="opacity:0.3;"><div class="stat-badge-title">???</div></div>')
-
-        async def format_at_list(items, value_fmt=lambda x: str(x)):
-            if not items: return '<div style="color:#aaa;">No data</div>'
-            html = ""
-            for i, (uid, val) in enumerate(items[:5]):
-                name = await self._get_formatted_name(guild, uid)
-                if len(name) > 12: name = name[:10] + '..'
-                html += f'<div><span class="at-rank">{i+1}.</span> {name} <span class="at-score">{value_fmt(val)}</span></div>'
-            return html
-
-        all_time_scores = [(uid, stats.get("all_time_score", 0)) for uid, stats in user_stats.items() if stats.get("all_time_score", 0) > 0]
-        all_time_scores.sort(key=lambda x: x[1], reverse=True)
-        
-        all_time_correct = [(uid, stats.get("correct", 0)) for uid, stats in user_stats.items() if stats.get("correct", 0) > 0]
-        all_time_correct.sort(key=lambda x: x[1], reverse=True)
-        
-        all_time_don_wins = [(uid, stats.get("don_successes", 0)) for uid, stats in user_stats.items() if stats.get("don_successes", 0) > 0]
-        all_time_don_wins.sort(key=lambda x: x[1], reverse=True)
-        
-        all_time_acc = []
-        all_time_don_acc = []
-        for uid, stats in user_stats.items():
-            tot = stats.get("correct", 0) + stats.get("incorrect", 0)
-            if tot >= 20: all_time_acc.append((uid, stats.get("correct", 0) / tot))
-            don_tot = stats.get("don_accepted", 0)
-            if don_tot >= 5: all_time_don_acc.append((uid, stats.get("don_successes", 0) / don_tot))
-                
-        all_time_acc.sort(key=lambda x: x[1], reverse=True)
-        all_time_don_acc.sort(key=lambda x: x[1], reverse=True)
-
-        return {
-            "day_of_week": yesterday.strftime('%A'),
-            "question_text": dq.get("question", "N/A"),
-            "answer_text": dq.get("correct", "N/A"),
-            "don_question_text": data.get("daily_don_question", {}).get("question", "No DoN Question Played"),
-            "don_answer_text": data.get("daily_don_question", {}).get("correct", "N/A"),
-            "podium_html": podium_html,
-            "don_podium_html": don_podium_html,
-            "awards_html": "".join(awards),
-            "at_score_html": await format_at_list(all_time_scores),
-            "at_correct_html": await format_at_list(all_time_correct),
-            "at_don_wins_html": await format_at_list(all_time_don_wins[:3]),
-            "at_accuracy_html": await format_at_list(all_time_acc[:3], lambda x: f"{x*100:.1f}%"),
-            "at_don_acc_html": await format_at_list(all_time_don_acc[:3], lambda x: f"{x*100:.1f}%")
-        }
-
-    async def build_recap_image_data(self, guild: discord.Guild, data: dict, full_global_data: dict) -> dict:
-        dq = data.get("daily_question", {})
-        yesterday = datetime.now(TRIVIA_TIMEZONE) - timedelta(days=1)
-        
-        user_stats = full_global_data.get("user_stats", {})
-        
-        async def format_podium(times_data):
-            if not times_data: return '<div style="color:#aaa;">No data</div>'
-            sorted_data = sorted(times_data, key=lambda x: x['time'])[:5]
-            html = ""
-            for i, entry in enumerate(sorted_data):
-                name = await self._get_formatted_name(guild, entry['user_id'])
-                if len(name) > 15: name = name[:12] + '...'
-                html += f'<div class="rank">{i+1}. {name} ({entry["time"]:.2f}s)</div>'
-            return html
-            
-        podium_html = await format_podium(data.get("daily_answer_times", []))
-        don_podium_html = await format_podium(data.get("daily_don_answer_times", []))
-        
-        awards = []
-        def add_award(title, value, is_orange=False):
-            t_class = "stat-badge-title orange" if is_orange else "stat-badge-title"
-            awards.append(f'<div class="stat-badge"><div class="{t_class}">{title}</div><div class="stat-badge-value">{value}</div></div>')
-
-        q_cat = dq.get("category", "Unknown")
-        correct_user_ids = {i['user_id'] for i in data.get("daily_interactions", []) if i.get("correct")}
-        
-        if correct_user_ids and q_cat != "Unknown":
-            best_acc, best_uid, best_stats = 0, None, None
-            for uid in correct_user_ids:
-                cat_stats = user_stats.get(uid, {}).get("categories", {}).get(q_cat)
-                if not cat_stats: continue
-                total = cat_stats.get("correct", 0) + cat_stats.get("incorrect", 0)
-                if total >= 5:
-                    acc = cat_stats.get("correct", 0) / total
-                    if acc > best_acc:
-                        best_acc, best_uid, best_stats = acc, uid, cat_stats
-            if best_uid:
-                name = await self._get_formatted_name(guild, best_uid)
-                add_award("THE SPECIALIST", f"{name[:12]} {best_stats.get('correct')}-{best_stats.get('incorrect')} ({best_acc*100:.0f}%)", True)
-                
-        if correct_user_ids:
-            best_streak, best_uid = 0, None
-            for uid in correct_user_ids:
-                streak = user_stats.get(uid, {}).get("current_streak", 0)
-                if streak > best_streak: best_streak, best_uid = streak, uid
-            if best_streak >= 3:
-                name = await self._get_formatted_name(guild, best_uid)
-                add_award("LONGEST STREAK", f"{name[:15]} ({best_streak})", False)
-                
-        comebacks = [i for i in data.get("daily_interactions", []) if i.get("missed_before", 0) > 0 and i.get("correct")]
-        if comebacks:
-            best_cb = max(comebacks, key=lambda x: x["missed_before"])
-            name = await self._get_formatted_name(guild, best_cb["user_id"])
-            add_award("COMEBACK KID", f"{name[:15]} ({best_cb['missed_before']} missed)", True)
-            
-        leaps = [i for i in data.get("daily_interactions", []) if i.get("leap", 0) > 0]
-        if leaps:
-            best_leap = max(leaps, key=lambda x: x["leap"])
-            name = await self._get_formatted_name(guild, best_leap["user_id"])
-            add_award("BIGGEST LEAP", f"{name[:15]} (#{best_leap['old_rank']} ➔ #{best_leap['new_rank']})", False)
-            
-        scholars = [i for i in data.get("daily_interactions", []) if i.get("participation_streak", 0) >= 5]
-        if scholars:
-            best_scholar = max(scholars, key=lambda x: x["participation_streak"])
-            name = await self._get_formatted_name(guild, best_scholar["user_id"])
-            add_award("LOYAL SCHOLAR", f"{name[:15]} ({best_scholar['participation_streak']} days)", True)
-            
-        rank_ups = [i for i in data.get("daily_interactions", []) if i.get("rank_up")]
-        if rank_ups:
-            best_ru = rank_ups[0]
-            name = await self._get_formatted_name(guild, best_ru["user_id"])
-            add_award("RANK UP", f"{name[:12]} ({best_ru['rank_up']})", False)
-            
-        if len(awards) % 2 != 0:
-            awards.append('<div class="stat-badge" style="opacity:0.3;"><div class="stat-badge-title">???</div></div>')
-
-        async def format_at_list(items, value_fmt=lambda x: str(x)):
-            if not items: return '<div style="color:#aaa;">No data</div>'
-            html = ""
-            for i, (uid, val) in enumerate(items[:5]):
-                name = await self._get_formatted_name(guild, uid)
-                if len(name) > 12: name = name[:10] + '..'
-                html += f'<div><span class="at-rank">{i+1}.</span> {name} <span class="at-score">{value_fmt(val)}</span></div>'
-            return html
-
-        all_time_scores = [(uid, stats.get("all_time_score", 0)) for uid, stats in user_stats.items() if stats.get("all_time_score", 0) > 0]
-        all_time_scores.sort(key=lambda x: x[1], reverse=True)
-        
-        all_time_correct = [(uid, stats.get("correct", 0)) for uid, stats in user_stats.items() if stats.get("correct", 0) > 0]
-        all_time_correct.sort(key=lambda x: x[1], reverse=True)
-        
-        all_time_don_wins = [(uid, stats.get("don_successes", 0)) for uid, stats in user_stats.items() if stats.get("don_successes", 0) > 0]
-        all_time_don_wins.sort(key=lambda x: x[1], reverse=True)
-        
-        all_time_acc = []
-        all_time_don_acc = []
-        for uid, stats in user_stats.items():
-            tot = stats.get("correct", 0) + stats.get("incorrect", 0)
-            if tot >= 20: all_time_acc.append((uid, stats.get("correct", 0) / tot))
-            don_tot = stats.get("don_accepted", 0)
-            if don_tot >= 5: all_time_don_acc.append((uid, stats.get("don_successes", 0) / don_tot))
-                
-        all_time_acc.sort(key=lambda x: x[1], reverse=True)
-        all_time_don_acc.sort(key=lambda x: x[1], reverse=True)
-
-        return {
-            "day_of_week": yesterday.strftime('%A'),
-            "question_text": dq.get("question", "N/A"),
-            "answer_text": dq.get("correct", "N/A"),
-            "don_question_text": data.get("daily_don_question", {}).get("question", "No DoN Question Played"),
-            "don_answer_text": data.get("daily_don_question", {}).get("correct", "N/A"),
-            "podium_html": podium_html,
-            "don_podium_html": don_podium_html,
-            "awards_html": "".join(awards),
-            "at_score_html": await format_at_list(all_time_scores),
-            "at_correct_html": await format_at_list(all_time_correct),
-            "at_don_wins_html": await format_at_list(all_time_don_wins[:3]),
-            "at_accuracy_html": await format_at_list(all_time_acc[:3], lambda x: f"{x*100:.1f}%"),
-            "at_don_acc_html": await format_at_list(all_time_don_acc[:3], lambda x: f"{x*100:.1f}%")
-        }
-
-    async def build_recap_image_data(self, guild: discord.Guild, data: dict, full_global_data: dict) -> dict:
-        dq = data.get("daily_question", {})
-        yesterday = datetime.now(TRIVIA_TIMEZONE) - timedelta(days=1)
-        
-        user_stats = full_global_data.get("user_stats", {})
-        
-        async def format_podium(times_data):
-            if not times_data: return '<div style="color:#aaa;">No data</div>'
-            sorted_data = sorted(times_data, key=lambda x: x['time'])[:5]
-            html = ""
-            for i, entry in enumerate(sorted_data):
-                name = await self._get_formatted_name(guild, entry['user_id'])
-                if len(name) > 15: name = name[:12] + '...'
-                html += f'<div class="rank">{i+1}. {name} ({entry["time"]:.2f}s)</div>'
-            return html
-            
-        podium_html = await format_podium(data.get("daily_answer_times", []))
-        don_podium_html = await format_podium(data.get("daily_don_answer_times", []))
-        
-        awards = []
-        def add_award(title, value, is_orange=False):
-            t_class = "stat-badge-title orange" if is_orange else "stat-badge-title"
-            awards.append(f'<div class="stat-badge"><div class="{t_class}">{title}</div><div class="stat-badge-value">{value}</div></div>')
-
-        q_cat = dq.get("category", "Unknown")
-        correct_user_ids = {i['user_id'] for i in data.get("daily_interactions", []) if i.get("correct")}
-        
-        if correct_user_ids and q_cat != "Unknown":
-            best_acc, best_uid, best_stats = 0, None, None
-            for uid in correct_user_ids:
-                cat_stats = user_stats.get(uid, {}).get("categories", {}).get(q_cat)
-                if not cat_stats: continue
-                total = cat_stats.get("correct", 0) + cat_stats.get("incorrect", 0)
-                if total >= 5:
-                    acc = cat_stats.get("correct", 0) / total
-                    if acc > best_acc:
-                        best_acc, best_uid, best_stats = acc, uid, cat_stats
-            if best_uid:
-                name = await self._get_formatted_name(guild, best_uid)
-                add_award("THE SPECIALIST", f"{name[:12]} {best_stats.get('correct')}-{best_stats.get('incorrect')} ({best_acc*100:.0f}%)", True)
-                
-        if correct_user_ids:
-            best_streak, best_uid = 0, None
-            for uid in correct_user_ids:
-                streak = user_stats.get(uid, {}).get("current_streak", 0)
-                if streak > best_streak: best_streak, best_uid = streak, uid
-            if best_streak >= 3:
-                name = await self._get_formatted_name(guild, best_uid)
-                add_award("LONGEST STREAK", f"{name[:15]} ({best_streak})", False)
-                
-        comebacks = [i for i in data.get("daily_interactions", []) if i.get("missed_before", 0) > 0 and i.get("correct")]
-        if comebacks:
-            best_cb = max(comebacks, key=lambda x: x["missed_before"])
-            name = await self._get_formatted_name(guild, best_cb["user_id"])
-            add_award("COMEBACK KID", f"{name[:15]} ({best_cb['missed_before']} missed)", True)
-            
-        leaps = [i for i in data.get("daily_interactions", []) if i.get("leap", 0) > 0]
-        if leaps:
-            best_leap = max(leaps, key=lambda x: x["leap"])
-            name = await self._get_formatted_name(guild, best_leap["user_id"])
-            add_award("BIGGEST LEAP", f"{name[:15]} (#{best_leap['old_rank']} ➔ #{best_leap['new_rank']})", False)
-            
-        scholars = [i for i in data.get("daily_interactions", []) if i.get("participation_streak", 0) >= 5]
-        if scholars:
-            best_scholar = max(scholars, key=lambda x: x["participation_streak"])
-            name = await self._get_formatted_name(guild, best_scholar["user_id"])
-            add_award("LOYAL SCHOLAR", f"{name[:15]} ({best_scholar['participation_streak']} days)", True)
-            
-        rank_ups = [i for i in data.get("daily_interactions", []) if i.get("rank_up")]
-        if rank_ups:
-            best_ru = rank_ups[0]
-            name = await self._get_formatted_name(guild, best_ru["user_id"])
-            add_award("RANK UP", f"{name[:12]} ({best_ru['rank_up']})", False)
-            
-        if len(awards) % 2 != 0:
-            awards.append('<div class="stat-badge" style="opacity:0.3;"><div class="stat-badge-title">???</div></div>')
-
-        async def format_at_list(items, value_fmt=lambda x: str(x)):
-            if not items: return '<div style="color:#aaa;">No data</div>'
-            html = ""
-            for i, (uid, val) in enumerate(items[:5]):
-                name = await self._get_formatted_name(guild, uid)
-                if len(name) > 12: name = name[:10] + '..'
-                html += f'<div><span class="at-rank">{i+1}.</span> {name} <span class="at-score">{value_fmt(val)}</span></div>'
-            return html
-
-        all_time_scores = [(uid, stats.get("all_time_score", 0)) for uid, stats in user_stats.items() if stats.get("all_time_score", 0) > 0]
-        all_time_scores.sort(key=lambda x: x[1], reverse=True)
-        
-        all_time_correct = [(uid, stats.get("correct", 0)) for uid, stats in user_stats.items() if stats.get("correct", 0) > 0]
-        all_time_correct.sort(key=lambda x: x[1], reverse=True)
-        
-        all_time_don_wins = [(uid, stats.get("don_successes", 0)) for uid, stats in user_stats.items() if stats.get("don_successes", 0) > 0]
-        all_time_don_wins.sort(key=lambda x: x[1], reverse=True)
-        
-        all_time_acc = []
-        all_time_don_acc = []
-        for uid, stats in user_stats.items():
-            tot = stats.get("correct", 0) + stats.get("incorrect", 0)
-            if tot >= 20: all_time_acc.append((uid, stats.get("correct", 0) / tot))
-            don_tot = stats.get("don_accepted", 0)
-            if don_tot >= 5: all_time_don_acc.append((uid, stats.get("don_successes", 0) / don_tot))
-                
-        all_time_acc.sort(key=lambda x: x[1], reverse=True)
-        all_time_don_acc.sort(key=lambda x: x[1], reverse=True)
-
         # Calculate dynamic height based on number of award badges
         # Base height to fit header + questions + podiums + all-time section = 2000
         # Each row of badges (2 badges per row) takes roughly 150px
@@ -2493,8 +1706,9 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
 
     async def handle_trivia_answer(self, interaction: discord.Interaction, view: EphemeralQuestionView):
         try:
-            # Ensure interaction is deferred before proceeding
-            await interaction.response.defer()
+            # Ensure interaction is deferred (answer_callback may have already deferred)
+            if not interaction.response.is_done():
+                await interaction.response.defer()
             
             answer_time, user_id_str = datetime.now(timezone.utc), str(interaction.user.id)
             
@@ -2526,8 +1740,8 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
                 old_prestige_rank, _, _, _ = self.get_prestige_rank(old_score)
                 
                 if is_correct:
-                    scores_before = copy.deepcopy(global_data.get("scores", {}))
-                    sorted_before = sorted(scores_before.items(), key=self._get_score_sort_key)
+                    # No deepcopy needed — scores haven't been modified yet at this point
+                    sorted_before = sorted(global_data.get("scores", {}).items(), key=self._get_score_sort_key)
                     rank_map_before = {uid: i + 1 for i, (uid, _) in enumerate(sorted_before)}
                     old_rank = rank_map_before.get(user_id_str, len(sorted_before) + 1)
                 
@@ -2552,8 +1766,12 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
                     stats["longest_streak"] = max(stats["current_streak"], stats["longest_streak"])
                     stats["current_incorrect_streak"] = 0 # Reset incorrect streak
                     points = 1
-                    delta = (answer_time - self.reveal_timestamps.pop((interaction.guild.id, interaction.user.id), answer_time)).total_seconds()
-                    global_data.setdefault("daily_answer_times", []).append({"user_id": user_id_str, "time": delta})
+                    reveal_ts = self.reveal_timestamps.pop((interaction.guild.id, interaction.user.id), None)
+                    if reveal_ts is not None:
+                        delta = (answer_time - reveal_ts).total_seconds()
+                        global_data.setdefault("daily_answer_times", []).append({"user_id": user_id_str, "time": delta})
+                    else:
+                        log_trivia.warning(f"Missing reveal timestamp for user {user_id_str} (likely bot restart); skipping answer-time recording.")
                     don_cat = global_data.get("daily_don_question_data", {}).get("category", "a surprise")
                     don_view = DoubleOrNothingPromptView(self, interaction.user, points, don_cat)
                 else:

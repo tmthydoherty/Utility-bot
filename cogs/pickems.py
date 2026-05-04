@@ -30,8 +30,9 @@ class AsyncPickemsDB:
     async def init_db(self):
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         os.makedirs(ASSETS_DIR, exist_ok=True)
-        
+
         async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA journal_mode=WAL")
             db.row_factory = aiosqlite.Row
             # Settings
             await db.execute('''CREATE TABLE IF NOT EXISTS config (
@@ -335,22 +336,20 @@ async def build_match_embed(match: dict) -> discord.Embed:
         desc_lines.append("Stream(s):")
         desc_lines.extend(streams)
 
-    embed = discord.Embed(description="\n".join(desc_lines), color=COLOR_PRIMARY)
-        
-    # Voting Status (Now in Footer)
+    # Voting status: use embed description for close time (supports Discord timestamps), footer for status label
     footer_text = ""
     if match['status'] == 'published':
         if match.get('close_time'):
-            # We use a standard timestamp in footer because footers don't support dynamic Discord markdown timestamps
-            t_str = time.strftime('%H:%M %p UTC', time.gmtime(match['close_time']))
-            footer_text = f"🟢 Pick'em Open • Closes at {t_str}"
-        else:
-            footer_text = "🟢 Pick'em Open"
+            desc_lines.append("")
+            desc_lines.append(f"Picks close <t:{match['close_time']}:R> (<t:{match['close_time']}:t>)")
+        footer_text = "🟢 Pick'em Open"
     elif match['status'] == 'closed':
         footer_text = "🔴 Pick'em Closed"
     elif match['status'] == 'resolved':
         footer_text = f"✅ Pick'em Resolved ({match['team1']} {match['score_1']} - {match['score_2']} {match['team2']})"
-    
+
+    embed = discord.Embed(description="\n".join(desc_lines), color=COLOR_PRIMARY)
+
     if footer_text:
         embed.set_footer(text=footer_text)
 
@@ -472,19 +471,19 @@ class PredictionButton(discord.ui.Button):
         self.s2 = s2
 
     async def callback(self, interaction: discord.Interaction):
-        # Double check match status right before saving to prevent race condition voting
-        match = await db.get_match_by_id(self.match_id)
-        if match['status'] != 'published':
-            embed = discord.Embed(description="Voting is closed for this match.", color=discord.Color.red())
-            return await interaction.response.edit_message(embed=embed, view=None)
-
         lock = get_user_lock(interaction.user.id)
         async with lock:
+            # Check match status inside the lock to prevent race with auto-close
+            match = await db.get_match_by_id(self.match_id)
+            if not match or match['status'] != 'published':
+                embed = discord.Embed(description="Voting is closed for this match.", color=discord.Color.red())
+                return await interaction.response.edit_message(embed=embed, view=None)
+
             await db.save_prediction(interaction.user.id, self.match_id, self.winner, self.s1, self.s2)
-            
+
             team_name = match['team1'] if self.winner == 1 else match['team2']
             score_str = "2-0" if (self.s1 == 2 and self.s2 == 0) or (self.s2 == 2 and self.s1 == 0) else "2-1"
-            
+
             embed = discord.Embed(
                 description=f"Prediction locked in: **{team_name} ({score_str})**",
                 color=COLOR_PRIMARY
@@ -659,13 +658,14 @@ class DraftInfoModal(discord.ui.Modal):
     team1 = discord.ui.TextInput(label='Team 1 Name', required=True)
     team2 = discord.ui.TextInput(label='Team 2 Name', required=True)
     body_text = discord.ui.TextInput(label='Custom Body Text', style=discord.TextStyle.paragraph, required=False)
+    close_time_input = discord.ui.TextInput(label='Picks Close Time (e.g. 7:00pm)', placeholder='Leave blank for no auto-close', required=False)
 
     def __init__(self, match_data=None, prefill=None):
         title = 'Edit Draft Info' if match_data else 'Draft New Match'
         super().__init__(title=title)
         self.match_data = dict(match_data) if match_data else None
         self.prefill = prefill
-        
+
         if self.match_data:
             self.match_title.default = self.match_data['title']
             self.team1.default = self.match_data['team1']
@@ -675,39 +675,69 @@ class DraftInfoModal(discord.ui.Modal):
             self.team1.default = self.prefill['team1']
             self.team2.default = self.prefill['team2']
 
+    def _parse_close_time(self) -> Optional[int]:
+        """Parse the close time input into a unix timestamp, or None."""
+        raw = self.close_time_input.value.strip().lower() if self.close_time_input.value else ""
+        if not raw:
+            return None
+        time_match = re.match(r"(\d{1,2}):(\d{2})\s*(am|pm)?", raw)
+        if not time_match:
+            return None
+        hr, mn, meridiem = time_match.groups()
+        hr, mn = int(hr), int(mn)
+        if meridiem:
+            if meridiem == 'pm' and hr < 12: hr += 12
+            if meridiem == 'am' and hr == 12: hr = 0
+        now = datetime.now()
+        target = now.replace(hour=hr, minute=mn, second=0, microsecond=0)
+        if target < now:
+            target += timedelta(days=1)
+        return int(target.timestamp())
+
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        
+
+        close_ts = self._parse_close_time()
+
         if self.match_data:
             await db.update_draft(
                 self.match_data['id'],
-                self.match_title.value, 
-                self.team1.value, 
-                self.team2.value, 
+                self.match_title.value,
+                self.team1.value,
+                self.team2.value,
                 self.match_data['stream_url'],
                 self.match_data.get('team1_stream_url', ''),
                 self.match_data.get('team2_stream_url', ''),
                 self.body_text.value
             )
-            await interaction.channel.send(f"✅ {interaction.user.mention} Draft '{self.match_title.value}' info updated.", delete_after=10)
+            if close_ts is not None:
+                await db.set_match_close_time(self.match_data['id'], close_ts)
+            msg = f"✅ {interaction.user.mention} Draft '{self.match_title.value}' info updated."
+            if close_ts:
+                msg += f" Picks close <t:{close_ts}:R>."
+            await interaction.channel.send(msg, delete_after=10)
             return
 
         # Initial draft creation
         match_id = await db.create_draft(
-            self.match_title.value, 
-            self.team1.value, 
-            self.team2.value, 
+            self.match_title.value,
+            self.team1.value,
+            self.team2.value,
             "", # stream_url
             self.prefill.get('team1_stream_url', '') if self.prefill else '',
             self.prefill.get('team2_stream_url', '') if self.prefill else '',
             self.body_text.value
         )
 
+        # Set close time if provided
+        if close_ts is not None:
+            await db.set_match_close_time(match_id, close_ts)
+
         final_logo_path = os.path.join(ASSETS_DIR, f"{match_id}_stitched_logo.png")
 
         # LOGIC FOR AUTO-STITCHING IF PREFILL LOGOS EXIST
         if self.prefill and self.prefill.get('pre_t1_logo') and self.prefill.get('pre_t2_logo'):
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, stitch_team_logos, self.prefill['pre_t1_logo'], self.prefill['pre_t2_logo'], final_logo_path)
             
             embed_skip = discord.Embed(
@@ -751,7 +781,7 @@ class DraftInfoModal(discord.ui.Modal):
                 except: pass
 
                 # Stitch logos
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
                 await loop.run_in_executor(None, stitch_team_logos, l1_temp, l2_temp, final_logo_path)
 
                 embed2 = discord.Embed(
@@ -929,7 +959,7 @@ class DraftManagementView(discord.ui.View):
             except: pass 
 
             # Stitch logos
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, stitch_team_logos, l1_path, l2_path, final_logo_path)
 
             # Step 2: Map Bans
@@ -1378,6 +1408,11 @@ class Pickems(commands.Cog):
                 await db.set_match_status(match['id'], 'closed')
                 await update_match_message(self.bot, match['id'])
                 logger.info(f"Auto-closed Pick'em match {match['id']}")
+
+        # Prune idle vote locks to prevent unbounded memory growth
+        idle = [uid for uid, lock in vote_locks.items() if not lock.locked()]
+        for uid in idle:
+            vote_locks.pop(uid, None)
 
     @auto_close_loop.before_loop
     async def before_auto_close(self):

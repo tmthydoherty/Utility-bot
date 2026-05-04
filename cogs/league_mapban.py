@@ -60,7 +60,7 @@ PREFIX_AGENT_SELECT = "mapban_agent_"
 # Agent roles for Valorant
 AGENT_ROLES = {
     "Duelist": ["Iso", "Jett", "Neon", "Phoenix", "Raze", "Reyna", "Waylay", "Yoru"],
-    "Controller": ["Astra", "Brimstone", "Clove", "Harbor", "Omen", "Viper"],
+    "Controller": ["Astra", "Brimstone", "Clove", "Harbor", "Miks", "Omen", "Viper"],
     "Sentinel": ["Chamber", "Cypher", "Deadlock", "Killjoy", "Sage", "Veto", "Vyse"],
     "Initiator": ["Breach", "Fade", "Gekko", "KAY/O", "Skye", "Sova", "Tejo"],
 }
@@ -120,7 +120,14 @@ class PersistentMapSelectView(discord.ui.View):
             return False
 
         phase = session.get("current_phase")
-        action_type = "ban" if phase == "banning" else "pick"
+        if phase == "banning":
+            action_type = "ban"
+        elif phase == "picking":
+            action_type = "pick"
+        else:
+            # Not in a map selection phase — ignore
+            await interaction.response.send_message("Not in a map selection phase.", ephemeral=True)
+            return False
 
         # Show confirmation inline by editing the captain message
         embed = discord.Embed(
@@ -128,11 +135,13 @@ class PersistentMapSelectView(discord.ui.View):
             description=f"Are you sure you want to **{action_type}** **{map_name}**?",
             color=COLOR_WARNING
         )
+        confirm_view = ConfirmMapSelectView(
+            self.cog, session_id, captain_id, map_name, action_type
+        )
+        confirm_view.message = interaction.message
         await interaction.response.edit_message(
             embed=embed,
-            view=ConfirmMapSelectView(
-                self.cog, session_id, captain_id, map_name, action_type
-            )
+            view=confirm_view
         )
         return True
 
@@ -422,6 +431,16 @@ class ConfirmAgentSelectView(discord.ui.View):
         self.add_item(cancel_btn)
 
     async def _confirm_callback(self, interaction: discord.Interaction):
+        # Check if it's still this captain's turn before claiming success
+        session = self.cog.active_sessions.get(self.session_id)
+        if not session:
+            session = await self.cog.get_session(self.session_id)
+        if not session or session.get("current_turn") != self.captain_id:
+            await interaction.response.edit_message(
+                content="⏰ Your turn expired — an agent was auto-selected for you.",
+                view=None
+            )
+            return
         await interaction.response.edit_message(
             content=f"✅ {self.action_type.title()}ed **{self.agent_name}**",
             view=None
@@ -446,6 +465,7 @@ async def init_database():
     Path("data").mkdir(exist_ok=True)
     
     async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
         # Guild settings table
         await db.execute("""
             CREATE TABLE IF NOT EXISTS guild_settings (
@@ -2220,12 +2240,14 @@ class MapSelectView(discord.ui.View):
                 description=f"Are you sure you want to **{self.action_type}** **{map_name}**?",
                 color=COLOR_WARNING
             )
+            confirm_view = ConfirmMapSelectView(
+                self.cog, self.session_id, self.captain_id,
+                map_name, self.action_type
+            )
+            confirm_view.message = interaction.message
             await interaction.response.edit_message(
                 embed=embed,
-                view=ConfirmMapSelectView(
-                    self.cog, self.session_id, self.captain_id,
-                    map_name, self.action_type
-                )
+                view=confirm_view
             )
 
         return callback
@@ -2242,23 +2264,56 @@ class ConfirmMapSelectView(discord.ui.View):
         self.captain_id = captain_id
         self.map_name = map_name
         self.action_type = action_type
+        self.message: Optional[discord.Message] = None
 
     @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Check turn and phase are still valid before proceeding
+        session = self.cog.active_sessions.get(self.session_id)
+        if not session:
+            session = await self.cog.get_session(self.session_id)
+        if not session or session.get("current_turn") != self.captain_id:
+            await interaction.response.edit_message(
+                content="⏰ Your turn expired — a map was auto-selected for you.",
+                embed=None, view=None
+            )
+            return
+        current_phase = session.get("current_phase")
+        if current_phase not in ("banning", "picking"):
+            await interaction.response.edit_message(
+                content="⏰ Phase changed — please use the updated buttons.",
+                embed=None, view=None
+            )
+            return
         await interaction.response.defer()
+        # Pass phase-derived action_type to handle_map_selection (it will
+        # also verify, but this avoids unnecessary lock acquisition)
+        action_type = "ban" if current_phase == "banning" else "pick"
         await self.cog.handle_map_selection(
             interaction, self.session_id, self.captain_id,
-            self.map_name, self.action_type
+            self.map_name, action_type
         )
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Restore the captain embed with map select buttons
+        await self._restore_original_view(interaction)
+
+    async def on_timeout(self):
+        """Restore the original map select view when confirmation times out."""
+        await self._restore_original_view(None)
+
+    async def _restore_original_view(self, interaction: Optional[discord.Interaction]):
+        """Restore the captain embed with map select buttons."""
         session = self.cog.active_sessions.get(self.session_id)
         if not session:
             session = await self.cog.get_session(self.session_id)
         if not session:
-            await interaction.response.edit_message(content="Session not found.", embed=None, view=None)
+            if interaction and not interaction.response.is_done():
+                await interaction.response.edit_message(content="Session not found.", embed=None, view=None)
+            return
+
+        # If the turn already moved on (timeout auto-selected), don't fight with update_all_embeds
+        if session.get("current_turn") != self.captain_id:
             return
 
         is_captain1 = self.captain_id == session["captain1_id"]
@@ -2269,7 +2324,14 @@ class ConfirmMapSelectView(discord.ui.View):
         remaining = get_remaining_maps(map_pool, actions)
 
         view = MapSelectView(self.cog, self.session_id, self.captain_id, remaining, self.action_type)
-        await interaction.response.edit_message(embed=embed, view=view)
+
+        if interaction and not interaction.response.is_done():
+            await interaction.response.edit_message(embed=embed, view=view)
+        elif self.message:
+            try:
+                await self.message.edit(embed=embed, view=view)
+            except Exception:
+                pass
 
 
 class SideSelectView(discord.ui.View):
@@ -2304,9 +2366,20 @@ class ConfirmSideSelectView(discord.ui.View):
         self.captain_id = captain_id
         self.map_name = map_name
         self.side = side
+        self.message: Optional[discord.Message] = None
 
     @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Check turn is still valid before proceeding
+        session = self.cog.active_sessions.get(self.session_id)
+        if not session:
+            session = await self.cog.get_session(self.session_id)
+        if not session or session.get("current_turn") != self.captain_id:
+            await interaction.response.edit_message(
+                content="⏰ Your turn expired — a side was auto-selected for you.",
+                embed=None, view=None
+            )
+            return
         await interaction.response.defer()
         await self.cog.handle_side_selection(
             interaction, self.session_id, self.captain_id,
@@ -2315,18 +2388,37 @@ class ConfirmSideSelectView(discord.ui.View):
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Restore the captain embed with side select buttons
+        await self._restore_original_view(interaction)
+
+    async def on_timeout(self):
+        """Restore the original side select view when confirmation times out."""
+        await self._restore_original_view(None)
+
+    async def _restore_original_view(self, interaction: Optional[discord.Interaction]):
+        """Restore the captain embed with side select buttons."""
         session = self.cog.active_sessions.get(self.session_id)
         if not session:
             session = await self.cog.get_session(self.session_id)
         if not session:
-            await interaction.response.edit_message(content="Session not found.", embed=None, view=None)
+            if interaction and not interaction.response.is_done():
+                await interaction.response.edit_message(content="Session not found.", embed=None, view=None)
+            return
+
+        # If the turn already moved on (timeout auto-selected), don't fight with update_all_embeds
+        if session.get("current_turn") != self.captain_id:
             return
 
         is_captain1 = self.captain_id == session["captain1_id"]
         embed = build_captain_embed(session, is_captain1=is_captain1)
         view = SideSelectView(self.session_id)
-        await interaction.response.edit_message(embed=embed, view=view)
+
+        if interaction and not interaction.response.is_done():
+            await interaction.response.edit_message(embed=embed, view=view)
+        elif self.message:
+            try:
+                await self.message.edit(embed=embed, view=view)
+            except Exception:
+                pass
 
 
 # =============================================================================
@@ -2582,9 +2674,11 @@ class MapBanCog(commands.Cog):
                     description=f"Start on **{side}** for **{current_map}**?",
                     color=COLOR_WARNING
                 )
+                confirm_view = ConfirmSideSelectView(self, session_id, captain_id, current_map, side)
+                confirm_view.message = interaction.message
                 await interaction.response.edit_message(
                     embed=embed,
-                    view=ConfirmSideSelectView(self, session_id, captain_id, current_map, side)
+                    view=confirm_view
                 )
             except Exception as e:
                 print(f"[MapBan] Side select error: {e}\n{traceback.format_exc()}")
@@ -2635,6 +2729,13 @@ class MapBanCog(commands.Cog):
                 phase = session.get("current_phase")
                 action_type = "protect" if phase == "agent_protect" else "ban"
                 available_agents = self.get_available_agents(session, captain_id, action_type)
+
+                if not available_agents:
+                    await interaction.response.send_message(
+                        f"No agents available to {action_type}. Waiting for the timer to auto-skip.",
+                        ephemeral=True
+                    )
+                    return
 
                 await interaction.response.send_message(
                     f"Select a role to {action_type} an agent:",
@@ -3366,6 +3467,20 @@ class MapBanCog(commands.Cog):
 
             # Verify it's this captain's turn
             if session["current_turn"] != captain_id:
+                return
+
+            # Verify action_type matches the current phase.
+            # A stale view (e.g. from a cog reload or race with update_all_embeds)
+            # could pass the wrong action_type captured when the view was created.
+            current_phase = session.get("current_phase")
+            if current_phase == "banning":
+                action_type = "ban"
+            elif current_phase == "picking":
+                action_type = "pick"
+            else:
+                # Phase is not banning or picking — should not be selecting maps
+                print(f"[MapBan] handle_map_selection: unexpected phase '{current_phase}' "
+                      f"for session {session_id}, ignoring")
                 return
 
             # Get captain name
@@ -4154,9 +4269,24 @@ class MapBanCog(commands.Cog):
                     except Exception:
                         pass
             else:
-                # No available agents — skip this action and notify
+                # No available agents — record a placeholder so _advance_agent_phase
+                # sees the count increase and doesn't reassign the same captain (infinite loop).
                 print(f"[MapBan] Timeout: no available agents for {action_type} on {current_map} "
                       f"(captain={current_turn}, session={session['session_id']})")
+
+                if action_type == "protect":
+                    agent_protects = json.loads(session.get("agent_protects", "{}")) if isinstance(session.get("agent_protects"), str) else session.get("agent_protects", {})
+                    if current_map not in agent_protects:
+                        agent_protects[current_map] = {}
+                    agent_protects[current_map][str(current_turn)] = "(skipped)"
+                    session["agent_protects"] = agent_protects
+                else:
+                    agent_bans = json.loads(session.get("agent_bans", "{}")) if isinstance(session.get("agent_bans"), str) else session.get("agent_bans", {})
+                    if current_map not in agent_bans:
+                        agent_bans[current_map] = {}
+                    agent_bans[current_map][str(current_turn)] = "(skipped)"
+                    session["agent_bans"] = agent_bans
+
                 thread_id = session["thread1_id"] if current_turn == session["captain1_id"] else session["thread2_id"]
                 thread = await self._get_thread(guild, thread_id)
                 if thread:

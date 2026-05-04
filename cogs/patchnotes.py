@@ -3,6 +3,7 @@ from discord.ext import commands, tasks
 from discord import app_commands
 import aiosqlite
 import logging
+import re
 
 # Updated import to match your new file name
 from utils.helper_fetcher import fetch_valorant_patch, fetch_steam_patch, fetch_overwatch_patch
@@ -137,7 +138,7 @@ class PatchnotesPanel(discord.ui.View):
         embed = discord.Embed(
             title=patch_data['title'],
             url=patch_data['url'],
-            description=patch_data['content'],
+            description=re.sub(r'(?m)^#{4,}\s?', '### ', patch_data['content']),
             color=GAMES[self.selected_game]['color']
         )
         if patch_data.get('image'):
@@ -190,7 +191,7 @@ class PatchnotesPanel(discord.ui.View):
         embed = discord.Embed(
             title=patch_data['title'],
             url=patch_data['url'],
-            description=patch_data['content'],
+            description=re.sub(r'(?m)^#{4,}\s?', '### ', patch_data['content']),
             color=GAMES[self.selected_game]['color']
         )
         if patch_data.get('image'):
@@ -233,6 +234,7 @@ class Patchnotes(commands.Cog):
     async def setup_db(self):
         """Creates the database table if it doesn't exist."""
         async with aiosqlite.connect("patchnotes.db") as db:
+            await db.execute("PRAGMA journal_mode=WAL")
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS configs (
                     server_id INTEGER,
@@ -273,63 +275,67 @@ class Patchnotes(commands.Cog):
 
             for config in configs:
                 game = config['game']
-                patch_data = None
-                
-                if game == "valorant":
-                    patch_data = await fetch_valorant_patch()
-                elif game == "overwatch_2":
-                    patch_data = await fetch_overwatch_patch()
-                elif "app_id" in GAMES[game]:
-                    patch_data = await fetch_steam_patch(GAMES[game]["app_id"])
+                try:
+                    patch_data = None
 
-                if patch_data and patch_data['id'] != config['last_patch_id']:
-                    channel = self.bot.get_channel(config['channel_id'])
-                    if not channel:
-                        continue 
-
-                    # Delete old message
-                    if config['last_message_id']:
-                        try:
-                            old_msg = await channel.fetch_message(config['last_message_id'])
-                            await old_msg.delete()
-                        except (discord.NotFound, discord.Forbidden):
-                            pass 
-
-                    # Build new Embed
-                    embed = discord.Embed(
-                        title=patch_data['title'],
-                        url=patch_data['url'],
-                        description=patch_data['content'],
-                        color=GAMES[game]['color']
-                    )
-                    if patch_data.get('image'):
-                        embed.set_image(url=patch_data['image'])
-                    elif "banner" in GAMES[game]:
-                        embed.set_image(url=GAMES[game]['banner'])
+                    if game == "valorant":
+                        patch_data = await fetch_valorant_patch()
+                    elif game == "overwatch_2":
+                        patch_data = await fetch_overwatch_patch()
                     elif "app_id" in GAMES[game]:
-                        embed.set_image(url=f"https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/{GAMES[game]['app_id']}/header.jpg")
-                    embed.set_footer(text=f"{GAMES[game]['name']} Updates")
+                        patch_data = await fetch_steam_patch(GAMES[game]["app_id"])
 
-                    # Send and Pin
-                    try:
-                        new_msg = await channel.send(embed=embed)
-                        await new_msg.pin(reason="New Patch Notes")
-                        
-                        async for msg in channel.history(limit=5):
-                            if msg.type == discord.MessageType.pins_add:
-                                await msg.delete()
-                                break
-                    except discord.Forbidden:
-                        logger.warning(f"Lacking permissions to send/pin in {channel.name}")
-                        continue
+                    if patch_data and patch_data['id'] != config['last_patch_id']:
+                        channel = self.bot.get_channel(config['channel_id'])
+                        if not channel:
+                            continue
 
-                    # Update Database
-                    await db.execute("""
-                        UPDATE configs 
-                        SET last_patch_id = ?, last_message_id = ? 
-                        WHERE server_id = ? AND game = ?
-                    """, (patch_data['id'], new_msg.id, config['server_id'], game))
-                    await db.commit()
+                        # Delete old message
+                        if config['last_message_id']:
+                            try:
+                                old_msg = await channel.fetch_message(config['last_message_id'])
+                                await old_msg.delete()
+                            except (discord.NotFound, discord.Forbidden):
+                                pass
+
+                        # Build new Embed
+                        embed = discord.Embed(
+                            title=patch_data['title'],
+                            url=patch_data['url'],
+                            description=re.sub(r'(?m)^#{4,}\s?', '### ', patch_data['content']),
+                            color=GAMES[game]['color']
+                        )
+                        if patch_data.get('image'):
+                            embed.set_image(url=patch_data['image'])
+                        elif "banner" in GAMES[game]:
+                            embed.set_image(url=GAMES[game]['banner'])
+                        elif "app_id" in GAMES[game]:
+                            embed.set_image(url=f"https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/{GAMES[game]['app_id']}/header.jpg")
+                        embed.set_footer(text=f"{GAMES[game]['name']} Updates")
+
+                        # Send and Pin
+                        try:
+                            new_msg = await channel.send(embed=embed)
+                            await new_msg.pin(reason="New Patch Notes")
+
+                            async for msg in channel.history(limit=5):
+                                if msg.type == discord.MessageType.pins_add:
+                                    await msg.delete()
+                                    break
+                        except discord.Forbidden:
+                            logger.warning(f"Lacking permissions to send/pin in {channel.name}")
+                            continue
+
+                        # Update Database
+                        await db.execute("""
+                            UPDATE configs
+                            SET last_patch_id = ?, last_message_id = ?
+                            WHERE server_id = ? AND game = ?
+                        """, (patch_data['id'], new_msg.id, config['server_id'], game))
+                        await db.commit()
+                except Exception as e:
+                    logger.error(f"Error checking patches for {game}: {e}")
+                    continue
 
     @patch_checker.before_loop
     async def before_patch_checker(self):

@@ -48,6 +48,7 @@ async def init_db():
     os.makedirs("data", exist_ok=True)
 
     async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
         # Guild settings - minimal now, just for global toggle and thread format
         await db.execute("""
             CREATE TABLE IF NOT EXISTS guild_settings (

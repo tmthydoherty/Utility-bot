@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
-import sqlite3
+import aiosqlite
 import datetime
 import pytz
 import os
@@ -23,58 +23,51 @@ ALLOWED_SETTINGS_KEYS = [
 ]
 
 # --- Database Setup and Helpers ---
-def db_init():
+async def db_init():
     """Initializes the database. This version is safe and will not fail on load."""
-    con = sqlite3.connect(DB_FILE)
-    cur = con.cursor()
-    cur.execute('''CREATE TABLE IF NOT EXISTS questions (id INTEGER PRIMARY KEY AUTOINCREMENT, question_text TEXT NOT NULL UNIQUE, added_by_id INTEGER, last_used_timestamp INTEGER DEFAULT 0, times_used INTEGER DEFAULT 0)''')
-    cur.execute('''CREATE TABLE IF NOT EXISTS guild_settings (guild_id INTEGER PRIMARY KEY, enabled BOOLEAN DEFAULT FALSE, source_channel_id INTEGER, source_bot_id INTEGER, post_channel_ids TEXT DEFAULT '[]', ping_role_id INTEGER, suggestion_log_channel_id INTEGER, post_time TEXT DEFAULT '10:00', timezone TEXT DEFAULT 'UTC', auto_thread BOOLEAN DEFAULT TRUE)''')
-    
-    # Add last_post_timestamp column for robust task looping
-    try:
-        cur.execute("ALTER TABLE guild_settings ADD COLUMN last_post_timestamp INTEGER DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass  # Column likely already exists
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute('''CREATE TABLE IF NOT EXISTS questions (id INTEGER PRIMARY KEY AUTOINCREMENT, question_text TEXT NOT NULL UNIQUE, added_by_id INTEGER, last_used_timestamp INTEGER DEFAULT 0, times_used INTEGER DEFAULT 0)''')
+        await db.execute('''CREATE TABLE IF NOT EXISTS guild_settings (guild_id INTEGER PRIMARY KEY, enabled BOOLEAN DEFAULT FALSE, source_channel_id INTEGER, source_bot_id INTEGER, post_channel_ids TEXT DEFAULT '[]', ping_role_id INTEGER, suggestion_log_channel_id INTEGER, post_time TEXT DEFAULT '10:00', timezone TEXT DEFAULT 'UTC', auto_thread BOOLEAN DEFAULT TRUE)''')
 
-    cur.execute('''CREATE TABLE IF NOT EXISTS suggestions (id INTEGER PRIMARY KEY AUTOINCREMENT, question_text TEXT NOT NULL, suggester_id INTEGER NOT NULL, guild_id INTEGER NOT NULL, status TEXT DEFAULT 'pending', review_message_id INTEGER)''')
-    con.commit()
-    con.close()
+        # Add last_post_timestamp column for robust task looping
+        try:
+            await db.execute("ALTER TABLE guild_settings ADD COLUMN last_post_timestamp INTEGER DEFAULT 0")
+        except Exception:
+            pass  # Column likely already exists
 
-def get_guild_settings(guild_id: int):
-    con = sqlite3.connect(DB_FILE)
-    con.row_factory = sqlite3.Row
-    cur = con.cursor()
-    cur.execute("SELECT * FROM guild_settings WHERE guild_id = ?", (guild_id,))
-    settings = cur.fetchone()
-    if not settings:
-        cur.execute("INSERT INTO guild_settings (guild_id) VALUES (?)", (guild_id,))
-        con.commit()
-        cur.execute("SELECT * FROM guild_settings WHERE guild_id = ?", (guild_id,))
-        settings = cur.fetchone()
-    con.close()
-    return dict(settings) if settings else None
+        await db.execute('''CREATE TABLE IF NOT EXISTS suggestions (id INTEGER PRIMARY KEY AUTOINCREMENT, question_text TEXT NOT NULL, suggester_id INTEGER NOT NULL, guild_id INTEGER NOT NULL, status TEXT DEFAULT 'pending', review_message_id INTEGER)''')
+        await db.commit()
 
-def update_guild_setting(guild_id: int, key: str, value):
+async def get_guild_settings(guild_id: int):
+    async with aiosqlite.connect(DB_FILE) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM guild_settings WHERE guild_id = ?", (guild_id,)) as cursor:
+            settings = await cursor.fetchone()
+        if not settings:
+            await db.execute("INSERT INTO guild_settings (guild_id) VALUES (?)", (guild_id,))
+            await db.commit()
+            async with db.execute("SELECT * FROM guild_settings WHERE guild_id = ?", (guild_id,)) as cursor:
+                settings = await cursor.fetchone()
+        return dict(settings) if settings else None
+
+async def update_guild_setting(guild_id: int, key: str, value):
     # CRITICAL: Validate key against a whitelist to prevent SQL injection
     if key not in ALLOWED_SETTINGS_KEYS:
         print(f"CRITICAL: Attempted to update invalid setting key: {key}")
         return
 
-    con = sqlite3.connect(DB_FILE)
-    cur = con.cursor()
-    cur.execute(f"UPDATE guild_settings SET {key} = ? WHERE guild_id = ?", (value, guild_id))
-    con.commit()
-    con.close()
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute(f"UPDATE guild_settings SET {key} = ? WHERE guild_id = ?", (value, guild_id))
+        await db.commit()
 
-def get_question_counts():
-    con = sqlite3.connect(DB_FILE)
-    cur = con.cursor()
-    cur.execute("SELECT COUNT(*) FROM questions")
-    total_count = cur.fetchone()[0]
-    cur.execute("SELECT COUNT(*) FROM questions WHERE last_used_timestamp = 0")
-    unseen_count = cur.fetchone()[0]
-    con.close()
-    return total_count, unseen_count
+async def get_question_counts():
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT COUNT(*) FROM questions") as cursor:
+            total_count = (await cursor.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM questions WHERE last_used_timestamp = 0") as cursor:
+            unseen_count = (await cursor.fetchone())[0]
+        return total_count, unseen_count
 
 # --- Modals for User Input ---
 
@@ -109,14 +102,14 @@ class AddQuestionModal(discord.ui.Modal, title="Add Questions in Bulk"):
                 return
             
             added, skipped = 0, 0
-            con = sqlite3.connect(DB_FILE); cur = con.cursor()
-            for q in questions_to_add:
-                try:
-                    cur.execute("INSERT INTO questions (question_text, added_by_id) VALUES (?, ?)", (q, interaction.user.id))
-                    added += 1
-                except sqlite3.IntegrityError:
-                    skipped += 1
-            con.commit(); con.close()
+            async with aiosqlite.connect(DB_FILE) as db:
+                for q in questions_to_add:
+                    try:
+                        await db.execute("INSERT INTO questions (question_text, added_by_id) VALUES (?, ?)", (q, interaction.user.id))
+                        added += 1
+                    except Exception:
+                        skipped += 1
+                await db.commit()
 
             summary = f"✅ Added **{added}** questions."
             if skipped > 0: summary += f"\nℹ️ Skipped **{skipped}** duplicates."
@@ -146,10 +139,10 @@ class PingRoleModal(discord.ui.Modal, title="Set Ping Role"):
             await interaction.response.defer(ephemeral=True, thinking=True)
             value = self.role_id.value.strip()
             if not value:
-                update_guild_setting(interaction.guild.id, 'ping_role_id', None)
+                await update_guild_setting(interaction.guild.id, 'ping_role_id', None)
                 await interaction.followup.send("✅ Ping role has been removed.", ephemeral=True)
             elif value.isdigit():
-                update_guild_setting(interaction.guild.id, 'ping_role_id', int(value))
+                await update_guild_setting(interaction.guild.id, 'ping_role_id', int(value))
                 await interaction.followup.send(f"✅ Ping role ID set to `{value}`.", ephemeral=True)
             else:
                 await interaction.followup.send("❌ That is not a valid ID. Please provide a numerical role ID.", ephemeral=True)
@@ -167,10 +160,10 @@ class SuggestionChannelModal(discord.ui.Modal, title="Set Suggestion Log Channel
             await interaction.response.defer(ephemeral=True, thinking=True)
             value = self.channel_id.value.strip()
             if not value:
-                update_guild_setting(interaction.guild.id, 'suggestion_log_channel_id', None)
+                await update_guild_setting(interaction.guild.id, 'suggestion_log_channel_id', None)
                 await interaction.followup.send("✅ Suggestion log channel has been removed.", ephemeral=True)
             elif value.isdigit():
-                update_guild_setting(interaction.guild.id, 'suggestion_log_channel_id', int(value))
+                await update_guild_setting(interaction.guild.id, 'suggestion_log_channel_id', int(value))
                 await interaction.followup.send(f"✅ Suggestion log channel ID set to `{value}`.", ephemeral=True)
             else:
                 await interaction.followup.send("❌ That is not a valid ID. Please provide a numerical channel ID.", ephemeral=True)
@@ -187,7 +180,7 @@ class PostTimeModal(discord.ui.Modal, title="Set Post Time"):
         try:
             await interaction.response.defer(ephemeral=True, thinking=True)
             datetime.datetime.strptime(self.post_time.value, '%H:%M')
-            update_guild_setting(interaction.guild.id, 'post_time', self.post_time.value)
+            await update_guild_setting(interaction.guild.id, 'post_time', self.post_time.value)
             await interaction.followup.send(f"✅ Post time set to `{self.post_time.value}`.", ephemeral=True)
         except ValueError:
             await interaction.followup.send("❌ Invalid time format. Please use HH:MM.", ephemeral=True)
@@ -204,7 +197,7 @@ class TimezoneModal(discord.ui.Modal, title="Set Timezone"):
         try:
             await interaction.response.defer(ephemeral=True, thinking=True)
             if self.timezone.value in pytz.all_timezones:
-                update_guild_setting(interaction.guild.id, 'timezone', self.timezone.value)
+                await update_guild_setting(interaction.guild.id, 'timezone', self.timezone.value)
                 await interaction.followup.send(f"✅ Timezone set to `{self.timezone.value}`.", ephemeral=True)
             else:
                 await interaction.followup.send("❌ Invalid timezone. A list can be found online.", ephemeral=True)
@@ -294,8 +287,11 @@ class DeleteQuestionView(discord.ui.View):
     async def confirm_delete_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if self.selected_question_id is None: await interaction.response.send_message("You must select a question first.", ephemeral=True); return
         
-        con = sqlite3.connect(DB_FILE); cur = con.cursor(); cur.execute("DELETE FROM questions WHERE id = ?", (self.selected_question_id,)); con.commit()
-        cur.execute("SELECT id, question_text FROM questions ORDER BY id"); self.questions = cur.fetchall(); con.close()
+        async with aiosqlite.connect(DB_FILE) as db:
+            await db.execute("DELETE FROM questions WHERE id = ?", (self.selected_question_id,))
+            await db.commit()
+            async with db.execute("SELECT id, question_text FROM questions ORDER BY id") as cursor:
+                self.questions = await cursor.fetchall()
         
         await interaction.response.send_message(f"✅ Question ID `{self.selected_question_id}` deleted.", ephemeral=True)
         self.selected_question_id = None; self.recalculate_pages(); await self.cog.update_admin_panel(self.panel_message)
@@ -317,7 +313,7 @@ class PersistentSuggestView(discord.ui.View):
             return
         
         try:
-            question_text = modal.question.value; settings = get_guild_settings(interaction.guild.id); log_channel_id = settings.get('suggestion_log_channel_id')
+            question_text = modal.question.value; settings = await get_guild_settings(interaction.guild.id); log_channel_id = settings.get('suggestion_log_channel_id')
             if not log_channel_id:
                 await interaction.followup.send("Your suggestion was received, but the server admin has not set up a suggestion log channel.", ephemeral=True)
                 return
@@ -327,17 +323,19 @@ class PersistentSuggestView(discord.ui.View):
                 await interaction.followup.send("Your suggestion was received, but the suggestion log channel could not be found.", ephemeral=True)
                 return
             
-            con = sqlite3.connect(DB_FILE); cur = con.cursor()
-            cur.execute("INSERT INTO suggestions (question_text, suggester_id, guild_id) VALUES (?, ?, ?)",(question_text, interaction.user.id, interaction.guild.id))
-            suggestion_id = cur.lastrowid; con.commit()
-            
-            embed = discord.Embed(title="New Question Suggestion", description=f"**\"{question_text}\"**", color=discord.Color.gold())
-            embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.avatar.url if interaction.user.avatar else None)
-            embed.add_field(name="Status", value="⏳ Pending Review", inline=False); embed.set_footer(text=f"Suggestion ID: {suggestion_id}")
-            
-            review_message = await log_channel.send(embed=embed, view=SuggestionReviewView(suggestion_id))
-            
-            cur.execute("UPDATE suggestions SET review_message_id = ? WHERE id = ?", (review_message.id, suggestion_id)); con.commit(); con.close()
+            async with aiosqlite.connect(DB_FILE) as db:
+                async with db.execute("INSERT INTO suggestions (question_text, suggester_id, guild_id) VALUES (?, ?, ?)",(question_text, interaction.user.id, interaction.guild.id)) as cursor:
+                    suggestion_id = cursor.lastrowid
+                await db.commit()
+
+                embed = discord.Embed(title="New Question Suggestion", description=f"**\"{question_text}\"**", color=discord.Color.gold())
+                embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.avatar.url if interaction.user.avatar else None)
+                embed.add_field(name="Status", value="⏳ Pending Review", inline=False); embed.set_footer(text=f"Suggestion ID: {suggestion_id}")
+
+                review_message = await log_channel.send(embed=embed, view=SuggestionReviewView(suggestion_id))
+
+                await db.execute("UPDATE suggestions SET review_message_id = ? WHERE id = ?", (review_message.id, suggestion_id))
+                await db.commit()
             
             await interaction.followup.send("✅ Your suggestion has been submitted for review!", ephemeral=True)
         
@@ -358,32 +356,33 @@ class SuggestionReviewView(discord.ui.View):
         self.deny_button.custom_id = f"qotd_deny_{suggestion_id}"; self.deny_w_reason_button.custom_id = f"qotd_deny_reason_{suggestion_id}"
     
     async def _handle_decision(self, interaction: discord.Interaction, decision: str, reason: Optional[str] = None):
-        con = sqlite3.connect(DB_FILE); con.row_factory = sqlite3.Row; cur = con.cursor()
-        cur.execute("SELECT * FROM suggestions WHERE id = ?", (self.suggestion_id,)); suggestion = cur.fetchone()
-        
-        if not suggestion:
-            await interaction.response.send_message("This suggestion no longer exists.", ephemeral=True); return
-        if suggestion['status'] != 'pending':
-            await interaction.response.send_message("This suggestion has already been reviewed.", ephemeral=True); return
-        
-        original_embed = interaction.message.embeds[0]
-        suggester = None # Fetched later
+        async with aiosqlite.connect(DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM suggestions WHERE id = ?", (self.suggestion_id,)) as cursor:
+                suggestion = await cursor.fetchone()
 
-        if decision == "approve":
-            try:
-                cur.execute("INSERT INTO questions (question_text, added_by_id) VALUES (?, ?)", (suggestion['question_text'], suggestion['suggester_id']))
-                status_text, new_color = "✅ Approved", discord.Color.green(); dm_message = f"🎉 Your QOTD suggestion was approved in **{interaction.guild.name}**!\n\n> {suggestion['question_text']}"
-            except sqlite3.IntegrityError: await interaction.response.send_message("This question already exists in the pool.", ephemeral=True); con.close(); return
-        else: status_text, new_color = "❌ Denied", discord.Color.red(); dm_message = f"Your QOTD suggestion in **{interaction.guild.name}** was not approved.\n\n> {suggestion['question_text']}"
-        
-        # Atomic update to prevent race conditions
-        cur.execute("UPDATE suggestions SET status = ? WHERE id = ? AND status = 'pending'", (decision, self.suggestion_id))
-        if cur.rowcount == 0:
-            await interaction.response.send_message("This suggestion was *just* reviewed by someone else.", ephemeral=True)
-            con.close()
-            return
-        
-        con.commit(); con.close()
+            if not suggestion:
+                await interaction.response.send_message("This suggestion no longer exists.", ephemeral=True); return
+            if suggestion['status'] != 'pending':
+                await interaction.response.send_message("This suggestion has already been reviewed.", ephemeral=True); return
+
+            original_embed = interaction.message.embeds[0]
+            suggester = None # Fetched later
+
+            if decision == "approve":
+                try:
+                    await db.execute("INSERT INTO questions (question_text, added_by_id) VALUES (?, ?)", (suggestion['question_text'], suggestion['suggester_id']))
+                    status_text, new_color = "✅ Approved", discord.Color.green(); dm_message = f"🎉 Your QOTD suggestion was approved in **{interaction.guild.name}**!\n\n> {suggestion['question_text']}"
+                except Exception: await interaction.response.send_message("This question already exists in the pool.", ephemeral=True); return
+            else: status_text, new_color = "❌ Denied", discord.Color.red(); dm_message = f"Your QOTD suggestion in **{interaction.guild.name}** was not approved.\n\n> {suggestion['question_text']}"
+
+            # Atomic update to prevent race conditions
+            cursor = await db.execute("UPDATE suggestions SET status = ? WHERE id = ? AND status = 'pending'", (decision, self.suggestion_id))
+            if cursor.rowcount == 0:
+                await interaction.response.send_message("This suggestion was *just* reviewed by someone else.", ephemeral=True)
+                return
+
+            await db.commit()
         
         original_embed.color = new_color; original_embed.set_field_at(0, name="Status", value=f"{status_text} by {interaction.user.mention}", inline=False)
         await interaction.message.edit(embed=original_embed, view=None)
@@ -421,7 +420,8 @@ class ResetConfirmView(discord.ui.View):
     
     @discord.ui.button(label="Confirm Reset", style=discord.ButtonStyle.danger)
     async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        con = sqlite3.connect(DB_FILE); cur = con.cursor(); cur.execute("UPDATE questions SET last_used_timestamp = 0"); con.commit(); con.close()
+        async with aiosqlite.connect(DB_FILE) as db:
+            await db.execute("UPDATE questions SET last_used_timestamp = 0"); await db.commit()
         for item in self.children: item.disabled = True
         await interaction.response.edit_message(content="✅ The entire question pool has been reset.", view=self)
         await self.cog.update_admin_panel(self.panel_message)
@@ -436,10 +436,10 @@ class ClearSeenConfirmView(discord.ui.View):
     
     @discord.ui.button(label="Confirm Clear Seen", style=discord.ButtonStyle.danger)
     async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        con = sqlite3.connect(DB_FILE); cur = con.cursor()
-        cur.execute("DELETE FROM questions WHERE last_used_timestamp > 0")
-        deleted_count = cur.rowcount # Get how many rows were deleted
-        con.commit(); con.close()
+        async with aiosqlite.connect(DB_FILE) as db:
+            cursor = await db.execute("DELETE FROM questions WHERE last_used_timestamp > 0")
+            deleted_count = cursor.rowcount
+            await db.commit()
         for item in self.children: item.disabled = True
         await interaction.response.edit_message(content=f"✅ Cleared **{deleted_count}** previously seen questions.", view=self)
         await self.cog.update_admin_panel(self.panel_message)
@@ -477,8 +477,8 @@ class ManagePostChannelsView(discord.ui.View):
         back_button.callback = self.go_back_callback
         self.add_item(back_button)
 
-    def create_embed(self, guild: discord.Guild) -> discord.Embed:
-        settings = get_guild_settings(guild.id)
+    async def create_embed(self, guild: discord.Guild) -> discord.Embed:
+        settings = await get_guild_settings(guild.id)
         
         try:
             post_channel_ids = json.loads(settings.get('post_channel_ids', '[]'))
@@ -496,7 +496,7 @@ class ManagePostChannelsView(discord.ui.View):
 
     async def add_channel_callback(self, interaction: discord.Interaction):
         selected_channels = self.add_channel_select.values
-        settings = get_guild_settings(interaction.guild.id)
+        settings = await get_guild_settings(interaction.guild.id)
         
         try:
             p_ids = json.loads(settings.get('post_channel_ids', '[]'))
@@ -513,13 +513,13 @@ class ManagePostChannelsView(discord.ui.View):
             if ch.id not in p_ids:
                 p_ids.append(ch.id)
 
-        update_guild_setting(interaction.guild.id, 'post_channel_ids', json.dumps(p_ids))
+        await update_guild_setting(interaction.guild.id, 'post_channel_ids', json.dumps(p_ids))
         await interaction.response.send_message(f"✅ Added: {', '.join(added_channels)}", ephemeral=True)
-        await interaction.message.edit(embed=self.create_embed(interaction.guild))
+        await interaction.message.edit(embed=await self.create_embed(interaction.guild))
 
     async def remove_channel_callback(self, interaction: discord.Interaction):
         selected_channels = self.remove_channel_select.values
-        settings = get_guild_settings(interaction.guild.id)
+        settings = await get_guild_settings(interaction.guild.id)
         
         try:
             p_ids = json.loads(settings.get('post_channel_ids', '[]'))
@@ -534,9 +534,9 @@ class ManagePostChannelsView(discord.ui.View):
 
         p_ids = [pid for pid in p_ids if pid not in [ch.id for ch in selected_channels]]
 
-        update_guild_setting(interaction.guild.id, 'post_channel_ids', json.dumps(p_ids))
+        await update_guild_setting(interaction.guild.id, 'post_channel_ids', json.dumps(p_ids))
         await interaction.response.send_message(f"✅ Removed: {', '.join(removed_channels)}", ephemeral=True)
-        await interaction.message.edit(embed=self.create_embed(interaction.guild))
+        await interaction.message.edit(embed=await self.create_embed(interaction.guild))
 
 class SetupView(discord.ui.View):
     # This view is ephemeral, timeout=None removed
@@ -546,32 +546,32 @@ class SetupView(discord.ui.View):
 
     @discord.ui.button(label="Set Ping Role", style=discord.ButtonStyle.primary, row=0)
     async def set_ping_role(self, interaction: discord.Interaction, button: discord.ui.Button):
-        settings = get_guild_settings(interaction.guild.id)
+        settings = await get_guild_settings(interaction.guild.id)
         modal = PingRoleModal(settings.get('ping_role_id'))
         await interaction.response.send_modal(modal)
 
     @discord.ui.button(label="Set Suggestion Channel", style=discord.ButtonStyle.primary, row=0)
     async def set_suggestion_channel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        settings = get_guild_settings(interaction.guild.id)
+        settings = await get_guild_settings(interaction.guild.id)
         modal = SuggestionChannelModal(settings.get('suggestion_log_channel_id'))
         await interaction.response.send_modal(modal)
     
     @discord.ui.button(label="Set Post Time", style=discord.ButtonStyle.secondary, row=1)
     async def set_post_time(self, interaction: discord.Interaction, button: discord.ui.Button):
-        settings = get_guild_settings(interaction.guild.id)
+        settings = await get_guild_settings(interaction.guild.id)
         modal = PostTimeModal(settings.get('post_time', '10:00'))
         await interaction.response.send_modal(modal)
 
     @discord.ui.button(label="Set Timezone", style=discord.ButtonStyle.secondary, row=1)
     async def set_timezone(self, interaction: discord.Interaction, button: discord.ui.Button):
-        settings = get_guild_settings(interaction.guild.id)
+        settings = await get_guild_settings(interaction.guild.id)
         modal = TimezoneModal(settings.get('timezone', 'UTC'))
         await interaction.response.send_modal(modal)
 
     @discord.ui.button(label="Manage Post Channels", style=discord.ButtonStyle.success, row=2)
     async def manage_post_channels(self, interaction: discord.Interaction, button: discord.ui.Button):
         view = ManagePostChannelsView(self.cog)
-        embed = view.create_embed(interaction.guild)
+        embed = await view.create_embed(interaction.guild)
         await interaction.response.edit_message(embed=embed, view=view)
 
 # --- Admin Panel View ---
@@ -590,18 +590,20 @@ class AdminPanelView(discord.ui.View):
     @discord.ui.button(label="Enable System", style=discord.ButtonStyle.success, row=0)
     async def toggle_system_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(thinking=True)
-        update_guild_setting(interaction.guild.id, 'enabled', not get_guild_settings(interaction.guild.id)['enabled'])
+        await update_guild_setting(interaction.guild.id, 'enabled', not (await get_guild_settings(interaction.guild.id))['enabled'])
         await self.cog.update_admin_panel(interaction.message)
 
     @discord.ui.button(label="Auto-Threading: ON", style=discord.ButtonStyle.success, row=0)
     async def toggle_autothread_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(thinking=True)
-        update_guild_setting(interaction.guild.id, 'auto_thread', not get_guild_settings(interaction.guild.id)['auto_thread'])
+        await update_guild_setting(interaction.guild.id, 'auto_thread', not (await get_guild_settings(interaction.guild.id))['auto_thread'])
         await self.cog.update_admin_panel(interaction.message)
 
     @discord.ui.button(label="View Questions", style=discord.ButtonStyle.primary, row=1)
     async def view_pool_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        con = sqlite3.connect(DB_FILE); cur = con.cursor(); cur.execute("SELECT id, question_text FROM questions ORDER BY id"); questions = cur.fetchall(); con.close()
+        async with aiosqlite.connect(DB_FILE) as db:
+            async with db.execute("SELECT id, question_text FROM questions ORDER BY id") as cursor:
+                questions = await cursor.fetchall()
         if not questions: await interaction.response.send_message("The question pool is empty.", ephemeral=True); return
         view = QuestionPagesView(questions); embed = view.create_page_embed(); await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
@@ -611,7 +613,9 @@ class AdminPanelView(discord.ui.View):
 
     @discord.ui.button(label="Delete Question", style=discord.ButtonStyle.danger, row=1)
     async def delete_question_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        con = sqlite3.connect(DB_FILE); cur = con.cursor(); cur.execute("SELECT id, question_text FROM questions ORDER BY id"); questions = cur.fetchall(); con.close()
+        async with aiosqlite.connect(DB_FILE) as db:
+            async with db.execute("SELECT id, question_text FROM questions ORDER BY id") as cursor:
+                questions = await cursor.fetchall()
         if not questions: await interaction.response.send_message("The question pool is empty.", ephemeral=True); return
         view = DeleteQuestionView(questions, self.cog, interaction.message); embed = view.create_page_embed(); await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
@@ -654,15 +658,16 @@ class AdminPanelView(discord.ui.View):
 class QOTDCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        # self.last_posted_time = {} # Replaced with DB storage
-        db_init()
-        self.qotd_task.start()
 
     async def cog_load(self):
+        await db_init()
         self.bot.add_view(PersistentSuggestView())
-        con = sqlite3.connect(DB_FILE); cur = con.cursor(); cur.execute("SELECT id FROM suggestions WHERE status = 'pending'"); pending_suggestions = cur.fetchall(); con.close()
+        async with aiosqlite.connect(DB_FILE) as db:
+            async with db.execute("SELECT id FROM suggestions WHERE status = 'pending'") as cursor:
+                pending_suggestions = await cursor.fetchall()
         for (suggestion_id,) in pending_suggestions: self.bot.add_view(SuggestionReviewView(suggestion_id))
         print(f"Registered {len(pending_suggestions)} pending suggestion views.")
+        self.qotd_task.start()
     
     def cog_unload(self): self.qotd_task.cancel()
 
@@ -676,8 +681,8 @@ class QOTDCog(commands.Cog):
     async def update_admin_panel(self, message: discord.Message):
         try:
             if not message.guild: return
-            settings = get_guild_settings(message.guild.id)
-            embed = self.create_admin_embed(message.guild, settings)
+            settings = await get_guild_settings(message.guild.id)
+            embed = await self.create_admin_embed(message.guild, settings)
             view = AdminPanelView(self)
             view.update_toggle_buttons(settings) # Pass settings directly
             await message.edit(embed=embed, view=view)
@@ -687,7 +692,10 @@ class QOTDCog(commands.Cog):
     @tasks.loop(minutes=1)
     async def qotd_task(self):
         await self.bot.wait_until_ready()
-        con = sqlite3.connect(DB_FILE); con.row_factory = sqlite3.Row; cur = con.cursor(); cur.execute("SELECT * FROM guild_settings WHERE enabled = TRUE"); enabled_guilds = cur.fetchall()
+        async with aiosqlite.connect(DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM guild_settings WHERE enabled = TRUE") as cursor:
+                enabled_guilds = await cursor.fetchall()
 
         for settings_row in enabled_guilds:
             settings = dict(settings_row); guild_id = settings['guild_id']
@@ -717,19 +725,15 @@ class QOTDCog(commands.Cog):
                     if missed_todays_post:
                         print(f"Guild {guild_id}: Posting missed QOTD (scheduled for {post_hour}:{post_minute:02d}, now is {now_in_tz.hour}:{now_in_tz.minute:02d})")
 
-                    # Pass the DB connection to post_qotd to run in a transaction
-                    await self.post_qotd(guild_id, db_connection=con)
+                    await self.post_qotd(guild_id)
 
             except Exception as e: print(f"Error in QOTD task for guild {guild_id}: {e}")
-
-        con.commit() # Commit all changes from the loop at once
-        con.close()
 
     @qotd_task.before_loop
     async def before_qotd_task(self): await self.bot.wait_until_ready()
 
-    async def post_qotd(self, guild_id: int, is_test: bool = False, interaction: Optional[discord.Interaction] = None, db_connection: Optional[sqlite3.Connection] = None):
-        settings = get_guild_settings(guild_id)
+    async def post_qotd(self, guild_id: int, is_test: bool = False, interaction: Optional[discord.Interaction] = None):
+        settings = await get_guild_settings(guild_id)
         if not settings.get('enabled') and not is_test:
             if interaction: await interaction.followup.send("❌ The QOTD system is disabled.", ephemeral=True)
             return
@@ -743,93 +747,78 @@ class QOTDCog(commands.Cog):
             if interaction: await interaction.followup.send(f"❌ Error: No post channels set. Use the `/qotd setup` command.", ephemeral=True)
             return
         
-        # --- DB Connection Handling ---
-        local_con = False
-        if db_connection is None:
-            con = sqlite3.connect(DB_FILE)
-            local_con = True
-        else:
-            con = db_connection
-        cur = con.cursor()
-        # ---
-        
-        # Select an unseen question
-        cur.execute("SELECT id, question_text, added_by_id FROM questions WHERE last_used_timestamp = 0 ORDER BY RANDOM() LIMIT 1");
-        question_data = cur.fetchone()
-        
-        if not question_data:
-            if interaction: await interaction.followup.send(f"❌ Error: I've run out of unseen questions! Use 'Reset Pool' in the admin panel.", ephemeral=True)
-            else:
-                try:
-                    first_channel_id = post_channel_ids[0]
-                    first_channel = self.bot.get_channel(first_channel_id)
-                    if first_channel: await first_channel.send("I've run out of questions! An admin can use the 'Reset Pool' button to make them available again.")
-                except (IndexError, AttributeError):
-                     pass # Fails silently if no channels are set or found
-            if local_con: con.close(); 
-            return
-        
-        question_id, question_text, added_by_id = question_data
-        
-        embed = discord.Embed(title="❓ Question of the Day ❓", description=f"## {question_text}", color=discord.Color.blue())
-        total_questions, unseen_count = get_question_counts()
-        footer_text = f"{unseen_count - 1 if not is_test and unseen_count > 0 else unseen_count} questions remaining."
-        
-        suggester = None
-        if added_by_id and added_by_id > 1: # 0 or 1 might be system/default IDs
-            try: 
-                suggester = await self.bot.fetch_user(added_by_id)
-            except (discord.NotFound, discord.HTTPException): 
-                pass # User not found
-        if suggester: footer_text = f"Suggested by: {suggester.display_name} • {footer_text}"
-        embed.set_footer(text=footer_text)
-        
-        content = ""; ping_role_id = settings.get('ping_role_id'); role = None
-        if ping_role_id and not is_test:
-            guild = self.bot.get_guild(guild_id)
-            if guild: role = guild.get_role(ping_role_id)
-        if role and role.mentionable: # Added permission check
-            content = role.mention
-            
-        posted_successfully = False
-        for channel_id in post_channel_ids:
-            post_channel = self.bot.get_channel(channel_id)
-            if not post_channel: continue
-            try:
-                if is_test and interaction: 
-                    await interaction.followup.send(f"This is a test post for {post_channel.mention}.", embed=embed, ephemeral=True)
+        async with aiosqlite.connect(DB_FILE) as db:
+            # Select an unseen question
+            async with db.execute("SELECT id, question_text, added_by_id FROM questions WHERE last_used_timestamp = 0 ORDER BY RANDOM() LIMIT 1") as cursor:
+                question_data = await cursor.fetchone()
+
+            if not question_data:
+                if interaction: await interaction.followup.send(f"❌ Error: I've run out of unseen questions! Use 'Reset Pool' in the admin panel.", ephemeral=True)
                 else:
-                    message = await post_channel.send(content=content, embed=embed, view=PersistentSuggestView())
-                    # Added thread creation checks
-                    if settings.get('auto_thread') and isinstance(post_channel, (discord.TextChannel, discord.VoiceChannel, discord.ForumChannel)):
-                        try:
-                            await message.create_thread(name=f"Discussion for QOTD - {datetime.datetime.now().strftime('%Y-%m-%d')}")
-                        except (discord.Forbidden, discord.HTTPException) as e:
-                            print(f"Failed to create thread in {post_channel.name}: {e}")
-                posted_successfully = True
-            except discord.Forbidden:
-                if interaction: await interaction.followup.send(f"❌ Error: I don't have permission to post in {post_channel.mention}.", ephemeral=True)
-            except Exception as e:
-                if interaction: await interaction.followup.send(f"❌ An unknown error occurred: {e}", ephemeral=True)
-        
-        if posted_successfully and not is_test:
-            # Delete question and update last post time
-            cur.execute("DELETE FROM questions WHERE id = ?", (question_id,))
-            cur.execute("UPDATE guild_settings SET last_post_timestamp = ? WHERE guild_id = ?", (int(datetime.datetime.now().timestamp()), guild_id))
-            
-            if local_con: con.commit() # Commit if we own the connection
-            
-            if interaction and interaction.message:
-                await interaction.followup.send("✅ Manually posted the Question of the Day.", ephemeral=True); 
-                await self.update_admin_panel(interaction.message)
-        elif interaction and not posted_successfully:
-             await interaction.followup.send("❌ Failed to post. Check bot permissions for the configured channels.", ephemeral=True)
-        
-        if local_con: con.close() # Close if we own the connection
+                    try:
+                        first_channel_id = post_channel_ids[0]
+                        first_channel = self.bot.get_channel(first_channel_id)
+                        if first_channel: await first_channel.send("I've run out of questions! An admin can use the 'Reset Pool' button to make them available again.")
+                    except (IndexError, AttributeError):
+                         pass
+                return
+
+            question_id, question_text, added_by_id = question_data
+
+            embed = discord.Embed(title="❓ Question of the Day ❓", description=f"## {question_text}", color=discord.Color.blue())
+            total_questions, unseen_count = await get_question_counts()
+            footer_text = f"{unseen_count - 1 if not is_test and unseen_count > 0 else unseen_count} questions remaining."
+
+            suggester = None
+            if added_by_id and added_by_id > 1:
+                try:
+                    suggester = await self.bot.fetch_user(added_by_id)
+                except (discord.NotFound, discord.HTTPException):
+                    pass
+            if suggester: footer_text = f"Suggested by: {suggester.display_name} • {footer_text}"
+            embed.set_footer(text=footer_text)
+
+            content = ""; ping_role_id = settings.get('ping_role_id'); role = None
+            if ping_role_id and not is_test:
+                guild = self.bot.get_guild(guild_id)
+                if guild: role = guild.get_role(ping_role_id)
+            if role and role.mentionable:
+                content = role.mention
+
+            posted_successfully = False
+            for channel_id in post_channel_ids:
+                post_channel = self.bot.get_channel(channel_id)
+                if not post_channel: continue
+                try:
+                    if is_test and interaction:
+                        await interaction.followup.send(f"This is a test post for {post_channel.mention}.", embed=embed, ephemeral=True)
+                    else:
+                        message = await post_channel.send(content=content, embed=embed, view=PersistentSuggestView())
+                        if settings.get('auto_thread') and isinstance(post_channel, (discord.TextChannel, discord.VoiceChannel, discord.ForumChannel)):
+                            try:
+                                await message.create_thread(name=f"Discussion for QOTD - {datetime.datetime.now().strftime('%Y-%m-%d')}")
+                            except (discord.Forbidden, discord.HTTPException) as e:
+                                print(f"Failed to create thread in {post_channel.name}: {e}")
+                    posted_successfully = True
+                except discord.Forbidden:
+                    if interaction: await interaction.followup.send(f"❌ Error: I don't have permission to post in {post_channel.mention}.", ephemeral=True)
+                except Exception as e:
+                    if interaction: await interaction.followup.send(f"❌ An unknown error occurred: {e}", ephemeral=True)
+
+            if posted_successfully and not is_test:
+                await db.execute("DELETE FROM questions WHERE id = ?", (question_id,))
+                await db.execute("UPDATE guild_settings SET last_post_timestamp = ? WHERE guild_id = ?", (int(datetime.datetime.now().timestamp()), guild_id))
+                await db.commit()
+
+                if interaction and interaction.message:
+                    await interaction.followup.send("✅ Manually posted the Question of the Day.", ephemeral=True)
+                    await self.update_admin_panel(interaction.message)
+            elif interaction and not posted_successfully:
+                 await interaction.followup.send("❌ Failed to post. Check bot permissions for the configured channels.", ephemeral=True)
 
     qotd_group = app_commands.Group(name="qotd", description="Commands for the Question of the Day feature.")
 
-    def create_admin_embed(self, guild: discord.Guild, settings: dict):
+    async def create_admin_embed(self, guild: discord.Guild, settings: dict):
         def get_name(obj_id, type):
             if not obj_id: return "`Not Set`"
             if type == 'bot': return f"<@{obj_id}>"
@@ -846,7 +835,7 @@ class QOTDCog(commands.Cog):
         post_channel_display = ", ".join(channel_mentions) if channel_mentions else "`Not Set`"
         
         embed = discord.Embed(title="QOTD Admin Panel", color=discord.Color.dark_purple()); embed.set_author(name=guild.name, icon_url=guild.icon.url if guild.icon else None)
-        status = "✅ Enabled" if settings.get('enabled') else "❌ Disabled"; total_questions, unseen_questions = get_question_counts()
+        status = "✅ Enabled" if settings.get('enabled') else "❌ Disabled"; total_questions, unseen_questions = await get_question_counts()
         embed.description = (f"**System Status:** {status}\nUse the `/qotd setup` command to configure the bot.\n"
                              "This panel is for managing the question pool.")
         embed.add_field(name="📣 Post Channels", value=post_channel_display, inline=False)
@@ -863,7 +852,7 @@ class QOTDCog(commands.Cog):
     @qotd_group.command(name="admin_panel", description="Access the main admin panel for QOTD settings.")
     @app_commands.default_permissions(manage_guild=True)
     async def admin_panel(self, interaction: discord.Interaction):
-        settings = get_guild_settings(interaction.guild.id); embed = self.create_admin_embed(interaction.guild, settings)
+        settings = await get_guild_settings(interaction.guild.id); embed = await self.create_admin_embed(interaction.guild, settings)
         view = AdminPanelView(self)
         view.update_toggle_buttons(settings) # Pass settings directly
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)

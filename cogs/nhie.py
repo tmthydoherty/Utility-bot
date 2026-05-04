@@ -136,6 +136,7 @@ class SuggestionModal(discord.ui.Modal, title='Suggest a Question'):
         pending_data[suggestion_id] = {
             "suggester_id": interaction.user.id,
             "question_text": self.question.value,
+            "q_type": "nhie",
             "guild_id": guild_id,
             "timestamp": datetime.now().timestamp() # (Fix #6)
         }
@@ -152,10 +153,7 @@ class SuggestionModal(discord.ui.Modal, title='Suggest a Question'):
         embed.set_footer(text=f"Suggested by: {interaction.user} (ID: {interaction.user.id})")
 
         # Add approval buttons (now referencing the suggestion_id)
-        view = SuggestionApprovalView(
-            cog=self.cog,
-            suggestion_id=suggestion_id
-        )
+        view = SuggestionApprovalView(suggestion_id=suggestion_id)
         
         try:
             await log_channel.send(embed=embed, view=view)
@@ -171,18 +169,122 @@ class SuggestionModal(discord.ui.Modal, title='Suggest a Question'):
         except Exception as e:
             await interaction.response.send_message(f"An error occurred: {e}", ephemeral=True)
 
-class AddQuestionsModal(discord.ui.Modal, title='Add NHIE Questions'):
-    """Modal for admins to bulk-add questions."""
-    questions = discord.ui.TextInput(
-        label='Questions (one per line)',
-        style=discord.TextStyle.paragraph,
-        placeholder='...eaten a whole pizza.\n...been to another continent.\n...pulled an all-nighter.',
-        required=True
+class SuggestionTypeView(discord.ui.View):
+    def __init__(self, cog):
+        super().__init__()
+        self.cog = cog
+
+    @discord.ui.button(label='Never Have I Ever', style=discord.ButtonStyle.primary)
+    async def nhie_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(SuggestionModal(self.cog))
+
+    @discord.ui.button(label='Would You Rather', style=discord.ButtonStyle.primary)
+    async def wyr_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(WYRSuggestionModal(self.cog))
+
+class WYRSuggestionModal(discord.ui.Modal, title='Would you rather...'):
+    """Modal for a user to suggest a new WYR question."""
+    option1 = discord.ui.TextInput(
+        label="Option 1",
+        style=discord.TextStyle.short,
+        placeholder="Have hands as feet",
+        required=True,
+        max_length=120
+    )
+    option2 = discord.ui.TextInput(
+        label="Option 2",
+        style=discord.TextStyle.short,
+        placeholder="Have feet as hands",
+        required=True,
+        max_length=120
     )
 
     def __init__(self, cog: 'NeverHaveIEver'):
         super().__init__()
         self.cog = cog
+
+    async def on_submit(self, interaction: discord.Interaction):
+        guild_id = str(interaction.guild.id)
+        settings = (await load_json(SETTINGS_FILE, settings_lock)).get(guild_id, get_default_settings())
+        log_channel_id = settings.get('log_channel')
+
+        if not log_channel_id:
+            await interaction.response.send_message(
+                "Sorry, the suggestion system isn't set up yet. An admin needs to set a log channel.",
+                ephemeral=True
+            )
+            return
+
+        log_channel = interaction.guild.get_channel(log_channel_id)
+        if not log_channel:
+            await interaction.response.send_message(
+                "I can't find the log channel. Please notify an admin.",
+                ephemeral=True
+            )
+            return
+            
+        suggestion_id = str(uuid.uuid4())
+        question_text = f"{self.option1.value} / {self.option2.value}"
+        
+        pending_data = await load_json(PENDING_SUGGESTIONS_FILE, pending_suggestions_lock)
+        pending_data[suggestion_id] = {
+            "suggester_id": interaction.user.id,
+            "question_text": question_text,
+            "q_type": "wyr",
+            "guild_id": guild_id,
+            "timestamp": datetime.now().timestamp()
+        }
+        await save_json(PENDING_SUGGESTIONS_FILE, pending_data, pending_suggestions_lock)
+
+        embed = discord.Embed(
+            title="New WYR Suggestion",
+            description=f"**Would you rather...**\n1. {self.option1.value}\n2. {self.option2.value}",
+            color=discord.Color.purple()
+        )
+        embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
+        embed.set_footer(text=f"Suggested by: {interaction.user} (ID: {interaction.user.id})")
+
+        view = SuggestionApprovalView(suggestion_id=suggestion_id)
+        
+        try:
+            await log_channel.send(embed=embed, view=view)
+            await interaction.response.send_message(
+                "Your WYR suggestion has been sent to the admins for review. Thank you!",
+                ephemeral=True
+            )
+        except Exception as e:
+            await interaction.response.send_message(f"An error occurred: {e}", ephemeral=True)
+
+class AdminAddQuestionTypeView(discord.ui.View):
+    def __init__(self, cog):
+        super().__init__()
+        self.cog = cog
+
+    @discord.ui.button(label='Never Have I Ever', style=discord.ButtonStyle.primary)
+    async def nhie_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(AddQuestionsModal(self.cog, q_type='nhie'))
+
+    @discord.ui.button(label='Would You Rather', style=discord.ButtonStyle.primary)
+    async def wyr_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(AddQuestionsModal(self.cog, q_type='wyr'))
+
+class AddQuestionsModal(discord.ui.Modal):
+    """Modal for admins to bulk-add questions."""
+    def __init__(self, cog: 'NeverHaveIEver', q_type: str = 'nhie'):
+        title = 'Add NHIE Questions' if q_type == 'nhie' else 'Add WYR Questions'
+        super().__init__(title=title)
+        self.cog = cog
+        self.q_type = q_type
+        
+        placeholder = '...eaten a whole pizza.\n...been to another continent.' if q_type == 'nhie' else 'Have hands as feet / Have feet as hands\nBe a cat for a week / Be a dog for a week'
+        
+        self.questions = discord.ui.TextInput(
+            label='Questions (one per line)',
+            style=discord.TextStyle.paragraph,
+            placeholder=placeholder,
+            required=True
+        )
+        self.add_item(self.questions)
 
     async def on_submit(self, interaction: discord.Interaction):
         guild_id = str(interaction.guild.id)
@@ -200,6 +302,7 @@ class AddQuestionsModal(discord.ui.Modal, title='Add NHIE Questions'):
             if stripped_line and stripped_line.lower() not in question_pool:
                 questions_data[guild_id]['pool'].append({
                     "question": stripped_line,
+                    "type": self.q_type,
                     "suggester_id": interaction.user.id  # Admin who added it
                 })
                 question_pool.add(stripped_line.lower()) # Add to set to prevent duplicates in same batch
@@ -208,7 +311,7 @@ class AddQuestionsModal(discord.ui.Modal, title='Add NHIE Questions'):
         await save_json(QUESTIONS_FILE, questions_data, questions_lock)
         
         await interaction.response.send_message(
-            f"Successfully added {added_count} new questions. "
+            f"Successfully added {added_count} new {self.q_type.upper()} questions. "
             f"Total questions in the pool: {len(questions_data[guild_id]['pool'])}",
             ephemeral=True
         )
@@ -288,7 +391,7 @@ class ConfirmDeleteModal(discord.ui.Modal, title='Confirm Deletion'):
             
             # Refresh the parent view to show the updated list
             await self.parent_view.update_message(interaction)
-            await interaction.followup.send_message(
+            await interaction.followup.send(
                 f"Deleted question #{num}: `...{deleted_question['question']}`",
                 ephemeral=True
             )
@@ -302,128 +405,21 @@ class ConfirmDeleteModal(discord.ui.Modal, title='Confirm Deletion'):
 # --- ( VIEWS ) ---
 
 class SuggestionApprovalView(discord.ui.View):
-    """View with Approve/Deny buttons for the log channel. (Fix #1)"""
-    
-    def __init__(self, cog: 'NeverHaveIEver', suggestion_id: Optional[str]):
-        # (Fix #1): Set a timeout, do not make persistent
-        super().__init__(timeout=60 * 60 * 24 * 3) # 3 day timeout
-        self.cog = cog
-        
-        # Update custom_ids to use the persistent suggestion_id
-        if suggestion_id:
-            self.approve_button.custom_id = f"nhie_approve:{suggestion_id}"
-            self.deny_button.custom_id = f"nhie_deny:{suggestion_id}"
+    """Simple button container for suggestion approve/deny. Interactions are
+    handled persistently by the cog's on_interaction listener."""
 
-    @discord.ui.button(label='Approve', style=discord.ButtonStyle.success, custom_id='nhie_approve_base')
-    async def approve_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        guild_id = str(interaction.guild.id)
-
-        # --- (Fix #4 & #7: Validate, Read, then Pop) ---
-        try:
-            suggestion_id_str = interaction.custom_id.split(':')[-1]
-            uuid.UUID(suggestion_id_str) # Validate it
-            suggestion_id = suggestion_id_str
-        except (ValueError, IndexError):
-            await interaction.response.send_message("Invalid suggestion ID format.", ephemeral=True)
-            return
-        
-        # 1. Read data (no pop)
-        pending_data = await load_json(PENDING_SUGGESTIONS_FILE, pending_suggestions_lock)
-        suggestion_data = pending_data.get(suggestion_id)
-
-        if not suggestion_data:
-            await interaction.response.send_message("This suggestion has already been actioned or has expired.", ephemeral=True)
-            return
-
-        suggester_id = suggestion_data['suggester_id']
-        question_text = suggestion_data['question_text']
-        
-        # 2. Check for duplicates
-        questions_data = await load_json(QUESTIONS_FILE, questions_lock)
-        if guild_id not in questions_data:
-            questions_data[guild_id] = get_default_questions()
-        
-        if any(q['question'].lower() == question_text.lower() for q in questions_data[guild_id]['pool']):
-            await interaction.response.send_message("This question is already in the pool.", ephemeral=True)
-            # Do not pop, just return
-            return
-
-        # 3. Not a duplicate. Add to pool.
-        questions_data[guild_id]['pool'].append({
-            "question": question_text,
-            "suggester_id": suggester_id
-        })
-        await save_json(QUESTIONS_FILE, questions_data, questions_lock)
-            
-        # 4. Now pop from pending
-        if pending_data.pop(suggestion_id, None): # Safely pop
-            await save_json(PENDING_SUGGESTIONS_FILE, pending_data, pending_suggestions_lock)
-        # --- (End of Fix #4) ---
-            
-        # Edit original message
-        embed = interaction.message.embeds[0]
-        embed.title = "✅ Approved Suggestion"
-        embed.color = discord.Color.green()
-        embed.add_field(name="Action By", value=interaction.user.mention, inline=False)
-        await interaction.message.edit(embed=embed, view=None)
-        await interaction.response.send_message("Suggestion approved and added to the pool.", ephemeral=True)
-        
-        # DM Suggester
-        try:
-            suggester = await self.cog.bot.fetch_user(suggester_id)
-            if suggester:
-                await suggester.send(
-                    f"Your 'Never have I ever...' suggestion in **{interaction.guild.name}** was approved!\n"
-                    f"> ...{question_text}"
-                )
-        except (discord.Forbidden, discord.NotFound):
-            pass # Can't DM them
-
-
-    @discord.ui.button(label='Deny', style=discord.ButtonStyle.danger, custom_id='nhie_deny_base')
-    async def deny_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # --- (Fix #4 & #7: Validate, Read, then Pop) ---
-        try:
-            suggestion_id_str = interaction.custom_id.split(':')[-1]
-            uuid.UUID(suggestion_id_str) # Validate it
-            suggestion_id = suggestion_id_str
-        except (ValueError, IndexError):
-            await interaction.response.send_message("Invalid suggestion ID format.", ephemeral=True)
-            return
-            
-        # 1. Read and pop
-        pending_data = await load_json(PENDING_SUGGESTIONS_FILE, pending_suggestions_lock)
-        suggestion_data = pending_data.pop(suggestion_id, None)
-
-        if not suggestion_data:
-            await interaction.response.send_message("This suggestion has already been actioned or has expired.", ephemeral=True)
-            return
-            
-        # 2. Save popped data
-        await save_json(PENDING_SUGGESTIONS_FILE, pending_data, pending_suggestions_lock)
-        # --- (End of Fix #4) ---
-
-        suggester_id = suggestion_data['suggester_id']
-        question_text = suggestion_data['question_text']
-
-        # Edit original message
-        embed = interaction.message.embeds[0]
-        embed.title = "❌ Denied Suggestion"
-        embed.color = discord.Color.red()
-        embed.add_field(name="Action By", value=interaction.user.mention, inline=False)
-        await interaction.message.edit(embed=embed, view=None)
-        await interaction.response.send_message("Suggestion denied.", ephemeral=True)
-        
-        # DM Suggester
-        try:
-            suggester = await self.cog.bot.fetch_user(suggester_id)
-            if suggester:
-                await suggester.send(
-                    f"Your 'Never have I ever...' suggestion in **{interaction.guild.name}** was denied.\n"
-                    f"> ...{question_text}"
-                )
-        except (discord.Forbidden, discord.NotFound):
-            pass # Can't DM them
+    def __init__(self, suggestion_id: str):
+        super().__init__(timeout=None)
+        self.add_item(discord.ui.Button(
+            label='Approve',
+            style=discord.ButtonStyle.success,
+            custom_id=f'nhie_approve:{suggestion_id}'
+        ))
+        self.add_item(discord.ui.Button(
+            label='Deny',
+            style=discord.ButtonStyle.danger,
+            custom_id=f'nhie_deny:{suggestion_id}'
+        ))
 
 class MainQuestionView(discord.ui.View):
     """The main persistent view for NHIE questions."""
@@ -437,7 +433,8 @@ class MainQuestionView(discord.ui.View):
     async def suggest_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Opens the suggestion modal."""
         try:
-            await interaction.response.send_modal(SuggestionModal(self.cog))
+            view = SuggestionTypeView(self.cog)
+            await interaction.response.send_message("What type of question do you want to suggest?", view=view, ephemeral=True)
         except Exception as e:
             print(f"NHIE Suggest Button Error: {e}")
             try:
@@ -552,10 +549,18 @@ class MainQuestionView(discord.ui.View):
             if len(never_text) > 1020:
                 never_text = never_text[:1020] + "..."
             
+            is_wyr = embed.title and "Would you rather" in embed.title
+            if is_wyr and len(embed.fields) >= 2:
+                field1_name = embed.fields[0].name
+                field2_name = embed.fields[1].name
+            else:
+                field1_name = "✅ Have"
+                field2_name = "❌ Never"
+
             # Update with just 2 fields for side-by-side display
             embed.clear_fields()
-            embed.add_field(name="✅ Have", value=have_text, inline=True)
-            embed.add_field(name="❌ Never", value=never_text, inline=True)
+            embed.add_field(name=field1_name, value=have_text, inline=True)
+            embed.add_field(name=field2_name, value=never_text, inline=True)
             
             await interaction.message.edit(embed=embed)
         except (IndexError, discord.HTTPException, AttributeError) as e:
@@ -597,11 +602,22 @@ class RecapView(discord.ui.View):
             
         votes = {"have": list(have_users_set), "never": list(never_users_set)}
         
-        embed = discord.Embed(
-            title=f"Recap: Question {self.page + 1} / {len(self.history)}",
-            description=f"**Never have I ever...**\n{question_text}",
-            color=discord.Color.blue()
-        )
+        q_type = question_data.get('type', 'nhie')
+        if q_type == 'wyr':
+            opts = [o.strip() for o in question_text.split('/')]
+            opt1 = opts[0] if len(opts) > 0 else "Option 1"
+            opt2 = opts[1] if len(opts) > 1 else "Option 2"
+            embed = discord.Embed(
+                title=f"Recap: Question {self.page + 1} / {len(self.history)}",
+                description=f"**Would you rather...**\n1. {opt1}\n2. {opt2}",
+                color=discord.Color.purple()
+            )
+        else:
+            embed = discord.Embed(
+                title=f"Recap: Question {self.page + 1} / {len(self.history)}",
+                description=f"**Never have I ever...**\n{question_text}",
+                color=discord.Color.blue()
+            )
         
         # --- (MODIFIED: Fetch display names, no mentions, truncate) ---
         have_users = []
@@ -643,8 +659,16 @@ class RecapView(discord.ui.View):
             
         # --- (CHANGE 3: Replaced field layout) ---
         # Two fields for side-by-side display
-        embed.add_field(name="✅ Have", value=have_text, inline=True)
-        embed.add_field(name="❌ Never", value=never_text, inline=True)
+        q_type = question_data.get('type', 'nhie')
+        if q_type == 'wyr':
+            opts = [o.strip() for o in question_text.split('/')]
+            opt1 = opts[0] if len(opts) > 0 else "Option 1"
+            opt2 = opts[1] if len(opts) > 1 else "Option 2"
+            embed.add_field(name=f"1️⃣ {opt1[:100]}", value=have_text, inline=True)
+            embed.add_field(name=f"2️⃣ {opt2[:100]}", value=never_text, inline=True)
+        else:
+            embed.add_field(name="✅ Have", value=have_text, inline=True)
+            embed.add_field(name="❌ Never", value=never_text, inline=True)
         # --- (END OF CHANGE 3) ---
         
         if suggester_id:
@@ -957,7 +981,8 @@ class AdminPanelView(discord.ui.View):
     # --- ( ROW 2: QUESTION MANAGEMENT ) ---
     @discord.ui.button(label='Add Questions', style=discord.ButtonStyle.success, row=1, custom_id='nhie_admin_add_q')
     async def add_questions(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(AddQuestionsModal(self.cog))
+        view = AdminAddQuestionTypeView(self.cog)
+        await interaction.response.send_message("What type of question do you want to add?", view=view, ephemeral=True)
 
     @discord.ui.button(label='View/Delete Questions', style=discord.ButtonStyle.primary, row=1, custom_id='nhie_admin_view_q')
     async def view_questions(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -983,6 +1008,58 @@ class AdminPanelView(discord.ui.View):
             await interaction.followup.send("A new question has been posted.", ephemeral=True)
         else:
             await interaction.followup.send("Could not post a question. Check settings and question pool.", ephemeral=True)
+
+    @discord.ui.button(label='Preview Question', style=discord.ButtonStyle.primary, row=2, custom_id='nhie_admin_preview')
+    async def preview_question(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Previews a random question from the pool without using it."""
+        guild_id = str(interaction.guild.id)
+        questions_data = await load_json(QUESTIONS_FILE, questions_lock)
+        q_pool = questions_data.get(guild_id, get_default_questions())['pool']
+
+        if not q_pool:
+            return await interaction.response.send_message("The question pool is empty.", ephemeral=True)
+
+        import random
+        question_obj = random.choice(q_pool)
+        question_text = question_obj['question']
+        suggester_id = question_obj.get('suggester_id')
+        q_type = question_obj.get('type', 'nhie')
+
+        if q_type == 'wyr':
+            opts = [o.strip() for o in question_text.split('/')]
+            opt1 = opts[0] if len(opts) > 0 else "Option 1"
+            opt2 = opts[1] if len(opts) > 1 else "Option 2"
+            embed = discord.Embed(
+                title="Would you rather...",
+                description=f"**1.** {opt1}\n**2.** {opt2}",
+                color=discord.Color.purple()
+            )
+            embed.add_field(name=f"1️⃣ {opt1[:100]}", value="No one", inline=True)
+            embed.add_field(name=f"2️⃣ {opt2[:100]}", value="No one", inline=True)
+            
+            view_to_send = MainQuestionView(self.cog)
+            view_to_send.have_button.label = "Option 1"
+            view_to_send.never_button.label = "Option 2"
+            view_to_send.have_button.style = discord.ButtonStyle.primary
+            view_to_send.never_button.style = discord.ButtonStyle.primary
+        else:
+            embed = discord.Embed(
+                title="Never Have I Ever...",
+                description=f"**...{question_text}**",
+                color=discord.Color.random()
+            )
+            embed.add_field(name="✅ Have", value="No one", inline=True)
+            embed.add_field(name="❌ Never", value="No one", inline=True)
+            view_to_send = MainQuestionView(self.cog)
+
+        if suggester_id:
+            try:
+                suggester = await self.cog.bot.fetch_user(suggester_id)
+                embed.set_footer(text=f"Suggested by: {suggester.display_name}")
+            except discord.NotFound:
+                pass 
+
+        await interaction.response.send_message(embed=embed, view=view_to_send, ephemeral=True)
 
 
 # --- ( MAIN COG CLASS ) ---
@@ -1078,21 +1155,17 @@ class NeverHaveIEver(commands.Cog):
 
     # --- ( SLASH COMMANDS ) ---
     
-    nhie_group = app_commands.Group(
-        name="neverhaveiever",
-        description="Admin commands for Never Have I Ever."
-    )
-
-    @nhie_group.command(name="admin_panel")
+    @app_commands.command(name="nhie_panel", description="Admin panel for Never Have I Ever.")
     async def admin_panel(self, interaction: discord.Interaction):
-        """Sends the persistent admin panel."""
+        """Sends the ephemeral admin panel."""
         if not self.bot.is_bot_admin(interaction.user):
             return await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True)
         embed = await self.admin_view.get_panel_embed(interaction.guild)
         await interaction.response.send_message(
-            "Here is the admin panel. This message will stay active.",
+            "Here is the admin panel.",
             embed=embed,
-            view=self.admin_view
+            view=self.admin_view,
+            ephemeral=True
         )
 
     # --- (MODIFIED: Removed post_now_cmd) ---
@@ -1107,7 +1180,124 @@ class NeverHaveIEver(commands.Cog):
             await interaction.response.send_message(f"An unexpected error occurred: {error}", ephemeral=True)
 
     # --- ( EVENT LISTENERS ) ---
-    
+
+    @commands.Cog.listener()
+    async def on_interaction(self, interaction: discord.Interaction):
+        """Persistently handle suggestion approve/deny buttons by custom_id prefix."""
+        if interaction.type != discord.InteractionType.component:
+            return
+
+        custom_id = interaction.data.get('custom_id', '')
+
+        if custom_id.startswith('nhie_approve:'):
+            await self._handle_approve(interaction, custom_id)
+        elif custom_id.startswith('nhie_deny:'):
+            await self._handle_deny(interaction, custom_id)
+
+    async def _handle_approve(self, interaction: discord.Interaction, custom_id: str):
+        """Handle an approve button press on a suggestion embed."""
+        guild_id = str(interaction.guild.id)
+
+        try:
+            suggestion_id = custom_id.split(':', 1)[1]
+            uuid.UUID(suggestion_id)
+        except (ValueError, IndexError):
+            return await interaction.response.send_message("Invalid suggestion ID format.", ephemeral=True)
+
+        await interaction.response.defer(ephemeral=True)
+
+        pending_data = await load_json(PENDING_SUGGESTIONS_FILE, pending_suggestions_lock)
+        suggestion_data = pending_data.get(suggestion_id)
+
+        if not suggestion_data:
+            return await interaction.followup.send("This suggestion has already been actioned or has expired.", ephemeral=True)
+
+        suggester_id = suggestion_data['suggester_id']
+        question_text = suggestion_data['question_text']
+        q_type = suggestion_data.get('q_type', 'nhie')
+
+        questions_data = await load_json(QUESTIONS_FILE, questions_lock)
+        if guild_id not in questions_data:
+            questions_data[guild_id] = get_default_questions()
+
+        if any(q['question'].lower() == question_text.lower() for q in questions_data[guild_id]['pool']):
+            return await interaction.followup.send("This question is already in the pool.", ephemeral=True)
+
+        questions_data[guild_id]['pool'].append({
+            "question": question_text,
+            "type": q_type,
+            "suggester_id": suggester_id
+        })
+        await save_json(QUESTIONS_FILE, questions_data, questions_lock)
+
+        if pending_data.pop(suggestion_id, None):
+            await save_json(PENDING_SUGGESTIONS_FILE, pending_data, pending_suggestions_lock)
+
+        # Edit the suggestion embed
+        try:
+            embed = interaction.message.embeds[0]
+            embed.title = "✅ Approved Suggestion"
+            embed.color = discord.Color.green()
+            embed.add_field(name="Action By", value=interaction.user.mention, inline=False)
+            await interaction.message.edit(embed=embed, view=None)
+        except (IndexError, discord.HTTPException) as e:
+            print(f"NHIE: Failed to edit suggestion embed: {e}")
+
+        await interaction.followup.send("Suggestion approved and added to the pool.", ephemeral=True)
+
+        try:
+            suggester = await self.bot.fetch_user(suggester_id)
+            if suggester:
+                await suggester.send(
+                    f"Your 'Never have I ever...' suggestion in **{interaction.guild.name}** was approved!\n"
+                    f"> ...{question_text}"
+                )
+        except (discord.Forbidden, discord.NotFound):
+            pass
+
+    async def _handle_deny(self, interaction: discord.Interaction, custom_id: str):
+        """Handle a deny button press on a suggestion embed."""
+        try:
+            suggestion_id = custom_id.split(':', 1)[1]
+            uuid.UUID(suggestion_id)
+        except (ValueError, IndexError):
+            return await interaction.response.send_message("Invalid suggestion ID format.", ephemeral=True)
+
+        await interaction.response.defer(ephemeral=True)
+
+        pending_data = await load_json(PENDING_SUGGESTIONS_FILE, pending_suggestions_lock)
+        suggestion_data = pending_data.pop(suggestion_id, None)
+
+        if not suggestion_data:
+            return await interaction.followup.send("This suggestion has already been actioned or has expired.", ephemeral=True)
+
+        await save_json(PENDING_SUGGESTIONS_FILE, pending_data, pending_suggestions_lock)
+
+        suggester_id = suggestion_data['suggester_id']
+        question_text = suggestion_data['question_text']
+
+        # Edit the suggestion embed
+        try:
+            embed = interaction.message.embeds[0]
+            embed.title = "❌ Denied Suggestion"
+            embed.color = discord.Color.red()
+            embed.add_field(name="Action By", value=interaction.user.mention, inline=False)
+            await interaction.message.edit(embed=embed, view=None)
+        except (IndexError, discord.HTTPException) as e:
+            print(f"NHIE: Failed to edit suggestion embed: {e}")
+
+        await interaction.followup.send("Suggestion denied.", ephemeral=True)
+
+        try:
+            suggester = await self.bot.fetch_user(suggester_id)
+            if suggester:
+                await suggester.send(
+                    f"Your 'Never have I ever...' suggestion in **{interaction.guild.name}** was denied.\n"
+                    f"> ...{question_text}"
+                )
+        except (discord.Forbidden, discord.NotFound):
+            pass
+
     @commands.Cog.listener()
     async def on_member_update(self, before: discord.Member, after: discord.Member):
         """Listens for role changes to trigger a question."""
@@ -1210,21 +1400,39 @@ class NeverHaveIEver(commands.Cog):
         question_obj = q_pool.pop(random.randrange(len(q_pool)))
         question_text = question_obj['question']
         suggester_id = question_obj.get('suggester_id')
+        q_type = question_obj.get('type', 'nhie')
         
         # --- ( 3. Prepare Embed ) ---
         
-        embed = discord.Embed(
-            title="Never Have I Ever...",
-            description=f"**...{question_text}**",
-            color=discord.Color.random()
-        )
-        
-        # --- (CHANGE 2: Replaced field layout) ---
-        # Two fields for side-by-side display
-        embed.add_field(name="✅ Have", value="No one", inline=True)
-        embed.add_field(name="❌ Never", value="No one", inline=True)
-        # --- (END OF CHANGE 2) ---
-        
+        if q_type == 'wyr':
+            opts = [o.strip() for o in question_text.split('/')]
+            opt1 = opts[0] if len(opts) > 0 else "Option 1"
+            opt2 = opts[1] if len(opts) > 1 else "Option 2"
+            embed = discord.Embed(
+                title="Would you rather...",
+                description=f"**1.** {opt1}\n**2.** {opt2}",
+                color=discord.Color.purple()
+            )
+            embed.add_field(name=f"1️⃣ {opt1[:100]}", value="No one", inline=True)
+            embed.add_field(name=f"2️⃣ {opt2[:100]}", value="No one", inline=True)
+            
+            # Since buttons are persistent, we'll recreate the view instance to set the labels just for sending
+            # The custom IDs remain the same, so on_interaction will route it to self.main_view correctly
+            view_to_send = MainQuestionView(self)
+            view_to_send.have_button.label = "Option 1"
+            view_to_send.never_button.label = "Option 2"
+            view_to_send.have_button.style = discord.ButtonStyle.primary
+            view_to_send.never_button.style = discord.ButtonStyle.primary
+        else:
+            embed = discord.Embed(
+                title="Never Have I Ever...",
+                description=f"**...{question_text}**",
+                color=discord.Color.random()
+            )
+            embed.add_field(name="✅ Have", value="No one", inline=True)
+            embed.add_field(name="❌ Never", value="No one", inline=True)
+            view_to_send = self.main_view
+            
         if suggester_id:
             try:
                 suggester = await self.bot.fetch_user(suggester_id)
@@ -1240,7 +1448,7 @@ class NeverHaveIEver(commands.Cog):
             channel = guild.get_channel(ch_id)
             if channel and isinstance(channel, discord.TextChannel):
                 try:
-                    msg = await channel.send(embed=embed, view=self.main_view)
+                    msg = await channel.send(embed=embed, view=view_to_send)
                     all_message_ids.append(str(msg.id))
                 except discord.Forbidden:
                     print(f"NHIE: Failed to post in {channel.name} (ID: {ch_id}): No permissions.")
@@ -1279,6 +1487,7 @@ class NeverHaveIEver(commands.Cog):
         history_data[guild_id]['questions'].append({
             "all_message_ids": all_message_ids, # Store ALL IDs
             "question": question_text,
+            "type": q_type,
             "suggester_id": suggester_id,
             "timestamp": datetime.now().timestamp()
         })

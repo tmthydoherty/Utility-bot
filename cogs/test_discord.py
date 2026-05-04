@@ -1,12 +1,15 @@
 import discord
+import asyncio
 
-class MyView(discord.ui.View):
-    @discord.ui.button(label="Test")
-    async def my_btn(self, interaction, button):
-        pass
+class MockConnection:
+    pass
 
-    def __init__(self):
-        super().__init__()
-        print(type(self.my_btn))
+async def test():
+    emoji = discord.PartialEmoji.from_str("<a:test:12345678901234>")
+    emoji._state = MockConnection()
+    try:
+        await emoji.read()
+    except Exception as e:
+        print(f"Exception: {type(e).__name__}: {e}")
 
-MyView()
+asyncio.run(test())

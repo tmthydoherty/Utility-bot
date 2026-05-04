@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        @font-face {{
+            font-family: 'Cinzel';
+            src: url('file://{font_path}/Cinzel-Regular.ttf') format('truetype');
+            font-weight: normal;
+        }}
+        @font-face {{
+            font-family: 'Cinzel';
+            src: url('file://{font_path}/Cinzel-Bold.ttf') format('truetype');
+            font-weight: bold;
+        }}
+
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+
+        body {{
+            width: 1200px;
+            font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(160deg, #1a0f2e 0%, #0f1128 55%, #08091a 100%);
+            color: #ffffff;
+        }}
+
+        .card {{
+            margin: 16px;
+            border-radius: 18px;
+            overflow: hidden;
+            background: rgba(8, 10, 20, 0.7);
+            border: 1px solid rgba(200, 140, 255, 0.16);
+            box-shadow: 0 14px 44px rgba(90, 30, 160, 0.22);
+        }}
+
+        /* ---------- HEADER ---------- */
+        .header {{
+            padding: 30px 40px 26px;
+            background: linear-gradient(135deg, rgba(130, 55, 220, 0.32), rgba(30, 15, 70, 0.3) 60%, rgba(8, 10, 20, 0) 100%);
+            border-bottom: 1px solid rgba(200, 140, 255, 0.22);
+            text-align: center;
+            position: relative;
+        }}
+
+        .header::before {{
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 260px;
+            height: 3px;
+            background: linear-gradient(90deg, transparent, #d9a4ff, transparent);
+        }}
+
+        .title {{
+            font-family: 'Cinzel', serif;
+            font-size: 44px;
+            font-weight: 800;
+            letter-spacing: 5px;
+            text-transform: uppercase;
+            color: #f4e1ff;
+            text-shadow: 0 0 22px rgba(200, 120, 255, 0.35);
+        }}
+
+        .subtitle {{
+            margin-top: 8px;
+            font-size: 15px;
+            color: rgba(220, 190, 255, 0.7);
+            letter-spacing: 3px;
+            text-transform: uppercase;
+        }}
+
+        /* ---------- OVERVIEW ---------- */
+        .overview {{
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 16px;
+            padding: 26px 32px;
+        }}
+
+        .overview-large {{
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 16px;
+            padding: 0 32px 26px;
+        }}
+
+        .tile {{
+            padding: 20px 22px;
+            border-radius: 14px;
+            background: linear-gradient(160deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.015));
+            border: 1px solid rgba(200, 140, 255, 0.1);
+            position: relative;
+            overflow: hidden;
+        }}
+
+        .tile::before {{
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 2px;
+            background: linear-gradient(90deg, transparent, rgba(220, 140, 255, 0.6), transparent);
+        }}
+
+        .tile .label {{
+            font-size: 12px;
+            color: rgba(220, 190, 255, 0.55);
+            letter-spacing: 2px;
+            text-transform: uppercase;
+        }}
+
+        .tile .value {{
+            margin-top: 8px;
+            font-family: 'Cinzel', serif;
+            font-size: 36px;
+            font-weight: 800;
+            color: #ffffff;
+            font-variant-numeric: tabular-nums;
+            line-height: 1.1;
+        }}
+
+        /* ---------- SECTION TITLES ---------- */
+        .section-title {{
+            padding: 10px 40px 14px;
+            font-family: 'Cinzel', serif;
+            font-size: 18px;
+            letter-spacing: 4px;
+            text-transform: uppercase;
+            color: #d9a4ff;
+            font-weight: 700;
+            position: relative;
+        }}
+
+        .section-title::after {{
+            content: '';
+            position: absolute;
+            left: 40px;
+            right: 40px;
+            bottom: 6px;
+            height: 1px;
+            background: linear-gradient(90deg, rgba(220, 140, 255, 0.35), transparent);
+        }}
+
+        /* ---------- LEADERBOARD GRID ---------- */
+        .leaderboard-grid {{
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 14px;
+            padding: 10px 32px 30px;
+        }}
+
+        .lb-tile {{
+            padding: 16px 20px;
+            border-radius: 14px;
+            background: linear-gradient(160deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.01));
+            border: 1px solid rgba(200, 140, 255, 0.1);
+            position: relative;
+            overflow: hidden;
+        }}
+
+        .lb-tile::before {{
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            bottom: 0;
+            width: 3px;
+            background: linear-gradient(180deg, rgba(220, 140, 255, 0.65), rgba(140, 60, 220, 0.25));
+        }}
+
+        .lb-tile .lb-label {{
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 1.8px;
+            color: rgba(220, 190, 255, 0.55);
+        }}
+
+        .lb-tile .lb-winner {{
+            margin-top: 5px;
+            font-size: 20px;
+            font-family: 'Cinzel', serif;
+            font-weight: 800;
+            color: #ffffff;
+        }}
+
+        .lb-tile .lb-value {{
+            margin-top: 3px;
+            font-size: 14px;
+            color: #d9a4ff;
+            font-variant-numeric: tabular-nums;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }}
+    </style>
+</head>
+<body>
+<div class="card">
+    <div class="header">
+        <div class="title">{period_title}</div>
+        <div class="subtitle">Marvel Rivals · Server Stats</div>
+    </div>
+
+    <div class="overview">
+        <div class="tile"><div class="label">Matches</div><div class="value">{total_matches}</div></div>
+        <div class="tile"><div class="label">Players</div><div class="value">{total_players}</div></div>
+        <div class="tile"><div class="label">Kills</div><div class="value">{total_kills}</div></div>
+        <div class="tile"><div class="label">Final Hits</div><div class="value">{total_final_hits}</div></div>
+    </div>
+    <div class="overview-large">
+        <div class="tile"><div class="label">Damage</div><div class="value">{total_damage}</div></div>
+        <div class="tile"><div class="label">Dmg Blocked</div><div class="value">{total_blocked}</div></div>
+        <div class="tile"><div class="label">Healing</div><div class="value">{total_healing}</div></div>
+        <div class="tile"><div class="label">Medals</div><div class="value">{total_medals}</div></div>
+    </div>
+
+    <div class="section-title">Leaderboards</div>
+    <div class="leaderboard-grid">
+        {leaders_html}
+    </div>
+</div>
+</body>
+</html>

@@ -21,100 +21,88 @@
         }}
 
         body {{
-            width: 750px;
-            font-family: 'Cinzel', 'Segoe UI', sans-serif;
-            font-weight: bold;
-            background: linear-gradient(135deg, #0f1012 0%, #1e1f22 100%);
+            width: 850px;
+            font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+            background: #0a0c10;
             color: #ffffff;
-            padding: 20px;
+            padding: 0;
         }}
 
+        .card {{
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 10px;
+            overflow: hidden;
+            margin: 6px;
+            background: #0e1015;
+        }}
+
+        /* ── Header ── */
         .header {{
-            text-align: center;
-            margin-bottom: 16px;
-            padding-bottom: 12px;
-            border-bottom: 1px solid rgba(255,255,255,0.1);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 14px 28px;
+            background: linear-gradient(135deg, #13161c 0%, #1a1d25 50%, #13161c 100%);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
         }}
 
         .map-name {{
-            font-size: 28px;
+            font-family: 'Cinzel', serif;
+            font-size: 36px;
             font-weight: bold;
-            color: #ffffff;
-            margin-bottom: 4px;
+            color: #e1e2e4;
+            letter-spacing: 5px;
+            text-transform: uppercase;
         }}
 
-        .match-info {{
-            font-size: 13px;
-            color: #b9bbbe;
-        }}
-
-        /* Team sections */
+        /* ── Team Sections ── */
         .team-section {{
-            margin-bottom: 16px;
+            margin: 0;
         }}
 
-        .team-header {{
+        .team-label {{
             display: flex;
             align-items: center;
-            padding: 10px 16px;
-            border-radius: 8px 8px 0 0;
-            margin-bottom: 2px;
+            padding: 7px 20px;
+            gap: 10px;
         }}
 
-        .team-header.winner {{
-            background: linear-gradient(90deg, rgba(67, 181, 129, 0.3), transparent);
+        .team-label.red-team {{
+            background: linear-gradient(90deg, rgba(255, 70, 85, 0.10) 0%, transparent 50%);
+            border-left: 3px solid #ff4655;
         }}
 
-        .team-header.loser {{
-            background: linear-gradient(90deg, rgba(240, 71, 71, 0.3), transparent);
+        .team-label.blue-team {{
+            background: linear-gradient(90deg, rgba(68, 136, 255, 0.10) 0%, transparent 50%);
+            border-left: 3px solid #4488ff;
         }}
 
-        .team-name {{
-            font-size: 16px;
-            font-weight: bold;
-            flex: 1;
+        .team-label-text {{
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 2.5px;
+            text-transform: uppercase;
         }}
 
-        .team-name.winner {{ color: #43b581; }}
-        .team-name.loser {{ color: #f04747; }}
+        .team-label-text.red-team {{ color: rgba(255, 70, 85, 0.7); }}
+        .team-label-text.blue-team {{ color: rgba(68, 136, 255, 0.7); }}
 
-        .team-score {{
-            font-size: 20px;
-            font-weight: bold;
-            margin-left: 10px;
-            padding: 0 8px;
-            border-radius: 4px;
-        }}
-
-        .team-header.winner .team-score {{ color: #43b581; }}
-        .team-header.loser .team-score {{ color: #f04747; }}
-
-        .team-result {{
-            font-size: 13px;
-            padding: 4px 12px;
-            border-radius: 4px;
-            font-weight: bold;
-        }}
-
-        .team-result.winner {{
-            background: #43b581;
-            color: #fff;
-        }}
-
-        .team-result.loser {{
-            background: #f04747;
-            color: #fff;
-        }}
-
-        /* Column headers */
+        /* ── Column Headers ── */
         .column-headers {{
             display: grid;
-            grid-template-columns: 180px 80px repeat(7, 1fr);
-            gap: 4px;
-            padding: 8px 12px;
-            background: rgba(255,255,255,0.05);
+            grid-template-columns: 30px 185px 80px repeat(7, 1fr);
+            gap: 0;
+            padding: 7px 16px;
+            background: rgba(255, 255, 255, 0.02);
             font-size: 11px;
-            color: #72767d;
+            font-weight: 700;
+            color: #3a3d44;
+            text-transform: uppercase;
+            letter-spacing: 1.2px;
+            text-align: center;
+        }}
+
+        .column-headers .rank-col {{
             text-align: center;
         }}
 
@@ -123,120 +111,190 @@
             padding-left: 4px;
         }}
 
-        /* Player rows */
+        /* ── Player Rows ── */
         .player-row {{
             display: grid;
-            grid-template-columns: 180px 80px repeat(7, 1fr);
-            gap: 4px;
-            padding: 10px 12px;
-            background: rgba(255,255,255,0.02);
-            border-bottom: 1px solid rgba(255,255,255,0.05);
+            grid-template-columns: 30px 185px 80px repeat(7, 1fr);
+            gap: 0;
+            padding: 10px 16px;
             align-items: center;
-            font-size: 13px;
+            font-size: 15px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.025);
+            position: relative;
         }}
 
-        .player-row:nth-child(odd) {{
-            background: rgba(255,255,255,0.04);
+        .player-row.red-row {{
+            background: rgba(255, 70, 85, 0.02);
+        }}
+
+        .player-row.blue-row {{
+            background: rgba(68, 136, 255, 0.02);
+        }}
+
+        .player-row.red-row:nth-child(even) {{
+            background: rgba(255, 70, 85, 0.04);
+        }}
+
+        .player-row.blue-row:nth-child(even) {{
+            background: rgba(68, 136, 255, 0.04);
+        }}
+
+        .player-row.mvp-row {{
+            background: rgba(245, 166, 35, 0.06);
+            border-bottom: 1px solid rgba(245, 166, 35, 0.1);
         }}
 
         .player-row:last-child {{
             border-bottom: none;
-            border-radius: 0 0 8px 8px;
         }}
+
+        .rank-cell {{
+            text-align: center;
+            font-size: 13px;
+            font-weight: 700;
+            color: #3a3d44;
+        }}
+
+        .rank-cell.top {{ color: #f5a623; }}
 
         .player-info {{
             display: flex;
             align-items: center;
-            gap: 10px;
+            gap: 8px;
+            min-width: 0;
         }}
 
         .player-name {{
-            font-weight: bold;
-            color: #fff;
+            font-weight: 600;
+            color: #d1d3d6;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
-            max-width: 160px;
+            font-size: 15px;
+        }}
+
+        .mvp-row .player-name {{
+            color: #f0dbb0;
         }}
 
         .agent-name {{
-            color: #b9bbbe;
-            font-size: 12px;
+            color: #555860;
+            font-size: 13px;
+            text-align: center;
         }}
 
         .stat-cell {{
             text-align: center;
-            color: #dcddde;
+            color: #6b6e76;
+            font-size: 15px;
+            font-variant-numeric: tabular-nums;
+        }}
+
+        .stat-cell.best {{
+            color: #e1e2e4;
+            font-weight: 600;
         }}
 
         .kda-cell {{
-            font-weight: bold;
-            color: #fff;
+            text-align: center;
+            font-weight: 600;
             white-space: nowrap;
+            font-size: 15px;
+            font-variant-numeric: tabular-nums;
         }}
 
-        .kda-kills {{ color: #43b581; }}
-        .kda-slash {{ color: #72767d; }}
-        .kda-deaths {{ color: #f04747; }}
-        .kda-assists {{ color: #faa61a; }}
+        .kda-kills {{ color: #3eda7a; }}
+        .kda-slash {{ color: #2a2d33; margin: 0 1px; }}
+        .kda-deaths {{ color: #ff4655; }}
+        .kda-assists {{ color: #e8b634; }}
 
-        .highlight-stat {{
-            color: #43b581;
-            font-weight: bold;
+        /* ── ACS Bar ── */
+        .acs-cell {{
+            position: relative;
+            text-align: center;
         }}
 
+        .acs-bar {{
+            position: absolute;
+            bottom: -5px;
+            left: 15%;
+            height: 2px;
+            border-radius: 1px;
+            opacity: 0.4;
+        }}
+
+        .acs-bar.red-team {{ background: #ff4655; }}
+        .acs-bar.blue-team {{ background: #4488ff; }}
+
+        /* ── MVP Badge ── */
         .mvp-badge {{
-            background: linear-gradient(135deg, #f5a623, #e09112);
+            display: inline-flex;
+            align-items: center;
+            background: linear-gradient(135deg, #f5a623, #d4911a);
             color: #fff;
             font-size: 9px;
+            font-weight: 800;
             padding: 2px 6px;
             border-radius: 3px;
+            letter-spacing: 1px;
             margin-left: 6px;
+            flex-shrink: 0;
+            text-transform: uppercase;
+        }}
+
+        /* ── Divider ── */
+        .team-divider {{
+            height: 1px;
+            background: rgba(255, 255, 255, 0.05);
+            margin: 3px 16px;
         }}
     </style>
 </head>
 <body>
-    <div class="header">
-        <div class="map-name">{map_name}</div>
-        <div class="match-info">Match Scoreboard</div>
-    </div>
+    <div class="card">
+        <div class="header">
+            <div class="map-name">{map_name}</div>
+        </div>
 
-    <div class="team-section">
-        <div class="team-header winner">
-            <span class="team-name winner">{winner_team_name}{winner_score_html}</span>
-            <span class="team-result winner">WINNER</span>
+        <div class="team-section">
+            <div class="team-label red-team">
+                <span class="team-label-text red-team">{red_team_label}</span>
+            </div>
+            <div class="column-headers">
+                <span class="rank-col">#</span>
+                <span class="player-col">Player</span>
+                <span>Agent</span>
+                <span>K/D/A</span>
+                <span>K/D</span>
+                <span>HS%</span>
+                <span>ADR</span>
+                <span>ACS</span>
+                <span>FB</span>
+                <span>DMG</span>
+            </div>
+            {red_players_html}
         </div>
-        <div class="column-headers">
-            <span class="player-col">Player</span>
-            <span>Agent</span>
-            <span>K/D/A</span>
-            <span>K/D</span>
-            <span>HS%</span>
-            <span>ADR</span>
-            <span>ACS</span>
-            <span>FB</span>
-            <span>DMG</span>
-        </div>
-        {winner_players_html}
-    </div>
 
-    <div class="team-section">
-        <div class="team-header loser">
-            <span class="team-name loser">{loser_team_name}{loser_score_html}</span>
-            <span class="team-result loser">LOSER</span>
+        <div class="team-divider"></div>
+
+        <div class="team-section">
+            <div class="team-label blue-team">
+                <span class="team-label-text blue-team">{blue_team_label}</span>
+            </div>
+            <div class="column-headers">
+                <span class="rank-col">#</span>
+                <span class="player-col">Player</span>
+                <span>Agent</span>
+                <span>K/D/A</span>
+                <span>K/D</span>
+                <span>HS%</span>
+                <span>ADR</span>
+                <span>ACS</span>
+                <span>FB</span>
+                <span>DMG</span>
+            </div>
+            {blue_players_html}
         </div>
-        <div class="column-headers">
-            <span class="player-col">Player</span>
-            <span>Agent</span>
-            <span>K/D/A</span>
-            <span>K/D</span>
-            <span>HS%</span>
-            <span>ADR</span>
-            <span>ACS</span>
-            <span>FB</span>
-            <span>DMG</span>
-        </div>
-        {loser_players_html}
     </div>
 </body>
 </html>

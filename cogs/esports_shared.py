@@ -33,7 +33,7 @@ GAME_LOGOS = {
     "valorant": "https://i.postimg.cc/HsxQFd58/valorant.png",
     "rl": "https://i.postimg.cc/nrSL2j13/Rocket-League-Emblem-(2).png",
     "r6siege": "https://i.postimg.cc/52h6DzMM/rainbow-six-siege-logo-logo2.png",
-    "ow": "https://upload.wikimedia.org/wikipedia/commons/thumb/5/55/Overwatch_circle_logo.svg/600px-Overwatch_circle_logo.svg.png"
+    "ow": "https://i.postimg.cc/Hkh4bQQ1/Overwatch2-Primary-DKBKGD.png"
 }
 
 GAME_TWITCH_CHANNELS = {
@@ -54,14 +54,35 @@ DEFAULT_GAME_ICON_FALLBACK = "https://upload.wikimedia.org/wikipedia/commons/thu
 
 ALLOWED_TIERS = ["s", "a"]
 
+# Per-game tier overrides. OWCS on PandaScore is often labeled tier B, so we
+# loosen the tier filter for OW to avoid dropping the main circuit.
+GAME_ALLOWED_TIERS = {
+    "ow": ["s", "a", "b"],
+}
+
+# Per-game region keyword extras. These are treated as allowed regions for the
+# given game AND any matching entries in EXCLUDED_REGION_KEYWORDS are suppressed
+# (including sub-region strings that contain the extra as a substring).
+GAME_EXTRA_ALLOWED_REGIONS = {
+    # VCT Pacific is a main VCT circuit and should be shown alongside Americas/EMEA
+    "valorant": ["pacific"],
+}
+
+# Per-game blocked region keywords. If any of these appear in an event name,
+# the match is filtered out for that game (regardless of other allow rules).
+GAME_BLOCKED_REGIONS = {
+    # User prefers OW posts to be NA-only
+    "ow": ["europe", "emea"],
+}
+
 # --- REGION FILTERING (Whitelist approach) ---
 # Only allow NA/EU regions - everything else gets filtered unless it's international
 # These are checked as substrings in lowercase event names
 ALLOWED_REGION_KEYWORDS = [
     # North America
-    "north america",
-    # Europe
-    "europe", "emea",
+    "north america", "na", "americas",
+    # Europe (including EU/MENA combined regions used by R6 Siege etc.)
+    "europe", "emea", "eu",
 ]
 
 # --- MAJOR LEAGUES BY GAME ---
@@ -69,27 +90,30 @@ ALLOWED_REGION_KEYWORDS = [
 # Valorant is strict (region-specific), others use excluded regions list for filtering
 MAJOR_LEAGUE_KEYWORDS = {
     "valorant": [
-        # Only NA (Americas) and EU (EMEA) VCT leagues - very specific
-        "vct americas", "vct emea",
-        "champions tour americas", "champions tour emea",
+        # VCT regional leagues
+        "vct americas", "vct emea", "vct",
+        "champions tour americas", "champions tour emea", "champions tour",
         "challengers na", "challengers emea",
         "ascension americas", "ascension emea",
         "game changers na", "game changers emea",
+        # Major events
+        "kickoff", "masters", "champions",
     ],
     "rl": [
-        # Main RLCS circuit - region filtering handled separately
-        "rlcs",
+        # RLCS circuit + broader keywords for changing league names
+        "rlcs", "league", "major", "championship", "world", "kickoff",
     ],
     "r6siege": [
-        # Main R6 circuits
-        "six invitational", "six major", "blast r6",
+        # R6 circuits — BLAST era + legacy ESL naming
+        "six invitational", "six major", "blast r6", "blast",
         "esl pro league", "pro league",
+        "league", "major", "kickoff",
     ],
     "ow": [
-        # OWL and OWCS
+        # OWL, OWCS, and broader keywords
         "owl", "overwatch league",
-        "owcs", "overwatch champions series",
-        "world cup",
+        "owcs", "overwatch champions series", "champions series",
+        "world cup", "kickoff", "league",
     ],
 }
 
@@ -106,7 +130,7 @@ EXCLUDED_REGION_KEYWORDS = [
     "pcs",  # Pacific Championship Series
     "oce", "oceania", "lco",
     "india", "south asia",
-    "mena",  # Middle East & North Africa (sometimes separate from EMEA)
+    # Note: "mena" removed — R6 Siege and Valorant use "EU/MENA" or "EMEA" as a combined region
     # Latin America / Brazil (separate from NA)
     "brazil", "brazilian", "br", "cblol",
     "latam", "latin america", "lla",
@@ -136,10 +160,12 @@ VCT_CHALLENGERS_SUBREGION_KEYWORDS = [
 ]
 
 # International LAN keywords - these bypass ALL region filtering
-# NOTE: "kickoff" removed - regional kickoffs (China, Pacific) are NOT international LANs
+# "kickoff" re-added: non-NA/EU kickoffs are already caught by EXCLUDED_REGION_KEYWORDS,
+# so this only lets through NA/EU kickoffs which we want to show
 INTERNATIONAL_LAN_KEYWORDS = [
     "masters", "champions", "championship", "world",
     "major", "invitational", "grand final", "finals",
+    "kickoff", "playoffs",
     "lock//in", "lockin", "lock-in",
     "gamers8", "iem", "blast premier",
     "six invitational", "six major",
@@ -155,7 +181,9 @@ RLCS_EARLY_ROUND_KEYWORDS = [
     # so this was blocking Days 2-3 as well. "day 1" already handles Day 1 filtering.
     "round of 32", "ro32",
     "group stage", "group a", "group b", "group c", "group d",
-    "open qualifier", "closed qualifier",
+    # Note: "open qualifier"/"closed qualifier" intentionally NOT filtered — RLCS
+    # now names League Play days as "Open Qualifier N" (tech qualifiers for LANs),
+    # which are real league-play matches we want to post.
 ]
 
 # Additional keywords to filter for RLCS LAN events (Majors/Worlds)
@@ -165,6 +193,32 @@ RLCS_LAN_EXTRA_KEYWORDS = ["day 2"]
 # Keywords that identify an RLCS LAN event (Major, World Championship, etc.)
 RLCS_LAN_IDENTIFIERS = ["major", "world", "championship", "lan", "grand final"]
 
+# Rocket League filter (top-8 playoff bracket only).
+# Matched against match.tournament.name ONLY (not league/serie), because PandaScore
+# splits each stage of an RLCS event (Swiss/Groups/Playoffs) into its own tournament
+# entity. Keying off tournament.name is immune to circuit-name drift (e.g. the word
+# "Major" appearing in league/serie names and causing false LAN classification).
+RL_TOURNAMENT_BLACKLIST = [
+    "group", "groups", "group stage",
+    "group a", "group b", "group c", "group d", "group e", "group f",
+    "swiss", "swiss stage",
+    "day 1", "day 2", "day 3",
+    "league play",
+    "qualifier", "open qualifier", "closed qualifier",
+    "round of 32", "ro32", "round of 16", "ro16",
+    "play-in", "play in",
+]
+RL_TOURNAMENT_WHITELIST = [
+    "playoff", "playoffs",
+    "bracket", "upper bracket", "lower bracket",
+    "knockout",
+    "quarter", "quarterfinal", "quarter-final", "quarter final",
+    "semi", "semifinal", "semi-final", "semi final",
+    "final", "finals", "grand final",
+    "top 8", "top8",
+    "championship sunday",
+]
+
 LIQUIPEDIA_GAME_SLUGS = {
     "valorant": "valorant",
     "rl": "rocketleague",
@@ -172,20 +226,6 @@ LIQUIPEDIA_GAME_SLUGS = {
     "ow": "overwatch",
 }
 
-STRAFE_GAME_SLUGS = {
-    "valorant": "valorant",
-    "rl": "rocketleague",
-    "r6siege": "r6s",
-    "ow": "overwatch"
-}
-
-# Strafe calendar/match URL paths (used for HTML scraping)
-STRAFE_GAME_PATHS = {
-    "valorant": "valorant",
-    "rl": "rocket-league",
-    "r6siege": "rainbow-six-siege",
-    "ow": "overwatch"
-}
 
 GAME_MAP_FALLBACK = {
     "valorant": "Map",
@@ -243,6 +283,9 @@ def load_data_sync():
     if "last_reset_month" not in data: data["last_reset_month"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m")
     if "emoji_map" not in data: data["emoji_map"] = {}
     if "emoji_storage_guilds" not in data: data["emoji_storage_guilds"] = []
+    if "match_history" not in data: data["match_history"] = {}
+    if "map_data_cache" not in data: data["map_data_cache"] = {}
+    if "game_vote_emojis" not in data: data["game_vote_emojis"] = {}
 
     # Ensure leaderboards exists and has all game keys
     if "leaderboards" not in data:
@@ -269,6 +312,57 @@ def save_data_sync(data):
     except Exception as e:
         logger.error(f"Failed to save data to disk: {e}")
         if os.path.exists(temp_file): os.remove(temp_file)
+
+def get_team_button_emoji(team_data: dict) -> Optional[discord.PartialEmoji]:
+    """Resolve the custom emoji for a team's vote button.
+
+    Checks the emoji_map for the team's acronym/name. Returns a PartialEmoji
+    for custom Discord emojis (usable on buttons), or None if only a flag/fallback
+    is available (flag shortcodes like :flag_us: aren't valid button emojis).
+    """
+    data = load_data_sync()
+    emoji_map = data.get("emoji_map", {})
+
+    # Check acronym first
+    acronym = team_data.get('acronym')
+    if acronym:
+        for key in (acronym, acronym.upper()):
+            if key in emoji_map:
+                try:
+                    return discord.PartialEmoji.from_str(str(emoji_map[key]))
+                except Exception:
+                    pass
+
+    # Check name-based keys
+    name = team_data.get('name', '')
+    if name:
+        key_short = "".join(c for c in name.split(' ')[0].upper() if c.isalnum())
+        if key_short in emoji_map:
+            try:
+                return discord.PartialEmoji.from_str(str(emoji_map[key_short]))
+            except Exception:
+                pass
+        key_long = "".join(c for c in name.upper() if c.isalnum())
+        if key_long in emoji_map:
+            try:
+                return discord.PartialEmoji.from_str(str(emoji_map[key_long]))
+            except Exception:
+                pass
+
+    return None
+
+
+def get_game_vote_emoji(game_slug: str, bot=None) -> Optional[discord.PartialEmoji]:
+    """Resolve the custom vote-button emoji for a game, if configured."""
+    data = load_data_sync()
+    emoji_str = data.get("game_vote_emojis", {}).get(game_slug)
+    if not emoji_str:
+        return None
+    # Try parsing as a custom emoji string like <:name:123456>
+    try:
+        return discord.PartialEmoji.from_str(emoji_str)
+    except Exception:
+        return None
 
 def safe_parse_datetime(iso_string):
     if not iso_string: return None
@@ -370,11 +464,13 @@ class PredictionView(discord.ui.View):
         label_a = get_label(team_a.get('name', 'Team A'), team_a.get('acronym'))
         label_b = get_label(team_b.get('name', 'Team B'), team_b.get('acronym'))
 
-        self.btn_a = discord.ui.Button(label=label_a, style=discord.ButtonStyle.primary, custom_id=f"vote_{match_id}_0")
+        emoji_a = get_team_button_emoji(team_a)
+        emoji_b = get_team_button_emoji(team_b)
+        self.btn_a = discord.ui.Button(label=label_a, style=discord.ButtonStyle.primary, custom_id=f"vote_{match_id}_0", emoji=emoji_a)
         self.btn_a.callback = self.vote_team_a
         self.add_item(self.btn_a)
 
-        self.btn_b = discord.ui.Button(label=label_b, style=discord.ButtonStyle.danger, custom_id=f"vote_{match_id}_1")
+        self.btn_b = discord.ui.Button(label=label_b, style=discord.ButtonStyle.danger, custom_id=f"vote_{match_id}_1", emoji=emoji_b)
         self.btn_b.callback = self.vote_team_b
         self.add_item(self.btn_b)
 
@@ -425,10 +521,847 @@ class PredictionView(discord.ui.View):
             save_data_sync(data)
         
         action = "switched your vote to" if switched else "voted for"
-        await interaction.response.send_message(f"✅ You {action} **{team_name}**!", ephemeral=True)
+        await interaction.response.send_message(f"✓ You {action} **{team_name}**!", ephemeral=True)
 
     async def vote_team_a(self, interaction: discord.Interaction): await self.handle_vote(interaction, 0)
     async def vote_team_b(self, interaction: discord.Interaction): await self.handle_vote(interaction, 1)
+
+
+class VoteRevealView(discord.ui.View):
+    """Green 'Vote' button on the minimal upcoming match embed in the channel.
+    Clicking it reveals the full embed + vote buttons in an ephemeral message."""
+
+    def __init__(self, match_id: str, game_slug: str):
+        super().__init__(timeout=None)
+        self.match_id = str(match_id)
+        self.game_slug = game_slug
+
+        emoji = get_game_vote_emoji(game_slug)
+        btn = discord.ui.Button(
+            label="Vote", style=discord.ButtonStyle.success,
+            custom_id=f"vote_reveal_{match_id}",
+            emoji=emoji
+        )
+        btn.callback = self.reveal_vote
+        self.add_item(btn)
+
+        details_btn = discord.ui.Button(
+            label="Details", style=discord.ButtonStyle.secondary,
+            custom_id=f"match_details_{match_id}"
+        )
+        details_btn.callback = self.show_details
+        self.add_item(details_btn)
+
+    async def show_details(self, interaction: discord.Interaction):
+        """Show full match embed ephemerally without vote buttons."""
+        cog = interaction.client.get_cog("Esports")
+        if not cog:
+            await interaction.response.send_message("❌ Esports cog not found.", ephemeral=True)
+            return
+
+        async with cog.data_lock:
+            data = load_data_sync()
+            match_info = data.get("active_matches", {}).get(self.match_id)
+
+        if not match_info:
+            await interaction.response.send_message("❌ Match details no longer available.", ephemeral=True)
+            return
+
+        teams = match_info.get("teams", [])
+        if len(teams) < 2:
+            await interaction.response.send_message("❌ Match data incomplete.", ephemeral=True)
+            return
+
+        match_details = await cog.get_pandascore_data(f"/matches/{self.match_id}")
+        if not match_details:
+            match_details = {"begin_at": match_info.get("start_time"), "status": "not_started",
+                             "opponents": [], "number_of_games": None, "league": {}, "serie": {}, "tournament": {}}
+
+        banner = await cog.generate_banner(
+            teams[0].get("image_url"), teams[1].get("image_url"),
+            GAME_LOGOS.get(self.game_slug), self.game_slug
+        )
+        embed = cog.build_match_embed(
+            self.game_slug, GAMES.get(self.game_slug), match_details,
+            teams[0], teams[1], match_info.get("votes", {}),
+            match_info.get("stream_url"), banner is not None
+        )
+
+        if banner:
+            await interaction.response.send_message(embed=embed, file=banner, ephemeral=True)
+        else:
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    async def reveal_vote(self, interaction: discord.Interaction):
+        cog = interaction.client.get_cog("Esports")
+        if not cog:
+            await interaction.response.send_message("❌ Esports cog not found.", ephemeral=True)
+            return
+
+        user_id = str(interaction.user.id)
+
+        async with cog.data_lock:
+            data = load_data_sync()
+            active = data.get("active_matches", {})
+
+        # Build vote queue: all open matches for this game the user hasn't voted on
+        now = datetime.datetime.now(datetime.timezone.utc)
+        queue = []
+        for mid, info in active.items():
+            if info.get("game_slug") != self.game_slug:
+                continue
+            start_dt = safe_parse_datetime(info.get("start_time"))
+            if start_dt and now >= start_dt:
+                continue  # voting locked
+            if user_id in info.get("votes", {}):
+                continue  # already voted
+            queue.append((mid, info, start_dt or now))
+
+        # Sort by start_time, but put the clicked match first
+        queue.sort(key=lambda x: x[2])
+        # Move the clicked match to front if it's in the queue
+        clicked_idx = next((i for i, (mid, *_) in enumerate(queue) if mid == self.match_id), None)
+        if clicked_idx is not None and clicked_idx > 0:
+            queue.insert(0, queue.pop(clicked_idx))
+
+        if not queue:
+            await interaction.response.send_message("✓ You've already voted on all open matches for this game!", ephemeral=True)
+            return
+
+        # Show first match in the queue
+        first_mid, first_info, _ = queue[0]
+        teams = first_info.get("teams", [])
+        if len(teams) < 2:
+            await interaction.response.send_message("❌ Match data incomplete.", ephemeral=True)
+            return
+
+        # Build full embed with banner
+        match_details = await cog.get_pandascore_data(f"/matches/{first_mid}")
+        if not match_details:
+            # Fallback: build embed from stored data
+            match_details = {"begin_at": first_info.get("start_time"), "status": "not_started",
+                             "opponents": [], "number_of_games": None, "league": {}, "serie": {}, "tournament": {}}
+
+        banner = await cog.generate_banner(
+            teams[0].get("image_url"), teams[1].get("image_url"),
+            GAME_LOGOS.get(self.game_slug), self.game_slug
+        )
+        embed = cog.build_match_embed(
+            self.game_slug, GAMES.get(self.game_slug), match_details,
+            teams[0], teams[1], first_info.get("votes", {}),
+            first_info.get("stream_url"), banner is not None
+        )
+
+        # Create the cycling vote view
+        remaining_queue = [(mid, info) for mid, info, _ in queue[1:]]
+        vote_view = VoteCycleView(first_mid, teams[0], teams[1], self.game_slug, remaining_queue, user_id)
+
+        if banner:
+            await interaction.response.send_message(embed=embed, file=banner, view=vote_view, ephemeral=True)
+        else:
+            await interaction.response.send_message(embed=embed, view=vote_view, ephemeral=True)
+
+
+class VoteCycleView(discord.ui.View):
+    """Vote buttons shown in the ephemeral message. After voting, cycles to next unvoted match."""
+
+    def __init__(self, match_id: str, team_a: dict, team_b: dict, game_slug: str,
+                 remaining_queue: list, user_id: str):
+        super().__init__(timeout=300)  # 5 min timeout for ephemeral
+        self.match_id = str(match_id)
+        self.game_slug = game_slug
+        self.remaining_queue = remaining_queue  # list of (mid, info) tuples
+        self.user_id = user_id
+        self.session_votes = []  # list of (team_name, match_display) for summary
+
+        def get_label(name, acronym):
+            label = f"Vote {acronym}" if acronym and len(name) > 15 else f"Vote {name}"
+            return label[:MAX_BUTTON_LABEL_LENGTH]
+
+        label_a = get_label(team_a.get('name', 'Team A'), team_a.get('acronym'))
+        label_b = get_label(team_b.get('name', 'Team B'), team_b.get('acronym'))
+
+        emoji_a = get_team_button_emoji(team_a)
+        emoji_b = get_team_button_emoji(team_b)
+        self.btn_a = discord.ui.Button(label=label_a, style=discord.ButtonStyle.primary, custom_id=f"vcycle_{match_id}_0_{secrets.token_hex(4)}", emoji=emoji_a)
+        self.btn_a.callback = self.vote_a
+        self.add_item(self.btn_a)
+
+        self.btn_b = discord.ui.Button(label=label_b, style=discord.ButtonStyle.danger, custom_id=f"vcycle_{match_id}_1_{secrets.token_hex(4)}", emoji=emoji_b)
+        self.btn_b.callback = self.vote_b
+        self.add_item(self.btn_b)
+
+    async def _handle_vote(self, interaction: discord.Interaction, team_index: int):
+        cog = interaction.client.get_cog("Esports")
+        if not cog:
+            await interaction.response.send_message("❌ Esports cog not found.", ephemeral=True)
+            return
+
+        match_id = self.match_id
+        team_name = "Selected Team"
+
+        async with cog.data_lock:
+            data = load_data_sync()
+            if match_id not in data["active_matches"]:
+                await interaction.response.send_message("❌ This match is closed.", ephemeral=True)
+                return
+
+            match_info = data["active_matches"][match_id]
+
+            start_dt = safe_parse_datetime(match_info.get("start_time"))
+            if start_dt and datetime.datetime.now(datetime.timezone.utc) >= start_dt:
+                await interaction.response.send_message("🔒 Voting is locked for this match!", ephemeral=True)
+                return
+
+            data["active_matches"][match_id]["votes"][self.user_id] = team_index
+            teams = match_info.get("teams", [])
+            if len(teams) > team_index >= 0:
+                team_name = teams[team_index]["name"]
+
+            save_data_sync(data)
+
+        # Record this vote in session
+        team_a_name = teams[0]["name"] if len(teams) >= 1 else "?"
+        team_b_name = teams[1]["name"] if len(teams) >= 2 else "?"
+        self.session_votes.append((team_name, team_a_name, team_b_name, team_index))
+
+        # Cycle to next match or show summary
+        if self.remaining_queue:
+            next_mid, next_info = self.remaining_queue.pop(0)
+            next_teams = next_info.get("teams", [])
+
+            # Re-check that user hasn't voted on this one in the meantime
+            async with cog.data_lock:
+                fresh = load_data_sync()
+                next_match = fresh.get("active_matches", {}).get(next_mid)
+
+            if not next_match or len(next_teams) < 2:
+                # Skip invalid, try next
+                return await self._show_summary(interaction)
+
+            if self.user_id in next_match.get("votes", {}):
+                # Already voted, skip to next
+                if self.remaining_queue:
+                    return await self._handle_vote_skip(interaction)
+                else:
+                    return await self._show_summary(interaction)
+
+            # Build embed for next match
+            match_details = await cog.get_pandascore_data(f"/matches/{next_mid}")
+            if not match_details:
+                match_details = {"begin_at": next_info.get("start_time"), "status": "not_started",
+                                 "opponents": [], "number_of_games": None, "league": {}, "serie": {}, "tournament": {}}
+
+            banner = await cog.generate_banner(
+                next_teams[0].get("image_url"), next_teams[1].get("image_url"),
+                GAME_LOGOS.get(self.game_slug), self.game_slug
+            )
+            embed = cog.build_match_embed(
+                self.game_slug, GAMES.get(self.game_slug), match_details,
+                next_teams[0], next_teams[1], next_match.get("votes", {}),
+                next_info.get("stream_url"), banner is not None
+            )
+
+            # Update this view's state for the next match
+            self.match_id = next_mid
+
+            # Create new view for next match buttons
+            new_view = VoteCycleView(next_mid, next_teams[0], next_teams[1], self.game_slug,
+                                     self.remaining_queue, self.user_id)
+            new_view.session_votes = self.session_votes
+
+            if banner:
+                await interaction.response.edit_message(embed=embed, attachments=[banner], view=new_view)
+            else:
+                await interaction.response.edit_message(embed=embed, attachments=[], view=new_view)
+        else:
+            await self._show_summary(interaction)
+
+    async def _handle_vote_skip(self, interaction: discord.Interaction):
+        """Skip matches already voted on and continue cycling."""
+        while self.remaining_queue:
+            next_mid, next_info = self.remaining_queue.pop(0)
+            cog = interaction.client.get_cog("Esports")
+            async with cog.data_lock:
+                fresh = load_data_sync()
+                next_match = fresh.get("active_matches", {}).get(next_mid)
+            if next_match and self.user_id not in next_match.get("votes", {}):
+                next_teams = next_info.get("teams", [])
+                if len(next_teams) >= 2:
+                    match_details = await cog.get_pandascore_data(f"/matches/{next_mid}")
+                    if not match_details:
+                        match_details = {"begin_at": next_info.get("start_time"), "status": "not_started",
+                                         "opponents": [], "number_of_games": None, "league": {}, "serie": {}, "tournament": {}}
+                    banner = await cog.generate_banner(
+                        next_teams[0].get("image_url"), next_teams[1].get("image_url"),
+                        GAME_LOGOS.get(self.game_slug), self.game_slug
+                    )
+                    embed = cog.build_match_embed(
+                        self.game_slug, GAMES.get(self.game_slug), match_details,
+                        next_teams[0], next_teams[1], next_match.get("votes", {}),
+                        next_info.get("stream_url"), banner is not None
+                    )
+                    self.match_id = next_mid
+                    new_view = VoteCycleView(next_mid, next_teams[0], next_teams[1], self.game_slug,
+                                             self.remaining_queue, self.user_id)
+                    new_view.session_votes = self.session_votes
+                    if banner:
+                        await interaction.response.edit_message(embed=embed, attachments=[banner], view=new_view)
+                    else:
+                        await interaction.response.edit_message(embed=embed, attachments=[], view=new_view)
+                    return
+        await self._show_summary(interaction)
+
+    async def _show_summary(self, interaction: discord.Interaction):
+        """Show vote session summary."""
+        count = len(self.session_votes)
+        lines = [f"✓ {count} vote{'s' if count != 1 else ''} recorded!\n"]
+        for team_name, team_a, team_b, idx in self.session_votes:
+            if idx == 0:
+                lines.append(f"• **✓{team_a}** vs {team_b}")
+            else:
+                lines.append(f"• {team_a} vs **✓{team_b}**")
+        summary = "\n".join(lines)
+        try:
+            await interaction.response.edit_message(content=summary, embed=None, attachments=[], view=None)
+        except discord.InteractionResponded:
+            await interaction.edit_original_response(content=summary, embed=None, attachments=[], view=None)
+
+    async def vote_a(self, interaction: discord.Interaction): await self._handle_vote(interaction, 0)
+    async def vote_b(self, interaction: discord.Interaction): await self._handle_vote(interaction, 1)
+
+
+class BatchVoteRevealView(discord.ui.View):
+    """Single 'Vote' button for a batch of upcoming matches. Opens the VoteCycleView with all matches queued."""
+
+    def __init__(self, match_ids: list, game_slug: str):
+        super().__init__(timeout=None)
+        self.match_ids = [str(mid) for mid in match_ids]
+        self.game_slug = game_slug
+
+        emoji = get_game_vote_emoji(game_slug)
+        btn = discord.ui.Button(
+            label="Vote", style=discord.ButtonStyle.success,
+            custom_id=f"batch_vote_reveal_{'_'.join(self.match_ids[:5])}",
+            emoji=emoji
+        )
+        btn.callback = self.reveal_vote
+        self.add_item(btn)
+
+    async def reveal_vote(self, interaction: discord.Interaction):
+        cog = interaction.client.get_cog("Esports")
+        if not cog:
+            await interaction.response.send_message("❌ Esports cog not found.", ephemeral=True)
+            return
+
+        user_id = str(interaction.user.id)
+
+        async with cog.data_lock:
+            data = load_data_sync()
+            active = data.get("active_matches", {})
+
+        # Build vote queue from batch match IDs
+        now = datetime.datetime.now(datetime.timezone.utc)
+        queue = []
+        for mid in self.match_ids:
+            info = active.get(mid)
+            if not info or info.get("game_slug") != self.game_slug:
+                continue
+            start_dt = safe_parse_datetime(info.get("start_time"))
+            if start_dt and now >= start_dt:
+                continue  # voting locked
+            if user_id in info.get("votes", {}):
+                continue  # already voted
+            queue.append((mid, info, start_dt or now))
+
+        # Also include any other open matches for this game not in the batch
+        for mid, info in active.items():
+            if mid in self.match_ids:
+                continue
+            if info.get("game_slug") != self.game_slug:
+                continue
+            start_dt = safe_parse_datetime(info.get("start_time"))
+            if start_dt and now >= start_dt:
+                continue
+            if user_id in info.get("votes", {}):
+                continue
+            queue.append((mid, info, start_dt or now))
+
+        queue.sort(key=lambda x: x[2])
+
+        if not queue:
+            await interaction.response.send_message("✓ You've already voted on all open matches for this game!", ephemeral=True)
+            return
+
+        first_mid, first_info, _ = queue[0]
+        teams = first_info.get("teams", [])
+        if len(teams) < 2:
+            await interaction.response.send_message("❌ Match data incomplete.", ephemeral=True)
+            return
+
+        match_details = await cog.get_pandascore_data(f"/matches/{first_mid}")
+        if not match_details:
+            match_details = {"begin_at": first_info.get("start_time"), "status": "not_started",
+                             "opponents": [], "number_of_games": None, "league": {}, "serie": {}, "tournament": {}}
+
+        banner = await cog.generate_banner(
+            teams[0].get("image_url"), teams[1].get("image_url"),
+            GAME_LOGOS.get(self.game_slug), self.game_slug
+        )
+        embed = cog.build_match_embed(
+            self.game_slug, GAMES.get(self.game_slug), match_details,
+            teams[0], teams[1], first_info.get("votes", {}),
+            first_info.get("stream_url"), banner is not None
+        )
+
+        remaining = [(mid, info) for mid, info, _ in queue[1:]]
+        view = VoteCycleView(first_mid, teams[0], teams[1], self.game_slug, remaining, user_id)
+
+        if banner:
+            await interaction.response.send_message(embed=embed, file=banner, view=view, ephemeral=True)
+        else:
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+class ResultDetailsView(discord.ui.View):
+    """Grey 'Details' button on the minimal result embed. Reveals full result with event info + match history."""
+
+    def __init__(self, match_id: str, game_slug: str):
+        super().__init__(timeout=None)
+        self.match_id = str(match_id)
+        self.game_slug = game_slug
+
+        btn = discord.ui.Button(
+            label="Details", style=discord.ButtonStyle.secondary,
+            custom_id=f"result_details_{match_id}"
+        )
+        btn.callback = self.show_details
+        self.add_item(btn)
+
+    async def show_details(self, interaction: discord.Interaction):
+        cog = interaction.client.get_cog("Esports")
+        if not cog:
+            await interaction.response.send_message("❌ Esports cog not found.", ephemeral=True)
+            return
+
+        async with cog.data_lock:
+            data = load_data_sync()
+            history = data.get("match_history", {}).get(self.match_id)
+            map_cache = data.get("map_data_cache", {}).get(self.match_id)
+
+        if not history:
+            await interaction.response.send_message("❌ Match details no longer available.", ephemeral=True)
+            return
+
+        teams = history.get("teams", [])
+        if len(teams) < 2:
+            await interaction.response.send_message("❌ Match data incomplete.", ephemeral=True)
+            return
+
+        # Reconstruct match_details from stored history
+        extra = history.get("match_details_extra", {})
+        match_details = {
+            "results": history.get("results", []),
+            "number_of_games": extra.get("number_of_games"),
+            "league": extra.get("league", {}),
+            "serie": extra.get("serie", {}),
+            "tournament": extra.get("tournament", {}),
+            "official_stream_url": extra.get("official_stream_url"),
+        }
+
+        # Use cached map data if available
+        map_data = map_cache.get("maps") if map_cache else None
+
+        # Build team dicts with required fields
+        team_a = {"name": teams[0]["name"], "id": teams[0].get("id"),
+                  "flag": teams[0].get("flag"), "acronym": teams[0].get("acronym")}
+        team_b = {"name": teams[1]["name"], "id": teams[1].get("id"),
+                  "flag": teams[1].get("flag"), "acronym": teams[1].get("acronym")}
+
+        embed = await cog.build_full_result_embed(
+            self.game_slug, match_details, team_a, team_b,
+            history.get("winner_idx", 0), map_data=map_data
+        )
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+class UnifiedUpcomingView(discord.ui.View):
+    """Single view for the unified upcoming match embed per game.
+    Vote button opens VoteCycleView, Details button shows match details with dropdown."""
+
+    def __init__(self, game_slug: str):
+        super().__init__(timeout=None)
+        self.game_slug = game_slug
+
+        emoji = get_game_vote_emoji(game_slug)
+        vote_btn = discord.ui.Button(
+            label="Vote", style=discord.ButtonStyle.success,
+            custom_id=f"unified_vote_{game_slug}",
+            emoji=emoji
+        )
+        vote_btn.callback = self.reveal_vote
+        self.add_item(vote_btn)
+
+        details_btn = discord.ui.Button(
+            label="Details", style=discord.ButtonStyle.secondary,
+            custom_id=f"unified_details_{game_slug}"
+        )
+        details_btn.callback = self.show_details
+        self.add_item(details_btn)
+
+    async def show_details(self, interaction: discord.Interaction):
+        """Show earliest upcoming match details ephemerally, with dropdown if multiple."""
+        cog = interaction.client.get_cog("Esports")
+        if not cog:
+            await interaction.response.send_message("❌ Esports cog not found.", ephemeral=True)
+            return
+
+        async with cog.data_lock:
+            data = load_data_sync()
+            active = data.get("active_matches", {})
+
+        # Gather all active matches for this game
+        now = datetime.datetime.now(datetime.timezone.utc)
+        matches = []
+        for mid, info in active.items():
+            if info.get("game_slug") != self.game_slug:
+                continue
+            if info.get("is_test"):
+                continue
+            matches.append((mid, info))
+
+        if not matches:
+            await interaction.response.send_message("❌ No match details available.", ephemeral=True)
+            return
+
+        # Sort by start time (earliest first)
+        matches.sort(key=lambda x: safe_parse_datetime(x[1].get("start_time")) or now)
+
+        # Show first match details
+        first_mid, first_info = matches[0]
+        teams = first_info.get("teams", [])
+        if len(teams) < 2:
+            await interaction.response.send_message("❌ Match data incomplete.", ephemeral=True)
+            return
+
+        match_details = await cog.get_pandascore_data(f"/matches/{first_mid}")
+        if not match_details:
+            match_details = {"begin_at": first_info.get("start_time"), "status": "not_started",
+                             "opponents": [], "number_of_games": None, "league": {}, "serie": {}, "tournament": {}}
+
+        banner = await cog.generate_banner(
+            teams[0].get("image_url"), teams[1].get("image_url"),
+            GAME_LOGOS.get(self.game_slug), self.game_slug
+        )
+        embed = cog.build_match_embed(
+            self.game_slug, GAMES.get(self.game_slug), match_details,
+            teams[0], teams[1], first_info.get("votes", {}),
+            first_info.get("stream_url"), banner is not None
+        )
+
+        # Build view with dropdown if multiple matches
+        view = None
+        if len(matches) > 1:
+            view = UpcomingDetailsDropdownView(self.game_slug, matches, first_mid)
+
+        kwargs = {"embed": embed, "ephemeral": True}
+        if banner:
+            kwargs["file"] = banner
+        if view:
+            kwargs["view"] = view
+        await interaction.response.send_message(**kwargs)
+
+    async def reveal_vote(self, interaction: discord.Interaction):
+        """Open VoteCycleView for all unvoted matches of this game."""
+        cog = interaction.client.get_cog("Esports")
+        if not cog:
+            await interaction.response.send_message("❌ Esports cog not found.", ephemeral=True)
+            return
+
+        user_id = str(interaction.user.id)
+
+        async with cog.data_lock:
+            data = load_data_sync()
+            active = data.get("active_matches", {})
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+        queue = []
+        for mid, info in active.items():
+            if info.get("game_slug") != self.game_slug:
+                continue
+            start_dt = safe_parse_datetime(info.get("start_time"))
+            if start_dt and now >= start_dt:
+                continue
+            if user_id in info.get("votes", {}):
+                continue
+            queue.append((mid, info, start_dt or now))
+
+        queue.sort(key=lambda x: x[2])
+
+        if not queue:
+            await interaction.response.send_message("✓ You've already voted on all open matches for this game!", ephemeral=True)
+            return
+
+        first_mid, first_info, _ = queue[0]
+        teams = first_info.get("teams", [])
+        if len(teams) < 2:
+            await interaction.response.send_message("❌ Match data incomplete.", ephemeral=True)
+            return
+
+        match_details = await cog.get_pandascore_data(f"/matches/{first_mid}")
+        if not match_details:
+            match_details = {"begin_at": first_info.get("start_time"), "status": "not_started",
+                             "opponents": [], "number_of_games": None, "league": {}, "serie": {}, "tournament": {}}
+
+        banner = await cog.generate_banner(
+            teams[0].get("image_url"), teams[1].get("image_url"),
+            GAME_LOGOS.get(self.game_slug), self.game_slug
+        )
+        embed = cog.build_match_embed(
+            self.game_slug, GAMES.get(self.game_slug), match_details,
+            teams[0], teams[1], first_info.get("votes", {}),
+            first_info.get("stream_url"), banner is not None
+        )
+
+        remaining = [(mid, info) for mid, info, _ in queue[1:]]
+        vote_view = VoteCycleView(first_mid, teams[0], teams[1], self.game_slug, remaining, user_id)
+
+        if banner:
+            await interaction.response.send_message(embed=embed, file=banner, view=vote_view, ephemeral=True)
+        else:
+            await interaction.response.send_message(embed=embed, view=vote_view, ephemeral=True)
+
+
+class UpcomingDetailsDropdownView(discord.ui.View):
+    """Ephemeral view with dropdown to select which upcoming match details to show."""
+
+    def __init__(self, game_slug: str, matches: list, selected_mid: str):
+        super().__init__(timeout=300)
+        self.game_slug = game_slug
+        self.matches = matches  # list of (mid, info)
+
+        options = []
+        for mid, info in matches:
+            teams = info.get("teams", [])
+            if len(teams) >= 2:
+                label = f"{teams[0]['name']} vs {teams[1]['name']}"
+            else:
+                label = f"Match {mid}"
+            if len(label) > 100:
+                label = label[:97] + "..."
+            options.append(discord.SelectOption(
+                label=label, value=mid, default=(mid == selected_mid)
+            ))
+
+        select = discord.ui.Select(
+            placeholder="Select a match...",
+            options=options,
+            custom_id=f"upcoming_details_select_{secrets.token_hex(4)}"
+        )
+        select.callback = self.on_select
+        self.add_item(select)
+
+    async def on_select(self, interaction: discord.Interaction):
+        selected_mid = interaction.data["values"][0]
+        cog = interaction.client.get_cog("Esports")
+        if not cog:
+            await interaction.response.edit_message(content="❌ Esports cog not found.", embed=None, view=None)
+            return
+
+        async with cog.data_lock:
+            data = load_data_sync()
+            match_info = data.get("active_matches", {}).get(selected_mid)
+
+        if not match_info:
+            await interaction.response.edit_message(content="❌ Match details no longer available.", embed=None, view=None)
+            return
+
+        teams = match_info.get("teams", [])
+        if len(teams) < 2:
+            await interaction.response.edit_message(content="❌ Match data incomplete.", embed=None, view=None)
+            return
+
+        match_details = await cog.get_pandascore_data(f"/matches/{selected_mid}")
+        if not match_details:
+            match_details = {"begin_at": match_info.get("start_time"), "status": "not_started",
+                             "opponents": [], "number_of_games": None, "league": {}, "serie": {}, "tournament": {}}
+
+        banner = await cog.generate_banner(
+            teams[0].get("image_url"), teams[1].get("image_url"),
+            GAME_LOGOS.get(self.game_slug), self.game_slug
+        )
+        embed = cog.build_match_embed(
+            self.game_slug, GAMES.get(self.game_slug), match_details,
+            teams[0], teams[1], match_info.get("votes", {}),
+            match_info.get("stream_url"), banner is not None
+        )
+
+        # Update dropdown defaults
+        for item in self.children:
+            if isinstance(item, discord.ui.Select):
+                for opt in item.options:
+                    opt.default = (opt.value == selected_mid)
+
+        if banner:
+            await interaction.response.edit_message(embed=embed, attachments=[banner], view=self)
+        else:
+            await interaction.response.edit_message(embed=embed, attachments=[], view=self)
+
+
+class UnifiedResultView(discord.ui.View):
+    """Dropdown on the unified daily result embed. Shows match details from today and yesterday."""
+
+    MAX_DROPDOWN_OPTIONS = 25  # Discord Select menu limit
+
+    def __init__(self, game_slug: str, result_date: str, match_options: list = None):
+        super().__init__(timeout=None)
+        self.game_slug = game_slug
+        self.result_date = result_date  # YYYY-MM-DD
+
+        options = []
+        if match_options:
+            for mid, label in match_options[:self.MAX_DROPDOWN_OPTIONS]:
+                if len(label) > 100:
+                    label = label[:97] + "..."
+                options.append(discord.SelectOption(label=label, value=mid))
+
+        if not options:
+            # Dummy option for persistent view registration (Discord requires at least one)
+            options = [discord.SelectOption(label="No matches available", value="none")]
+
+        select = discord.ui.Select(
+            placeholder="Match Details",
+            options=options,
+            custom_id=f"result_dropdown_{game_slug}_{result_date}"
+        )
+        select.callback = self.on_select
+        self.add_item(select)
+
+    async def on_select(self, interaction: discord.Interaction):
+        selected_mid = interaction.data["values"][0]
+        if selected_mid == "none":
+            await interaction.response.send_message("No match details available.", ephemeral=True)
+            return
+
+        cog = interaction.client.get_cog("Esports")
+        if not cog:
+            await interaction.response.send_message("❌ Esports cog not found.", ephemeral=True)
+            return
+
+        async with cog.data_lock:
+            data = load_data_sync()
+            mh = data.get("match_history", {}).get(selected_mid)
+            mc = data.get("map_data_cache", {}).get(selected_mid)
+
+        if not mh or len(mh.get("teams", [])) < 2:
+            await interaction.response.send_message("❌ Match details no longer available.", ephemeral=True)
+            return
+
+        teams = mh["teams"]
+        extra = mh.get("match_details_extra", {})
+        match_details = {
+            "results": mh.get("results", []),
+            "number_of_games": extra.get("number_of_games"),
+            "league": extra.get("league", {}),
+            "serie": extra.get("serie", {}),
+            "tournament": extra.get("tournament", {}),
+            "official_stream_url": extra.get("official_stream_url"),
+        }
+
+        map_data = mc.get("maps") if mc else None
+
+        team_a = {"name": teams[0]["name"], "id": teams[0].get("id"),
+                  "flag": teams[0].get("flag"), "acronym": teams[0].get("acronym")}
+        team_b = {"name": teams[1]["name"], "id": teams[1].get("id"),
+                  "flag": teams[1].get("flag"), "acronym": teams[1].get("acronym")}
+
+        game_slug = self.game_slug or mh.get("game_slug", "")
+        embed = await cog.build_full_result_embed(
+            game_slug, match_details, team_a, team_b,
+            mh.get("winner_idx", 0), map_data=map_data,
+            votes=mh.get("votes", {}), guild=interaction.guild
+        )
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+class ResultDetailsDropdownView(discord.ui.View):
+    """Ephemeral view with dropdown to select which result details to show."""
+
+    def __init__(self, game_slug: str, results: list, selected_mid: str):
+        super().__init__(timeout=300)
+        self.game_slug = game_slug
+        self.results = results  # list of (mid, match_history_entry)
+
+        options = []
+        for mid, mh in results:
+            teams = mh.get("teams", [])
+            if len(teams) >= 2:
+                label = f"{teams[0]['name']} vs {teams[1]['name']}"
+            else:
+                label = f"Match {mid}"
+            if len(label) > 100:
+                label = label[:97] + "..."
+            options.append(discord.SelectOption(
+                label=label, value=mid, default=(mid == selected_mid)
+            ))
+
+        select = discord.ui.Select(
+            placeholder="Select a result...",
+            options=options,
+            custom_id=f"result_details_select_{secrets.token_hex(4)}"
+        )
+        select.callback = self.on_select
+        self.add_item(select)
+
+    async def on_select(self, interaction: discord.Interaction):
+        selected_mid = interaction.data["values"][0]
+        cog = interaction.client.get_cog("Esports")
+        if not cog:
+            await interaction.response.edit_message(content="❌ Esports cog not found.", embed=None, view=None)
+            return
+
+        async with cog.data_lock:
+            data = load_data_sync()
+            mh = data.get("match_history", {}).get(selected_mid)
+            mc = data.get("map_data_cache", {}).get(selected_mid)
+
+        if not mh or len(mh.get("teams", [])) < 2:
+            await interaction.response.edit_message(content="❌ Result details no longer available.", embed=None, view=None)
+            return
+
+        teams = mh["teams"]
+        extra = mh.get("match_details_extra", {})
+        match_details = {
+            "results": mh.get("results", []),
+            "number_of_games": extra.get("number_of_games"),
+            "league": extra.get("league", {}),
+            "serie": extra.get("serie", {}),
+            "tournament": extra.get("tournament", {}),
+            "official_stream_url": extra.get("official_stream_url"),
+        }
+
+        map_data = mc.get("maps") if mc else None
+
+        team_a = {"name": teams[0]["name"], "id": teams[0].get("id"),
+                  "flag": teams[0].get("flag"), "acronym": teams[0].get("acronym")}
+        team_b = {"name": teams[1]["name"], "id": teams[1].get("id"),
+                  "flag": teams[1].get("flag"), "acronym": teams[1].get("acronym")}
+
+        embed = await cog.build_full_result_embed(
+            self.game_slug, match_details, team_a, team_b,
+            mh.get("winner_idx", 0), map_data=map_data,
+            votes=mh.get("votes", {}), guild=interaction.guild
+        )
+
+        for item in self.children:
+            if isinstance(item, discord.ui.Select):
+                for opt in item.options:
+                    opt.default = (opt.value == selected_mid)
+
+        await interaction.response.edit_message(embed=embed, view=self)
+
 
 class EmojiGuildSelect(discord.ui.Select):
     def __init__(self, bot, current_selected):
@@ -502,47 +1435,24 @@ class WipeAllScoresView(discord.ui.View):
         await interaction.response.edit_message(content=f"✅ {msg}", view=None)
 
 
-class UserIdModal(discord.ui.Modal):
-    """Modal for entering a user ID or mention."""
+class MemberSelectView(discord.ui.View):
+    """View with a member select dropdown for choosing a user."""
     def __init__(self, action_type: str, cog):
-        super().__init__(title=f"{action_type} - Enter User")
-        self.cog = cog
+        super().__init__(timeout=120)
         self.action_type = action_type
+        self.cog = cog
 
-        self.user_input = discord.ui.TextInput(
-            label="User ID or @mention",
-            placeholder="Enter user ID (e.g., 123456789) or @mention",
-            required=True,
-            max_length=50
-        )
-        self.add_item(self.user_input)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        user_input = self.user_input.value.strip()
-
-        # Extract user ID from mention or raw ID
-        user_id = None
-        if user_input.startswith("<@") and user_input.endswith(">"):
-            # Handle mention format <@123456> or <@!123456>
-            user_id = user_input.replace("<@", "").replace("!", "").replace(">", "")
-        else:
-            user_id = user_input
-
-        # Validate it's a number
-        if not user_id.isdigit():
-            await interaction.response.send_message("❌ Invalid user ID. Please enter a valid user ID or mention.", ephemeral=True)
-            return
-
-        # Check if user exists in guild
-        member = interaction.guild.get_member(int(user_id))
-        member_name = member.display_name if member else f"User {user_id}"
+    @discord.ui.select(cls=discord.ui.UserSelect, placeholder="Search for a member...", row=0)
+    async def select_member(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
+        member = select.values[0]
+        user_id = str(member.id)
+        member_name = member.display_name
 
         if self.action_type == "Wipe User Score":
             view = WipeUserGameSelectView(self.cog, user_id, member_name)
-            await interaction.response.send_message(
-                f"Select game to wipe scores for **{member_name}**:",
-                view=view,
-                ephemeral=True
+            await interaction.response.edit_message(
+                content=f"Select game to wipe scores for **{member_name}**:",
+                view=view
             )
         else:  # Modify Points
             modal = PointsInputModal(self.cog, user_id, member_name)
@@ -707,6 +1617,45 @@ class ModifyPointsGameSelectView(discord.ui.View):
             view=None
         )
 
+class GameEmojiModal(discord.ui.Modal, title="Game Vote Emojis"):
+    """Modal for configuring custom emojis on vote buttons per game.
+    Paste the custom emoji (e.g. <:val:123456789>) for each game, or leave blank to remove."""
+
+    def __init__(self, cog, current: dict):
+        super().__init__()
+        self.cog = cog
+        self._fields = {}
+        for slug, name in GAMES.items():
+            field = discord.ui.TextInput(
+                label=name,
+                placeholder="<:emoji_name:id> or leave blank",
+                default=current.get(slug, ""),
+                required=False,
+                max_length=60
+            )
+            self._fields[slug] = field
+            self.add_item(field)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        async with self.cog.data_lock:
+            data = load_data_sync()
+            emojis = data.get("game_vote_emojis", {})
+            for slug, field in self._fields.items():
+                val = field.value.strip()
+                if val:
+                    emojis[slug] = val
+                else:
+                    emojis.pop(slug, None)
+            data["game_vote_emojis"] = emojis
+            save_data_sync(data)
+
+        set_games = [GAMES[s] for s in self._fields if self._fields[s].value.strip()]
+        if set_games:
+            await interaction.response.send_message(f"Vote emojis updated for: {', '.join(set_games)}.", ephemeral=True)
+        else:
+            await interaction.response.send_message("All vote emojis cleared.", ephemeral=True)
+
+
 class EsportsAdminView(discord.ui.View):
     def __init__(self, cog):
         super().__init__(timeout=None)
@@ -754,13 +1703,13 @@ class EsportsAdminView(discord.ui.View):
     async def force_publish(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.show_force_publish_menu(interaction)
 
-    @discord.ui.button(label="Debug Strafe", style=discord.ButtonStyle.secondary, row=3)
-    async def debug_strafe(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.debug_strafe(interaction)
-
-    @discord.ui.button(label="Test Strafe", style=discord.ButtonStyle.success, row=3)
-    async def test_strafe_direct(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.test_strafe_direct(interaction)
+    @discord.ui.button(label="Game Emojis", style=discord.ButtonStyle.primary, row=3)
+    async def game_emojis(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Configure custom emojis shown on vote buttons per game."""
+        data = load_data_sync()
+        current = data.get("game_vote_emojis", {})
+        modal = GameEmojiModal(self.cog, current)
+        await interaction.response.send_modal(modal)
 
     # --- LEADERBOARD ADMIN BUTTONS ---
 
@@ -777,13 +1726,18 @@ class EsportsAdminView(discord.ui.View):
     @discord.ui.button(label="Wipe User Score", style=discord.ButtonStyle.danger, row=4)
     async def wipe_user_score(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Wipe a single user's score from a game's leaderboard."""
-        modal = UserIdModal("Wipe User Score", self.cog)
-        await interaction.response.send_modal(modal)
+        view = MemberSelectView("Wipe User Score", self.cog)
+        await interaction.response.send_message("Select a member to wipe their score:", view=view, ephemeral=True)
 
     @discord.ui.button(label="Modify Points", style=discord.ButtonStyle.primary, row=4)
     async def modify_points(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Add or remove points for a specific user."""
-        modal = UserIdModal("Modify Points", self.cog)
-        await interaction.response.send_modal(modal)
+        view = MemberSelectView("Modify Points", self.cog)
+        await interaction.response.send_message("Select a member to modify their points:", view=view, ephemeral=True)
+
+    @discord.ui.button(label="Overturn Result", style=discord.ButtonStyle.danger, row=4)
+    async def overturn_result(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Overturn a recent match result using stored match history."""
+        await self.cog.show_overturn_menu(interaction)
 
 

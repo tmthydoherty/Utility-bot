@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        @font-face {{
+            font-family: 'Cinzel';
+            src: url('file://{font_path}/Cinzel-Regular.ttf') format('truetype');
+            font-weight: normal;
+        }}
+        @font-face {{
+            font-family: 'Cinzel';
+            src: url('file://{font_path}/Cinzel-Bold.ttf') format('truetype');
+            font-weight: bold;
+        }}
+
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+
+        body {{
+            width: 920px;
+            font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+            background: #0a0c10;
+            color: #ffffff;
+        }}
+
+        .card {{
+            margin: 6px;
+            border-radius: 10px;
+            overflow: hidden;
+            background: #0e1015;
+            border: 1px solid rgba(255, 255, 255, 0.06);
+        }}
+
+        .header {{
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 16px 24px;
+            background: linear-gradient(135deg, #1a1423 0%, #2c1b3a 50%, #1a1423 100%);
+            border-bottom: 1px solid rgba(255, 160, 220, 0.15);
+        }}
+
+        .title {{
+            font-family: 'Cinzel', serif;
+            font-size: 22px;
+            font-weight: bold;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            color: #f4e1ff;
+        }}
+
+        .winner-pill {{
+            font-size: 13px;
+            font-weight: 700;
+            padding: 6px 14px;
+            border-radius: 14px;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+        }}
+
+        .winner-pill.red {{
+            background: rgba(255, 80, 80, 0.18);
+            color: #ff9898;
+            border: 1px solid rgba(255, 80, 80, 0.35);
+        }}
+
+        .winner-pill.blue {{
+            background: rgba(80, 150, 255, 0.18);
+            color: #a8c8ff;
+            border: 1px solid rgba(80, 150, 255, 0.35);
+        }}
+
+        .team-section {{
+            padding: 8px 0 0;
+        }}
+
+        .team-label {{
+            padding: 8px 20px 6px;
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }}
+
+        .team-label.red {{ color: #ff8585; }}
+        .team-label.blue {{ color: #85b0ff; }}
+
+        .column-headers, .player-row {{
+            display: grid;
+            grid-template-columns: 42px 1fr 54px 54px 54px 64px 70px 74px 68px 70px;
+            align-items: center;
+            padding: 0 18px;
+            gap: 6px;
+        }}
+
+        .column-headers {{
+            padding: 8px 18px;
+            font-size: 10px;
+            font-weight: 700;
+            color: rgba(180, 180, 220, 0.5);
+            text-transform: uppercase;
+            letter-spacing: 1.2px;
+            background: rgba(0, 0, 0, 0.25);
+        }}
+
+        .column-headers span {{ text-align: center; }}
+        .column-headers span:nth-child(2) {{ text-align: left; padding-left: 8px; }}
+
+        .player-row {{
+            height: 44px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+            font-size: 13px;
+            font-variant-numeric: tabular-nums;
+        }}
+
+        .player-row.red {{ background: rgba(255, 60, 60, 0.05); }}
+        .player-row.blue {{ background: rgba(60, 120, 255, 0.05); }}
+
+        .role {{
+            text-align: center;
+            font-size: 11px;
+            font-weight: 700;
+            padding: 3px 6px;
+            border-radius: 4px;
+            text-transform: uppercase;
+        }}
+
+        .role.vanguard {{ color: #8ee2ff; background: rgba(140, 220, 255, 0.08); }}
+        .role.duelist  {{ color: #ffae7a; background: rgba(255, 170, 120, 0.08); }}
+        .role.strategist {{ color: #a2ffb2; background: rgba(160, 255, 180, 0.08); }}
+
+        .name {{
+            font-weight: 700;
+            color: #ffffff;
+            padding-left: 8px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }}
+
+        .name .mvp {{
+            display: inline-block;
+            margin-left: 6px;
+            padding: 1px 5px;
+            font-size: 9px;
+            border-radius: 3px;
+            background: rgba(255, 215, 0, 0.18);
+            color: #ffd966;
+            letter-spacing: 1px;
+            font-weight: 800;
+        }}
+
+        .name .svp {{
+            display: inline-block;
+            margin-left: 6px;
+            padding: 1px 5px;
+            font-size: 9px;
+            border-radius: 3px;
+            background: rgba(180, 180, 255, 0.15);
+            color: #c7c7ff;
+            letter-spacing: 1px;
+            font-weight: 800;
+        }}
+
+        .stat {{ text-align: center; color: #cfd5e2; font-weight: 600; }}
+
+        .footer {{
+            padding: 10px 24px;
+            font-size: 10px;
+            color: rgba(180, 180, 220, 0.4);
+            letter-spacing: 1.4px;
+            text-transform: uppercase;
+            text-align: center;
+            background: rgba(0, 0, 0, 0.25);
+            border-top: 1px solid rgba(255, 255, 255, 0.04);
+        }}
+    </style>
+</head>
+<body>
+<div class="card">
+    <div class="header">
+        <div class="title">Marvel Rivals — Match Results</div>
+        <div class="winner-pill {winner_class}">{winner_label}</div>
+    </div>
+
+    <div class="column-headers">
+        <span>Role</span>
+        <span>Player</span>
+        <span>K</span>
+        <span>D</span>
+        <span>A</span>
+        <span>Final</span>
+        <span>Damage</span>
+        <span>Blocked</span>
+        <span>Healing</span>
+        <span>Medals</span>
+    </div>
+
+    <div class="team-section">
+        <div class="team-label red">Red Team</div>
+        {red_rows}
+    </div>
+
+    <div class="team-section">
+        <div class="team-label blue">Blue Team</div>
+        {blue_rows}
+    </div>
+
+    <div class="footer">Stats extracted from scoreboard screenshot</div>
+</div>
+</body>
+</html>

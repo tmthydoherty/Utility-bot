@@ -931,7 +931,7 @@ class RulesView(discord.ui.View):
 
                         view = KnockManagementView(self.bot, cog, interaction.user.id, vc.id)
                         embed = create_knock_management_embed(interaction.user, [], interaction.guild, user_vc_data)
-                        knock_msg = await thread.send(content=interaction.user.mention, embed=embed, view=view)
+                        knock_msg = await thread.send(embed=embed, view=view)
                         self.bot.add_view(view, message_id=knock_msg.id)
 
                         user_vc_data['knock_mgmt_msg_id'] = knock_msg.id
@@ -969,14 +969,18 @@ class UserSelectView(discord.ui.View):
     @discord.ui.select(cls=discord.ui.UserSelect, placeholder="Select user(s)...", min_values=1, max_values=10)
     async def user_select(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
         await interaction.response.defer(ephemeral=True)
-        
+
         # FIX: Validate cog is still loaded
         if not self.cog_ref or not hasattr(self.cog_ref, 'get_vc_data'):
             return await interaction.followup.send("❌ System error. Please try again.", ephemeral=True)
-        
+
         vc_data = self.cog_ref.get_vc_data(self.voice_channel.id)
-        if not vc_data: 
+        if not vc_data:
             return await interaction.followup.send("❌ VC no longer exists.", ephemeral=True)
+
+        # Owner-only check
+        if interaction.user.id != vc_data['owner_id']:
+            return await interaction.followup.send("❌ Only the VC owner can do this.", ephemeral=True)
         
         vc = interaction.guild.get_channel(self.voice_channel.id)
         if not vc: 
@@ -1156,7 +1160,193 @@ class UserSelectView(discord.ui.View):
         
         await interaction.followup.send(msg, ephemeral=True)
 
+async def process_knock(bot, cog, interaction, voice_id):
+    """Shared knock processing logic for both button and dropdown knock interactions."""
+    # Validate VC still exists
+    vc = await validate_vc_channel(bot, voice_id)
+    if not vc:
+        return await interaction.response.send_message("❌ This VC no longer exists.", ephemeral=True)
+
+    # Validate VC data - with auto-recovery
+    vc_data = cog.get_vc_data(voice_id)
+    if not vc_data:
+        logger.warning(f"VC data not found for knock on VC {voice_id}, attempting recovery")
+        try:
+            success = await cog.reconnect_vc(vc)
+            if success:
+                vc_data = cog.get_vc_data(voice_id)
+                logger.info(f"Auto-recovered VC {voice_id} during knock")
+        except Exception as e:
+            logger.error(f"Auto-recovery failed during knock for VC {voice_id}: {e}")
+
+        if not vc_data:
+            return await interaction.response.send_message("❌ This VC is no longer active. It may have been disconnected.", ephemeral=True)
+
+    # Validate user is a member
+    user = await validate_member(interaction.guild, interaction.user.id)
+    if not user:
+        logger.warning(f"User {interaction.user.id} not a member during knock attempt")
+        return await interaction.response.send_message("❌ You must be a member of this server.", ephemeral=True)
+
+    # Check if banned
+    if user.id in vc_data.get('bans', []):
+        return await interaction.response.send_message("❌ You are banned from this VC.", ephemeral=True)
+
+    # Check if owner
+    if user.id == vc_data['owner_id']:
+        return await interaction.response.send_message("❌ You own this VC.", ephemeral=True)
+
+    # Check if already in VC
+    if user in vc.members:
+        return await interaction.response.send_message("❌ You're already in this VC.", ephemeral=True)
+
+    # Check if already accepted
+    if voice_id in cog.accepted_knocks and user.id in cog.accepted_knocks[voice_id]:
+        return await interaction.response.send_message("✅ You already have access to this VC! Just join.", ephemeral=True)
+
+    # Check perms directly
+    overwrites = vc.overwrites_for(user)
+    if overwrites.connect is True:
+        return await interaction.response.send_message("✅ You already have access to this VC! Just join.", ephemeral=True)
+
+    # Check cooldown
+    bucket = cog.knock_cooldown.get_bucket(MockMessage(user))
+    retry_after = bucket.update_rate_limit()
+    if retry_after:
+        minutes = int(retry_after // 60)
+        seconds = int(retry_after % 60)
+        return await interaction.response.send_message(
+            f"⏱️ You're on knock cooldown! Try again in {minutes}m {seconds}s.",
+            ephemeral=True
+        )
+
+    # Initialize pending knocks if needed
+    if voice_id not in cog.pending_knocks:
+        cog.pending_knocks[voice_id] = []
+
+    # Check if already pending
+    if user.id in cog.pending_knocks[voice_id]:
+        return await interaction.response.send_message("⏳ You already have a pending knock request.", ephemeral=True)
+
+    # Cap pending knocks to prevent resource exhaustion
+    if len(cog.pending_knocks[voice_id]) >= 25:
+        return await interaction.response.send_message("❌ This VC has too many pending knocks. Try again later.", ephemeral=True)
+
+    # Add to pending knocks
+    cog.pending_knocks[voice_id].append(user.id)
+
+    # Update panel and send ping
+    try:
+        await cog.update_knock_panel(voice_id)
+        await cog.handle_knock_ping(voice_id)
+    except Exception as e:
+        logger.error(f"Error updating knock panel/ping for VC {voice_id}: {e}")
+
+    await interaction.response.send_message("✅ Knock sent! Wait for the owner to respond.", ephemeral=True)
+    logger.info(f"User {user.id} knocked on VC {voice_id}")
+
+
+def build_knock_hub_embed(knockable_vcs):
+    """Build the persistent knock hub embed based on active knockable VCs.
+
+    knockable_vcs: list of (vc_id, vc_name, is_full, member_count, user_limit, owner) tuples
+    """
+    if not knockable_vcs:
+        embed = discord.Embed(
+            description="No active locked VCs to join.",
+            color=discord.Color.greyple()
+        )
+        return embed
+
+    if len(knockable_vcs) == 1:
+        vc_id, vc_name, is_full, member_count, user_limit, owner = knockable_vcs[0]
+        embed = discord.Embed(color=discord.Color.red() if is_full else discord.Color.gold())
+        embed.set_author(name=vc_name, icon_url=owner.display_avatar.url if owner else None)
+        if is_full:
+            embed.description = "🔴 **FULL**\nClick **Knock** to request entry."
+        else:
+            embed.description = "Click **Knock** to request entry."
+        return embed
+
+    # 2+ VCs - list them
+    embed = discord.Embed(
+        description="Select a VC from the dropdown below to knock.",
+        color=discord.Color.gold()
+    )
+    lines = []
+    for vc_id, vc_name, is_full, member_count, user_limit, owner in knockable_vcs[:25]:
+        status = "🔴 FULL" if is_full else f"👥 {member_count}" + (f"/{user_limit}" if user_limit else "")
+        lines.append(f"**{vc_name}** — {status}")
+    embed.add_field(name="Active Locked VCs", value="\n".join(lines), inline=False)
+    if len(knockable_vcs) > 25:
+        embed.add_field(name="", value=f"*...and {len(knockable_vcs) - 25} more (showing first 25)*", inline=False)
+    return embed
+
+
+class KnockHubView(discord.ui.View):
+    """Persistent view for the single knock hub embed. Dynamically shows a button (1 VC) or dropdown (2+ VCs)."""
+    def __init__(self, bot, cog_ref, guild_id, knockable_vcs):
+        super().__init__(timeout=None)
+        self.bot = bot
+        self.cog_ref = cog_ref
+        self.guild_id = guild_id
+
+        if len(knockable_vcs) == 1:
+            vc_id, vc_name, is_full, member_count, user_limit, owner = knockable_vcs[0]
+            btn = discord.ui.Button(
+                label="Knock",
+                style=discord.ButtonStyle.primary,
+                custom_id=f"knock_hub_btn:{vc_id}"
+            )
+            btn.callback = self._knock_button_callback
+            self.add_item(btn)
+
+        elif len(knockable_vcs) >= 2:
+            options = []
+            for vc_id, vc_name, is_full, member_count, user_limit, owner in knockable_vcs[:25]:
+                emoji = "🔴" if is_full else "🚪"
+                label = vc_name[:100] if len(vc_name) > 100 else vc_name
+                options.append(discord.SelectOption(
+                    label=label,
+                    value=str(vc_id),
+                    emoji=emoji
+                ))
+            select = discord.ui.Select(
+                placeholder="Select a VC to knock on...",
+                options=options,
+                custom_id=f"knock_hub_select:{guild_id}"
+            )
+            select.callback = self._knock_select_callback
+            self.add_item(select)
+
+    async def _knock_button_callback(self, interaction: discord.Interaction):
+        cog = get_cog_safe(self.bot)
+        if not cog:
+            return await interaction.response.send_message("❌ System temporarily unavailable.", ephemeral=True)
+        # Parse VC ID from custom_id
+        custom_id = interaction.data.get("custom_id", "")
+        try:
+            voice_id = int(custom_id.split(":")[1])
+        except (IndexError, ValueError):
+            return await interaction.response.send_message("❌ Invalid button data.", ephemeral=True)
+        await process_knock(self.bot, cog, interaction, voice_id)
+
+    async def _knock_select_callback(self, interaction: discord.Interaction):
+        cog = get_cog_safe(self.bot)
+        if not cog:
+            return await interaction.response.send_message("❌ System temporarily unavailable.", ephemeral=True)
+        values = interaction.data.get("values", [])
+        if not values:
+            return await interaction.response.send_message("❌ No VC selected.", ephemeral=True)
+        try:
+            voice_id = int(values[0])
+        except ValueError:
+            return await interaction.response.send_message("❌ Invalid selection.", ephemeral=True)
+        await process_knock(self.bot, cog, interaction, voice_id)
+
+
 class HubEntryView(discord.ui.View):
+    """Legacy view kept for migration - handles old per-VC knock buttons until they are cleaned up."""
     def __init__(self, bot, cog_ref, owner_id, voice_id):
         super().__init__(timeout=None)
         self.bot = bot
@@ -1164,111 +1354,31 @@ class HubEntryView(discord.ui.View):
         self.owner_id = owner_id
         self.voice_id = voice_id
         self.knock_btn.custom_id = f"knock:{voice_id}"
-    
+
     @discord.ui.button(label="Knock", style=discord.ButtonStyle.primary)
     async def knock_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # FIX: Validate cog is loaded
         cog = get_cog_safe(self.bot)
         if not cog:
             return await interaction.response.send_message("❌ System temporarily unavailable. Please try again in a moment.", ephemeral=True)
-
-        # Validate VC still exists
-        vc = await validate_vc_channel(self.bot, self.voice_id)
-        if not vc:
-            return await interaction.response.send_message("❌ This VC no longer exists.", ephemeral=True)
-
-        # Validate VC data - with auto-recovery
-        vc_data = cog.get_vc_data(self.voice_id)
-        if not vc_data:
-            # FIX: Try auto-recovery if VC exists but data is missing
-            logger.warning(f"VC data not found for knock on VC {self.voice_id}, attempting recovery")
-            try:
-                success = await cog.reconnect_vc(vc)
-                if success:
-                    vc_data = cog.get_vc_data(self.voice_id)
-                    logger.info(f"Auto-recovered VC {self.voice_id} during knock")
-            except Exception as e:
-                logger.error(f"Auto-recovery failed during knock for VC {self.voice_id}: {e}")
-
-            if not vc_data:
-                return await interaction.response.send_message("❌ This VC is no longer active. It may have been disconnected.", ephemeral=True)
-
-        # Validate user is a member
-        user = await validate_member(interaction.guild, interaction.user.id)
-        if not user:
-            logger.warning(f"User {interaction.user.id} not a member during knock attempt")
-            return await interaction.response.send_message("❌ You must be a member of this server.", ephemeral=True)
-
-        # Check if banned
-        if user.id in vc_data.get('bans', []):
-            return await interaction.response.send_message("❌ You are banned from this VC.", ephemeral=True)
-
-        # Check if owner
-        if user.id == vc_data['owner_id']:
-            return await interaction.response.send_message("❌ You own this VC.", ephemeral=True)
-
-        # Check if already in VC
-        if user in vc.members:
-            return await interaction.response.send_message("❌ You're already in this VC.", ephemeral=True)
-
-        # Check if already accepted
-        if self.voice_id in cog.accepted_knocks and user.id in cog.accepted_knocks[self.voice_id]:
-            return await interaction.response.send_message("✅ You already have access to this VC! Just join.", ephemeral=True)
-
-        # Check perms directly
-        overwrites = vc.overwrites_for(user)
-        if overwrites.connect is True:
-            return await interaction.response.send_message("✅ You already have access to this VC! Just join.", ephemeral=True)
-
-        # Check cooldown
-        bucket = cog.knock_cooldown.get_bucket(MockMessage(user))
-        retry_after = bucket.update_rate_limit()
-        if retry_after:
-            minutes = int(retry_after // 60)
-            seconds = int(retry_after % 60)
-            return await interaction.response.send_message(
-                f"⏱️ You're on knock cooldown! Try again in {minutes}m {seconds}s.",
-                ephemeral=True
-            )
-
-        # Initialize pending knocks if needed
-        if self.voice_id not in cog.pending_knocks:
-            cog.pending_knocks[self.voice_id] = []
-
-        # Check if already pending
-        if user.id in cog.pending_knocks[self.voice_id]:
-            return await interaction.response.send_message("⏳ You already have a pending knock request.", ephemeral=True)
-
-        # Cap pending knocks to prevent resource exhaustion
-        if len(cog.pending_knocks[self.voice_id]) >= 25:
-            return await interaction.response.send_message("❌ This VC has too many pending knocks. Try again later.", ephemeral=True)
-
-        # Add to pending knocks
-        cog.pending_knocks[self.voice_id].append(user.id)
-
-        # Update panel and send ping
-        try:
-            await cog.update_knock_panel(self.voice_id)
-            await cog.handle_knock_ping(self.voice_id)
-        except Exception as e:
-            logger.error(f"Error updating knock panel/ping for VC {self.voice_id}: {e}")
-            # Still allow the knock to go through even if panel update fails
-
-        await interaction.response.send_message("✅ Knock sent! Wait for the owner to respond.", ephemeral=True)
-        logger.info(f"User {user.id} knocked on VC {self.voice_id}")
+        await process_knock(self.bot, cog, interaction, self.voice_id)
 
 class KnockManagementView(discord.ui.View):
-    def __init__(self, bot, cog_ref, owner_id, voice_id):
+    def __init__(self, bot, cog_ref, owner_id, voice_id, show_knock_buttons=False):
         super().__init__(timeout=None)
         self.bot = bot
         self.cog_ref = cog_ref
         self.owner_id = owner_id
         self.voice_id = voice_id
-        
+
         self.accept_btn.custom_id = f"knock_accept:{voice_id}"
         self.deny_btn.custom_id = f"knock_deny:{voice_id}"
         self.settings_select.custom_id = f"knock_settings:{voice_id}"
         self.reconnect_btn.custom_id = f"knock_reconnect:{voice_id}"
+
+        # Only show accept/deny buttons when there are pending knocks
+        if not show_knock_buttons:
+            self.remove_item(self.accept_btn)
+            self.remove_item(self.deny_btn)
     
     def _get_cog(self):
         """Get cog reference - ALWAYS get fresh from bot to handle reloads"""
@@ -1584,43 +1694,16 @@ class KnockManagementView(discord.ui.View):
         if not cog:
             return await interaction.response.send_message("❌ System temporarily unavailable.", ephemeral=True)
 
+        # Owner-only check
+        vc_data, error = await self._validate_owner_with_recovery(interaction, cog)
+        if error:
+            return await interaction.response.send_message(error, ephemeral=True)
+
         await interaction.response.defer(ephemeral=True)
 
-        # Parse owner name from thread name (format: "🔒 {owner}'s VC Settings")
         thread = interaction.channel
         if not isinstance(thread, discord.Thread):
             return await interaction.followup.send("❌ This button can only be used in a VC settings thread.", ephemeral=True)
-
-        # Check if VC is still tracked
-        vc_data = cog.get_vc_data(self.voice_id)
-        vc = interaction.guild.get_channel(self.voice_id)
-
-        # Determine if user is authorized
-        is_owner = False
-        is_in_vc = False
-
-        if vc_data:
-            is_owner = interaction.user.id == vc_data['owner_id']
-        else:
-            # VC data lost - parse owner from thread name
-            thread_name = thread.name
-            if "'s VC Settings" in thread_name:
-                # Extract owner name from thread
-                owner_name_part = thread_name.replace("🔒 ", "").replace("'s VC Settings", "")
-                # Check if user's display name matches
-                if owner_name_part.lower() in interaction.user.display_name.lower():
-                    is_owner = True
-
-        # Check if user is in the VC (if VC exists)
-        if vc:
-            is_in_vc = interaction.user in vc.members
-
-        # Authorization check: must be owner OR (if owner not in VC, must be in VC)
-        if not is_owner and not is_in_vc:
-            return await interaction.followup.send(
-                "❌ You must be the VC owner or be in the VC to use this button.",
-                ephemeral=True
-            )
 
         # Call the manual reconnect method
         try:

@@ -11755,7 +11755,7 @@ class ForceWinnerView(BaseMatchView):
         game_name = game.name if game else "Unknown"
         await self.cog.log_action(
             interaction.guild,
-            f"Match **{short_id}** ({game_name}) force winner set to **Red** by {interaction.user.display_name}"
+            f"{game_name} match {short_id} force winner: Red — by {interaction.user.display_name}"
         )
 
     @discord.ui.button(label="Blue Team Wins", style=discord.ButtonStyle.primary)
@@ -11769,7 +11769,7 @@ class ForceWinnerView(BaseMatchView):
         game_name = game.name if game else "Unknown"
         await self.cog.log_action(
             interaction.guild,
-            f"Match **{short_id}** ({game_name}) force winner set to **Blue** by {interaction.user.display_name}"
+            f"{game_name} match {short_id} force winner: Blue — by {interaction.user.display_name}"
         )
 
 
@@ -13502,8 +13502,8 @@ class StatsSelectDropdown(discord.ui.Select):
         # Use current month name for the monthly option
         current_month = datetime.now(timezone.utc).strftime('%B')
         options = [
-            discord.SelectOption(label=current_month, value="seasonal", description="This month's stats", default=True),
-            discord.SelectOption(label="Lifetime", value="lifetime", description="All-time stats"),
+            discord.SelectOption(label="All-Time", value="lifetime", description="All-time stats", default=True),
+            discord.SelectOption(label=current_month, value="seasonal", description="This month's stats"),
         ]
         # Add recent matches as options
         for i, match in enumerate(recent_matches[:5]):
@@ -13542,7 +13542,7 @@ class StatsImageView(discord.ui.View):
         self.recent_matches = recent_matches
         self.invoker_id = invoker_id
         self.guild = guild
-        self.current = 'seasonal'
+        self.current = 'lifetime'
         self.add_item(StatsSelectDropdown(recent_matches))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -13647,22 +13647,52 @@ class StatsImageView(discord.ui.View):
                 await interaction.followup.send("Failed to generate match scoreboard.", ephemeral=True)
 
 
+class SimpleStatsSelectDropdown(discord.ui.Select):
+    """Dropdown for selecting stats view on non-Valorant games: All-Time, Monthly, or specific matches."""
+
+    def __init__(self, recent_matches: List[dict]):
+        current_month = datetime.now(timezone.utc).strftime('%B')
+        options = [
+            discord.SelectOption(label="All-Time", value="lifetime", description="All-time stats", default=True),
+            discord.SelectOption(label=current_month, value="monthly", description="This month's stats"),
+        ]
+        for i, match in enumerate(recent_matches[:5]):
+            map_name = match.get('map_name') or match.get('match_map_name') or "Unknown"
+            won = match.get('team') == match.get('winning_team')
+            result = "W" if won else "L"
+            label = f"{map_name} ({result})"
+            if len(label) > 25:
+                label = label[:22] + "..."
+            match_id = match.get('match_id', i)
+            options.append(discord.SelectOption(
+                label=label,
+                value=f"match_{match_id}",
+                description=f"Match #{match.get('short_id') or match_id}"
+            ))
+        super().__init__(placeholder="Select stats view...", options=options, min_values=1, max_values=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.view.handle_selection(interaction, self.values[0])
+
+
 class SimpleStatsImageView(discord.ui.View):
-    """View for simple (non-Valorant) stats card with monthly/all-time toggle."""
+    """View for simple (non-Valorant) stats card with dropdown selection."""
 
     def __init__(self, cog: 'CustomMatch', member: discord.Member, game: 'GameConfig',
                  images: Dict[str, io.BytesIO], invoker_id: int, guild: discord.Guild,
-                 rivals_extras: Optional[Dict[str, dict]] = None):
+                 rivals_extras: Optional[Dict[str, dict]] = None,
+                 recent_matches: Optional[List[dict]] = None):
         super().__init__(timeout=None)
         self.cog = cog
         self.member = member
         self.game = game
-        self.images = images  # {'monthly': BytesIO, 'lifetime': BytesIO}
+        self.images = images  # {'monthly': BytesIO, 'lifetime': BytesIO, 'match_X': BytesIO}
         self.invoker_id = invoker_id
         self.guild = guild
         self.rivals_extras = rivals_extras or {}
+        self.recent_matches = recent_matches or []
         self.current = 'lifetime'
-        self._update_buttons()
+        self.add_item(SimpleStatsSelectDropdown(self.recent_matches))
 
     def _build_embed(self, variant: str) -> discord.Embed:
         filename = f"stats_{variant}.png"
@@ -13685,24 +13715,6 @@ class SimpleStatsImageView(discord.ui.View):
             )
         return embed
 
-    def _update_buttons(self):
-        self.clear_items()
-        monthly_btn = discord.ui.Button(
-            label=datetime.now(timezone.utc).strftime('%B'),
-            style=discord.ButtonStyle.secondary,
-            disabled=(self.current == 'monthly')
-        )
-        monthly_btn.callback = self.show_monthly
-        self.add_item(monthly_btn)
-
-        alltime_btn = discord.ui.Button(
-            label="All-Time",
-            style=discord.ButtonStyle.secondary,
-            disabled=(self.current == 'lifetime')
-        )
-        alltime_btn.callback = self.show_alltime
-        self.add_item(alltime_btn)
-
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.invoker_id:
             await interaction.response.send_message(
@@ -13711,23 +13723,41 @@ class SimpleStatsImageView(discord.ui.View):
             return False
         return True
 
-    async def show_monthly(self, interaction: discord.Interaction):
-        self.current = 'monthly'
-        self._update_buttons()
-        img = self.images['monthly']
-        img.seek(0)
-        file = discord.File(img, filename='stats_monthly.png')
-        embed = self._build_embed('monthly')
-        await interaction.response.edit_message(embed=embed, attachments=[file], view=self)
+    async def handle_selection(self, interaction: discord.Interaction, value: str):
+        self.current = value
 
-    async def show_alltime(self, interaction: discord.Interaction):
-        self.current = 'lifetime'
-        self._update_buttons()
-        img = self.images['lifetime']
-        img.seek(0)
-        file = discord.File(img, filename='stats_lifetime.png')
-        embed = self._build_embed('lifetime')
-        await interaction.response.edit_message(embed=embed, attachments=[file], view=self)
+        # Update dropdown default
+        for item in self.children:
+            if isinstance(item, SimpleStatsSelectDropdown):
+                for option in item.options:
+                    option.default = (option.value == value)
+
+        if value in self.images:
+            self.images[value].seek(0)
+            if value.startswith('match_'):
+                filename = 'scoreboard.png'
+                file = discord.File(self.images[value], filename=filename)
+                embed = discord.Embed(
+                    title=f"{self.member.display_name} - Match Scoreboard",
+                    color=COLOR_WHITE
+                )
+                embed.set_image(url=f"attachment://{filename}")
+            else:
+                filename = f'stats_{value}.png'
+                file = discord.File(self.images[value], filename=filename)
+                embed = self._build_embed(value)
+            await interaction.response.edit_message(embed=embed, attachments=[file], view=self)
+        elif value.startswith('match_'):
+            await interaction.response.defer()
+            match_id = int(value.replace('match_', ''))
+            embed, scoreboard_file = await self.cog._generate_match_scoreboard(self.guild, match_id)
+            if scoreboard_file:
+                # Cache the underlying BytesIO for re-selection
+                buf = scoreboard_file.fp
+                self.images[value] = buf
+                await interaction.edit_original_response(embed=embed, attachments=[scoreboard_file], view=self)
+            else:
+                await interaction.edit_original_response(embed=embed, attachments=[], view=self)
 
 
 # =============================================================================
@@ -21444,19 +21474,23 @@ class CustomMatch(commands.Cog):
                         self, target, game_config, images, recent_matches,
                         invoker_id=interaction.user.id, guild=interaction.guild
                     )
-                    images['seasonal'].seek(0)
-                    file = discord.File(images['seasonal'], filename='stats_seasonal.png')
+                    images['lifetime'].seek(0)
+                    file = discord.File(images['lifetime'], filename='stats_lifetime.png')
                     embed = discord.Embed(
                         title=f"{target.display_name} - {game_config.name} Stats",
                         color=COLOR_WHITE
                     )
-                    embed.set_image(url="attachment://stats_seasonal.png")
+                    embed.set_image(url="attachment://stats_lifetime.png")
                     await interaction.edit_original_response(embed=embed, attachments=[file], view=view)
                     return
             else:
-                # Non-Valorant: simplified stats card starting on current month
+                # Non-Valorant: simplified stats card starting on all-time
                 monthly_data = await self._gather_simple_stats_data(target, game_config, monthly=True, guild=interaction.guild)
                 lifetime_data = await self._gather_simple_stats_data(target, game_config, monthly=False, guild=interaction.guild)
+
+                recent_matches = await DatabaseHelper.get_player_recent_matches(
+                    target.id, game_config.game_id, limit=5, monthly=False
+                )
 
                 if is_rivals_game(game_config):
                     # Rivals: dedicated high-res stats card with all combat stats baked in
@@ -21486,6 +21520,7 @@ class CustomMatch(commands.Cog):
                         self, target, game_config, images,
                         invoker_id=interaction.user.id, guild=interaction.guild,
                         rivals_extras=None,
+                        recent_matches=recent_matches,
                     )
                     lifetime_image.seek(0)
                     file = discord.File(lifetime_image, filename='stats_lifetime.png')

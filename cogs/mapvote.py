@@ -717,7 +717,22 @@ class MapVote(commands.Cog, name="mapvote"):
                 return
             vote = guild_cfg["active_votes"].pop(message_id_str)
 
-            pool = [m for m, v in vote.get("votes", {}).items() for _ in v]
+            # Build weighted pool: maps with only 1 vote count as half weight,
+            # the other half goes to the top vote-getter to reduce unlikely upsets.
+            votes_dict = vote.get("votes", {})
+            vote_counts = {m: len(v) for m, v in votes_dict.items()}
+            top_map = max(vote_counts, key=vote_counts.get) if vote_counts else None
+            # Use fractional weighting scaled by 100 for integer pool entries
+            pool = []
+            bonus = 0
+            for m, count in vote_counts.items():
+                if count == 1:
+                    pool.extend([m] * 50)   # half weight (50 out of 100)
+                    bonus += 50             # other half goes to top map
+                elif count > 0:
+                    pool.extend([m] * (count * 100))
+            if bonus and top_map:
+                pool.extend([top_map] * bonus)
             winner = random.choice(pool) if pool else random.choice(vote["maps"])
 
             if match_id := vote.get("match_id"):

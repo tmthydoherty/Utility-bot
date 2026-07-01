@@ -1,0 +1,37 @@
+{
+    "1431565435010289778": {
+        "reaction_rules": [
+            {
+                "channel_id": 1431906751766331462,
+                "type": "role_mention",
+                "role_ids": [
+                    1431565435676921950
+                ]
+            },
+            {
+                "channel_id": 1431565437870669835,
+                "type": "role_mention",
+                "role_ids": [
+                    1431565435576516616
+                ]
+            },
+            {
+                "channel_id": 1439836850322669731,
+                "type": "role_mention",
+                "role_ids": [
+                    1431565435576516609
+                ]
+            },
+            {
+                "channel_id": 1465147303928135743,
+                "type": "role_mention",
+                "role_ids": [
+                    1465802543379517602
+                ]
+            }
+        ],
+        "media_channels": [
+            1431565437224751245
+        ]
+    }
+}

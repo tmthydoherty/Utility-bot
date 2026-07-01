@@ -19,7 +19,7 @@ DB_FILE = "qotd_database.db"
 ALLOWED_SETTINGS_KEYS = [
     'enabled', 'source_channel_id', 'source_bot_id', 'post_channel_ids',
     'ping_role_id', 'suggestion_log_channel_id', 'post_time', 'timezone',
-    'auto_thread', 'last_post_timestamp'
+    'auto_thread', 'last_post_timestamp', 'premium_role_ids'
 ]
 
 # --- Database Setup and Helpers ---
@@ -35,6 +35,11 @@ async def db_init():
             await db.execute("ALTER TABLE guild_settings ADD COLUMN last_post_timestamp INTEGER DEFAULT 0")
         except Exception:
             pass  # Column likely already exists
+
+        try:
+            await db.execute("ALTER TABLE guild_settings ADD COLUMN premium_role_ids TEXT DEFAULT '[]'")
+        except Exception:
+            pass
 
         await db.execute('''CREATE TABLE IF NOT EXISTS suggestions (id INTEGER PRIMARY KEY AUTOINCREMENT, question_text TEXT NOT NULL, suggester_id INTEGER NOT NULL, guild_id INTEGER NOT NULL, status TEXT DEFAULT 'pending', review_message_id INTEGER)''')
         await db.commit()
@@ -574,6 +579,255 @@ class SetupView(discord.ui.View):
         embed = await view.create_embed(interaction.guild)
         await interaction.response.edit_message(embed=embed, view=view)
 
+# --- Premium Roles & Question Review Views ---
+
+class PremiumRoleSelectView(discord.ui.View):
+    def __init__(self, cog):
+        super().__init__(timeout=120)
+        self.cog = cog
+
+    @discord.ui.select(
+        cls=discord.ui.RoleSelect,
+        placeholder="Select premium role(s)...",
+        min_values=0, max_values=10
+    )
+    async def role_select(self, interaction: discord.Interaction, select: discord.ui.RoleSelect):
+        role_ids = [r.id for r in select.values]
+        await update_guild_setting(interaction.guild.id, 'premium_role_ids', json.dumps(role_ids))
+
+        if role_ids:
+            mentions = ", ".join(r.mention for r in select.values)
+            msg = f"Premium roles set to: {mentions}\nUsers with these roles can use `/qotd_add`."
+        else:
+            msg = "Premium roles cleared. Only admins can add questions."
+
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(content=msg, view=self)
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
+class BulkAddQuestionModal(discord.ui.Modal, title="Add Questions"):
+    question_text = discord.ui.TextInput(
+        label="Questions (one per line)",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        placeholder="What is your favorite movie and why?\nIf you could have any superpower, what would it be?"
+    )
+
+    def __init__(self, review_view: "QuestionReviewView", *, is_initial: bool = False):
+        super().__init__()
+        self.review_view = review_view
+        self.is_initial = is_initial
+
+    async def on_submit(self, interaction: discord.Interaction):
+        new_questions = [q.strip() for q in self.question_text.value.split('\n') if q.strip()]
+        if not new_questions:
+            await interaction.response.send_message("No valid questions provided.", ephemeral=True)
+            return
+
+        self.review_view.pending_questions.extend(new_questions)
+        self.review_view.selected_index = None
+        self.review_view._rebuild_items()
+
+        if self.is_initial:
+            await interaction.response.send_message(
+                embed=self.review_view._build_embed(),
+                view=self.review_view,
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.edit_message(
+                embed=self.review_view._build_embed(),
+                view=self.review_view,
+            )
+
+
+class EditSingleQuestionModal(discord.ui.Modal, title="Edit Question"):
+    question_input = discord.ui.TextInput(
+        label="Question",
+        style=discord.TextStyle.paragraph,
+        required=True,
+        max_length=256,
+    )
+
+    def __init__(self, review_view: "QuestionReviewView", edit_index: int):
+        super().__init__()
+        self.review_view = review_view
+        self.edit_index = edit_index
+        self.question_input.default = review_view.pending_questions[edit_index]
+
+    async def on_submit(self, interaction: discord.Interaction):
+        new_text = self.question_input.value.strip()
+        if not new_text:
+            await interaction.response.send_message("Question cannot be empty.", ephemeral=True)
+            return
+
+        self.review_view.pending_questions[self.edit_index] = new_text
+        self.review_view.selected_index = None
+        self.review_view._rebuild_items()
+        await interaction.response.edit_message(
+            embed=self.review_view._build_embed(),
+            view=self.review_view,
+        )
+
+
+class QuestionReviewView(discord.ui.View):
+    def __init__(self, cog, user_id: int, panel_message: Optional[discord.Message] = None):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.user_id = user_id
+        self.panel_message = panel_message
+        self.pending_questions: List[str] = []
+        self.selected_index: Optional[int] = None
+        self._rebuild_items()
+
+    def _build_embed(self) -> discord.Embed:
+        embed = discord.Embed(title="Add Questions — Review", color=discord.Color.orange())
+        if not self.pending_questions:
+            embed.description = "*No questions added yet.* Click **Add More** to get started."
+        else:
+            lines = []
+            for i, q in enumerate(self.pending_questions):
+                preview = q[:100] + ("..." if len(q) > 100 else "")
+                lines.append(f"**{i+1}.** {preview}")
+            embed.description = "\n\n".join(lines)
+            embed.set_footer(text=f"{len(self.pending_questions)} question{'s' if len(self.pending_questions) != 1 else ''} pending")
+        return embed
+
+    def _rebuild_items(self):
+        self.clear_items()
+
+        if self.pending_questions:
+            options = [
+                discord.SelectOption(
+                    label=f"{i+1}. {q[:80]}{'...' if len(q) > 80 else ''}",
+                    value=str(i),
+                )
+                for i, q in enumerate(self.pending_questions[:25])
+            ]
+            select = discord.ui.Select(placeholder="Select a question to edit or remove...", options=options, row=0)
+            select.callback = self._select_callback
+            self.add_item(select)
+
+            edit_btn = discord.ui.Button(label="Edit Selected", style=discord.ButtonStyle.primary, row=1, disabled=self.selected_index is None)
+            edit_btn.callback = self._edit_callback
+            self.add_item(edit_btn)
+
+            remove_btn = discord.ui.Button(label="Remove Selected", style=discord.ButtonStyle.danger, row=1, disabled=self.selected_index is None)
+            remove_btn.callback = self._remove_callback
+            self.add_item(remove_btn)
+
+        action_row = 2 if self.pending_questions else 0
+        add_btn = discord.ui.Button(label="Add More", style=discord.ButtonStyle.success, row=action_row)
+        add_btn.callback = self._add_callback
+        self.add_item(add_btn)
+
+        if self.pending_questions:
+            submit_btn = discord.ui.Button(label=f"Submit All ({len(self.pending_questions)})", style=discord.ButtonStyle.success, row=action_row)
+            submit_btn.callback = self._submit_callback
+            self.add_item(submit_btn)
+
+        cancel_btn = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.secondary, row=action_row)
+        cancel_btn.callback = self._cancel_callback
+        self.add_item(cancel_btn)
+
+    async def _check_user(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This isn't your session.", ephemeral=True)
+            return False
+        return True
+
+    async def _select_callback(self, interaction: discord.Interaction):
+        if not await self._check_user(interaction):
+            return
+        self.selected_index = int(interaction.data["values"][0])
+        self._rebuild_items()
+        await interaction.response.edit_message(view=self)
+
+    async def _edit_callback(self, interaction: discord.Interaction):
+        if not await self._check_user(interaction):
+            return
+        if self.selected_index is not None and 0 <= self.selected_index < len(self.pending_questions):
+            await interaction.response.send_modal(EditSingleQuestionModal(self, self.selected_index))
+
+    async def _remove_callback(self, interaction: discord.Interaction):
+        if not await self._check_user(interaction):
+            return
+        if self.selected_index is not None and 0 <= self.selected_index < len(self.pending_questions):
+            self.pending_questions.pop(self.selected_index)
+            self.selected_index = None
+            self._rebuild_items()
+            await interaction.response.edit_message(embed=self._build_embed(), view=self)
+
+    async def _add_callback(self, interaction: discord.Interaction):
+        if not await self._check_user(interaction):
+            return
+        if len(self.pending_questions) >= 25:
+            return await interaction.response.send_message("Maximum 25 questions per batch.", ephemeral=True)
+        await interaction.response.send_modal(BulkAddQuestionModal(self))
+
+    async def _submit_callback(self, interaction: discord.Interaction):
+        if not await self._check_user(interaction):
+            return
+        if not self.pending_questions:
+            return await interaction.response.send_message("No questions to submit.", ephemeral=True)
+
+        for item in self.children:
+            item.disabled = True
+        submitting_embed = discord.Embed(
+            title="Submitting...",
+            description=f"Adding {len(self.pending_questions)} question(s)...",
+            color=discord.Color.orange(),
+        )
+        await interaction.response.edit_message(embed=submitting_embed, view=self)
+
+        added, skipped = 0, 0
+        try:
+            async with aiosqlite.connect(DB_FILE) as db:
+                for q in self.pending_questions:
+                    try:
+                        await db.execute("INSERT INTO questions (question_text, added_by_id) VALUES (?, ?)", (q, interaction.user.id))
+                        added += 1
+                    except Exception:
+                        skipped += 1
+                await db.commit()
+        except Exception as e:
+            error_embed = discord.Embed(title="Add Questions — Error", description=f"Database error: {e}", color=discord.Color.red())
+            await interaction.edit_original_response(embed=error_embed, view=self)
+            self.stop()
+            return
+
+        self.pending_questions.clear()
+        result = f"Successfully added **{added}** question{'s' if added != 1 else ''}."
+        if skipped:
+            result += f"\nSkipped **{skipped}** duplicate(s)."
+
+        done_embed = discord.Embed(title="Add Questions — Complete", description=result, color=discord.Color.green())
+        await interaction.edit_original_response(embed=done_embed, view=self)
+
+        if self.panel_message:
+            await self.cog.update_admin_panel(self.panel_message)
+        self.stop()
+
+    async def _cancel_callback(self, interaction: discord.Interaction):
+        if not await self._check_user(interaction):
+            return
+        self.pending_questions.clear()
+        for item in self.children:
+            item.disabled = True
+        cancel_embed = discord.Embed(title="Add Questions — Cancelled", description="No questions were added.", color=discord.Color.orange())
+        await interaction.response.edit_message(embed=cancel_embed, view=self)
+        self.stop()
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
 # --- Admin Panel View ---
 class AdminPanelView(discord.ui.View):
     # This view is ephemeral, timeout=None removed
@@ -609,7 +863,8 @@ class AdminPanelView(discord.ui.View):
 
     @discord.ui.button(label="Add Questions", style=discord.ButtonStyle.success, row=1)
     async def add_question_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        modal = AddQuestionModal(self.cog, interaction.message); await interaction.response.send_modal(modal)
+        review = QuestionReviewView(self.cog, interaction.user.id, panel_message=interaction.message)
+        await interaction.response.send_modal(BulkAddQuestionModal(review, is_initial=True))
 
     @discord.ui.button(label="Delete Question", style=discord.ButtonStyle.danger, row=1)
     async def delete_question_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -628,6 +883,20 @@ class AdminPanelView(discord.ui.View):
     async def clear_seen_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         view = ClearSeenConfirmView(self.cog, interaction.message)
         await interaction.response.send_message("**Are you sure you want to delete all seen questions?**\nThis will permanently remove any question that has `last_used_timestamp > 0`.", view=view, ephemeral=True)
+
+    @discord.ui.button(label="Premium Roles", style=discord.ButtonStyle.primary, row=3)
+    async def premium_roles_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        settings = await get_guild_settings(interaction.guild.id)
+        try:
+            current_roles = json.loads(settings.get('premium_role_ids', '[]'))
+        except json.JSONDecodeError:
+            current_roles = []
+        if current_roles:
+            mentions = ", ".join(f"<@&{rid}>" for rid in current_roles)
+            msg = f"**Current premium roles:** {mentions}\n\nSelect new role(s) to replace, or clear to remove all:"
+        else:
+            msg = "**No premium roles set.** Select role(s) to allow non-admins to use `/qotd_add`:"
+        await interaction.response.send_message(msg, view=PremiumRoleSelectView(self.cog), ephemeral=True)
 
     @discord.ui.button(label="Post Suggestion Panel", style=discord.ButtonStyle.success, row=3)
     async def post_suggestion_panel(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -691,43 +960,46 @@ class QOTDCog(commands.Cog):
 
     @tasks.loop(minutes=1)
     async def qotd_task(self):
-        await self.bot.wait_until_ready()
-        async with aiosqlite.connect(DB_FILE) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute("SELECT * FROM guild_settings WHERE enabled = TRUE") as cursor:
-                enabled_guilds = await cursor.fetchall()
+        try:
+            await self.bot.wait_until_ready()
+            async with aiosqlite.connect(DB_FILE) as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute("SELECT * FROM guild_settings WHERE enabled = TRUE") as cursor:
+                    enabled_guilds = await cursor.fetchall()
 
-        for settings_row in enabled_guilds:
-            settings = dict(settings_row); guild_id = settings['guild_id']
-            try:
+            for settings_row in enabled_guilds:
+                settings = dict(settings_row); guild_id = settings['guild_id']
                 try:
-                    tz = pytz.timezone(settings['timezone'])
-                except pytz.UnknownTimeZoneError:
-                    print(f"Guild {guild_id} has invalid timezone: {settings['timezone']}. Defaulting to UTC.")
-                    tz = pytz.timezone('UTC')
+                    try:
+                        tz = pytz.timezone(settings['timezone'])
+                    except pytz.UnknownTimeZoneError:
+                        print(f"Guild {guild_id} has invalid timezone: {settings['timezone']}. Defaulting to UTC.")
+                        tz = pytz.timezone('UTC')
 
-                now_in_tz = datetime.datetime.now(tz)
-                post_hour, post_minute = map(int, settings['post_time'].split(':'))
+                    now_in_tz = datetime.datetime.now(tz)
+                    post_hour, post_minute = map(int, settings['post_time'].split(':'))
 
-                last_post_ts = settings.get('last_post_timestamp', 0)
-                last_post = datetime.datetime.fromtimestamp(last_post_ts, tz) if last_post_ts > 0 else None
+                    last_post_ts = settings.get('last_post_timestamp', 0)
+                    last_post = datetime.datetime.fromtimestamp(last_post_ts, tz) if last_post_ts > 0 else None
 
-                # Check if we already posted today
-                if last_post and last_post.date() == now_in_tz.date():
-                    continue # Already posted today
+                    # Check if we already posted today
+                    if last_post and last_post.date() == now_in_tz.date():
+                        continue # Already posted today
 
-                # Post if it's the scheduled time OR if we missed today's post
-                scheduled_time_today = now_in_tz.replace(hour=post_hour, minute=post_minute, second=0, microsecond=0)
-                is_scheduled_time = now_in_tz.hour == post_hour and now_in_tz.minute == post_minute
-                missed_todays_post = now_in_tz > scheduled_time_today and (not last_post or last_post.date() < now_in_tz.date())
+                    # Post if it's the scheduled time OR if we missed today's post
+                    scheduled_time_today = now_in_tz.replace(hour=post_hour, minute=post_minute, second=0, microsecond=0)
+                    is_scheduled_time = now_in_tz.hour == post_hour and now_in_tz.minute == post_minute
+                    missed_todays_post = now_in_tz > scheduled_time_today and (not last_post or last_post.date() < now_in_tz.date())
 
-                if is_scheduled_time or missed_todays_post:
-                    if missed_todays_post:
-                        print(f"Guild {guild_id}: Posting missed QOTD (scheduled for {post_hour}:{post_minute:02d}, now is {now_in_tz.hour}:{now_in_tz.minute:02d})")
+                    if is_scheduled_time or missed_todays_post:
+                        if missed_todays_post:
+                            print(f"Guild {guild_id}: Posting missed QOTD (scheduled for {post_hour}:{post_minute:02d}, now is {now_in_tz.hour}:{now_in_tz.minute:02d})")
 
-                    await self.post_qotd(guild_id)
+                        await self.post_qotd(guild_id)
 
-            except Exception as e: print(f"Error in QOTD task for guild {guild_id}: {e}")
+                except Exception as e: print(f"Error in QOTD task for guild {guild_id}: {e}")
+        except Exception as e:
+            await self.bot.error_reporter.report("QOTD", f"qotd_task: {e}")
 
     @qotd_task.before_loop
     async def before_qotd_task(self): await self.bot.wait_until_ready()
@@ -856,6 +1128,27 @@ class QOTDCog(commands.Cog):
         view = AdminPanelView(self)
         view.update_toggle_buttons(settings) # Pass settings directly
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    async def can_user_add_questions(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.guild_permissions.manage_guild:
+            return True
+        settings = await get_guild_settings(interaction.guild.id)
+        try:
+            premium_role_ids = json.loads(settings.get('premium_role_ids', '[]'))
+        except json.JSONDecodeError:
+            premium_role_ids = []
+        if premium_role_ids and isinstance(interaction.user, discord.Member):
+            user_role_ids = {r.id for r in interaction.user.roles}
+            if user_role_ids & set(premium_role_ids):
+                return True
+        return False
+
+    @app_commands.command(name="qotd_add", description="Add new questions to the QOTD pool.")
+    async def qotd_add(self, interaction: discord.Interaction):
+        if not await self.can_user_add_questions(interaction):
+            return await interaction.response.send_message("You don't have permission to add questions.", ephemeral=True)
+        review = QuestionReviewView(self, interaction.user.id)
+        await interaction.response.send_modal(BulkAddQuestionModal(review, is_initial=True))
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(QOTDCog(bot))

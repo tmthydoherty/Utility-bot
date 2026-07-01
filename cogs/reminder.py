@@ -1,3 +1,4 @@
+import aiohttp
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
@@ -457,6 +458,31 @@ class Reminders(commands.Cog):
                     last_date = datetime.fromisoformat(last_fire).date()
                     if (next_fire.date() - last_date).days < 14:
                         next_fire += timedelta(weeks=1)
+
+        elif frequency == 'every_x_days':
+            try:
+                interval = int(schedule_data.get('interval_days', 1))
+            except (ValueError, TypeError):
+                return "Invalid interval"
+            last_ts = data.get('last_sent_timestamp')
+            if last_ts:
+                try:
+                    ts = int(last_ts) if isinstance(last_ts, str) else last_ts
+                    last_sent = datetime.fromtimestamp(ts, tz=timezone.utc)
+                    next_fire = last_sent.replace(hour=hour, minute=minute, second=0, microsecond=0) + timedelta(days=interval)
+                    if next_fire <= now_utc:
+                        # Already passed, next is today or tomorrow at fire time
+                        next_fire = now_utc.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                        if next_fire <= now_utc:
+                            next_fire += timedelta(days=1)
+                except (ValueError, TypeError, OSError):
+                    next_fire = now_utc.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                    if next_fire <= now_utc:
+                        next_fire += timedelta(days=1)
+            else:
+                next_fire = now_utc.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                if next_fire <= now_utc:
+                    next_fire += timedelta(days=1)
         else:
             return "Unknown frequency"
 
@@ -509,40 +535,57 @@ class Reminders(commands.Cog):
                     return True
                 last_date = datetime.fromisoformat(last_fire).date()
                 return (now_utc.date() - last_date).days >= 14
+        elif frequency == 'every_x_days':
+            try:
+                interval = int(schedule_data.get('interval_days', 1))
+            except (ValueError, TypeError):
+                return False
+            if not last_sent_timestamp:
+                return True  # Never sent, fire now
+            try:
+                ts = int(last_sent_timestamp) if isinstance(last_sent_timestamp, str) else last_sent_timestamp
+                last_sent = datetime.fromtimestamp(ts, tz=timezone.utc)
+                days_since = (now_utc.date() - last_sent.date()).days
+                return days_since >= interval
+            except (ValueError, TypeError, OSError):
+                return True
         return False
 
     # --- MAIN LOOP ---
     @tasks.loop(minutes=1)
     async def reminder_loop(self):
-        for rid, data in list(self.reminders.items()):
-            if not data.get('enabled', True) or data.get('type') == 'sticky':
-                continue
-
-            schedule_data = data.get('schedule_data', {})
-            guild_id = data.get('guild_id')
-            if not schedule_data or not guild_id:
-                continue
-
-            if self.check_schedule(schedule_data, data.get('last_sent_timestamp'), guild_id):
-                # Ensure skip_next is an integer
-                skip_next = data.get('skip_next', 0)
-                try:
-                    skip_next = int(skip_next) if isinstance(skip_next, str) else (skip_next or 0)
-                except (ValueError, TypeError):
-                    skip_next = 0
-
-                if skip_next > 0:
-                    self.reminders[rid]['skip_next'] = skip_next - 1
-                    logger.info(f"Skipped {data['name']}")
-                    await self.async_save_reminders()
+        try:
+            for rid, data in list(self.reminders.items()):
+                if not data.get('enabled', True) or data.get('type') == 'sticky':
                     continue
 
-                if await self.send_reminder(data):
-                    now_utc = datetime.now(timezone.utc)
-                    self.reminders[rid]['last_sent_timestamp'] = int(now_utc.timestamp())
-                    if schedule_data.get('frequency') == 'biweekly':
-                        schedule_data['last_biweekly_fire'] = now_utc.date().isoformat()
-                    await self.async_save_reminders()
+                schedule_data = data.get('schedule_data', {})
+                guild_id = data.get('guild_id')
+                if not schedule_data or not guild_id:
+                    continue
+
+                if self.check_schedule(schedule_data, data.get('last_sent_timestamp'), guild_id):
+                    # Ensure skip_next is an integer
+                    skip_next = data.get('skip_next', 0)
+                    try:
+                        skip_next = int(skip_next) if isinstance(skip_next, str) else (skip_next or 0)
+                    except (ValueError, TypeError):
+                        skip_next = 0
+
+                    if skip_next > 0:
+                        self.reminders[rid]['skip_next'] = skip_next - 1
+                        logger.info(f"Skipped {data['name']}")
+                        await self.async_save_reminders()
+                        continue
+
+                    if await self.send_reminder(data):
+                        now_utc = datetime.now(timezone.utc)
+                        self.reminders[rid]['last_sent_timestamp'] = int(now_utc.timestamp())
+                        if schedule_data.get('frequency') == 'biweekly':
+                            schedule_data['last_biweekly_fire'] = now_utc.date().isoformat()
+                        await self.async_save_reminders()
+        except Exception as e:
+            await self.bot.error_reporter.report("Reminder", f"reminder_loop: {e}")
 
     @reminder_loop.before_loop
     async def before_loop(self):
@@ -552,7 +595,15 @@ class Reminders(commands.Cog):
         cids = data.get('channel_ids', [])
         if not cids:
             return False
-        embed, view, content = self.build_embed(data), self.build_view(data), self.build_content(data)
+        delete_previous = data.get('delete_previous', False)
+        old_message_ids = data.get('last_message_ids', {})
+        plain_text = data.get('plain_text', False)
+        if plain_text:
+            embed, content = None, self.build_plain_content(data)
+        else:
+            embed, content = self.build_embed(data), self.build_content(data)
+        view = self.build_view(data)
+        new_message_ids = {}
         success = False
         for cid in cids:
             try:
@@ -563,6 +614,9 @@ class Reminders(commands.Cog):
                     except discord.NotFound:
                         logger.warning(f"Channel {cid} not found, skipping")
                         continue
+                    except aiohttp.ClientError:
+                        logger.warning(f"Network error fetching channel {cid}, skipping")
+                        continue
                     except discord.Forbidden:
                         logger.warning(f"No access to channel {cid}, skipping")
                         continue
@@ -570,18 +624,39 @@ class Reminders(commands.Cog):
                 if ch:
                     # Permission checks
                     perms = ch.permissions_for(ch.guild.me)
-                    if not perms.send_messages or not perms.embed_links:
-                        logger.warning(f"Missing send_messages or embed_links permission in {ch.name}")
+                    if not perms.send_messages:
+                        logger.warning(f"Missing send_messages permission in {ch.name}")
+                        continue
+                    if not plain_text and not perms.embed_links:
+                        logger.warning(f"Missing embed_links permission in {ch.name}")
                         continue
                     if view and not perms.manage_roles:
                         logger.warning(f"Missing manage_roles permission in {ch.name} - button may not work")
 
-                    await ch.send(content=content, embed=embed, view=view)
+                    # Delete previous message if enabled
+                    if delete_previous:
+                        old_mid = old_message_ids.get(str(cid))
+                        if old_mid:
+                            try:
+                                old_msg = await ch.fetch_message(int(old_mid))
+                                await old_msg.delete()
+                            except discord.NotFound:
+                                pass
+                            except discord.Forbidden:
+                                logger.warning(f"Cannot delete old reminder in {ch.name} (Missing Manage Messages?)")
+                            except Exception as e:
+                                logger.debug(f"Non-critical delete error: {e}")
+
+                    msg = await ch.send(content=content, embed=embed, view=view)
+                    new_message_ids[str(cid)] = msg.id
                     success = True
             except discord.Forbidden:
                 logger.error(f"Forbidden to send in channel {cid}")
             except Exception as e:
                 logger.error(f"Failed to send scheduled reminder to {cid}: {e}")
+
+        if new_message_ids:
+            data['last_message_ids'] = new_message_ids
         return success
 
     # --- BUILDERS ---
@@ -698,6 +773,31 @@ class Reminders(commands.Cog):
     def build_content(self, data):
         return f"<@&{data['ping_role_id']}>" if data.get('ping_role_id') else ""
 
+    def build_plain_content(self, data):
+        """Build full message content for plain text mode (no embed)."""
+        parts = []
+        if data.get('ping_role_id'):
+            parts.append(f"<@&{data['ping_role_id']}>")
+        if data.get('title_text'):
+            parts.append(f"**{data['title_text']}**")
+        msg = data.get('message', '')
+        # Add event timestamp
+        try:
+            if data.get('event_schedule'):
+                next_event_ts = self.get_next_event_time(data['event_schedule'])
+                if next_event_ts:
+                    msg += f"\n\n<t:{next_event_ts}:F>\n(<t:{next_event_ts}:R>)"
+            elif data.get('event_timestamp_utc'):
+                event_ts = data['event_timestamp_utc']
+                msg += f"\n\n<t:{event_ts}:F>\n(<t:{event_ts}:R>)"
+        except Exception as e:
+            logger.warning(f"Error building event timestamp for plain text: {e}")
+        if data.get('use_timestamp'):
+            msg += f"\n\n*Posted:* <t:{int(time.time())}:F>"
+        if msg:
+            parts.append(msg)
+        return "\n".join(parts)
+
     def build_view(self, data):
         reaction_role = data.get('reaction_role')
         # Validate reaction_role has required fields before building view
@@ -771,13 +871,15 @@ class Reminders(commands.Cog):
         if not perms.send_messages:
             logger.warning(f"Missing 'Send Messages' permission in {channel.name}")
             return
-        if not perms.embed_links:
-            logger.warning(f"Missing 'Embed Links' permission in {channel.name}")
-            return
 
         async with self.sticky_locks[rid]:
             data = self.reminders.get(rid)
             if not data:
+                return
+
+            plain_text = data.get('plain_text', False)
+            if not plain_text and not perms.embed_links:
+                logger.warning(f"Missing 'Embed Links' permission in {channel.name}")
                 return
 
             sticky_map = data.get('last_sticky_ids', {})
@@ -799,10 +901,16 @@ class Reminders(commands.Cog):
 
             # 3. SEND NEW with TIMEOUT
             try:
+                if plain_text:
+                    send_content = self.build_plain_content(data)
+                    send_embed = None
+                else:
+                    send_content = self.build_content(data)
+                    send_embed = self.build_embed(data)
                 msg = await asyncio.wait_for(
                     channel.send(
-                        content=self.build_content(data),
-                        embed=self.build_embed(data),
+                        content=send_content,
+                        embed=send_embed,
                         view=self.build_view(data)
                     ),
                     timeout=10.0
@@ -965,6 +1073,9 @@ def _format_schedule_summary(data):
     elif freq == 'monthly':
         dom = schedule_data.get('day_of_month', '?')
         return f"Monthly Day {dom} {time_utc} UTC"
+    elif freq == 'every_x_days':
+        interval = schedule_data.get('interval_days', 1)
+        return f"Every {interval} day(s) {time_utc} UTC"
     return freq.title()
 
 
@@ -1004,6 +1115,8 @@ def build_detail_embed(cog, rid, data):
         lines.append(f"**Next:** {next_fire}")
         skip_next = data.get('skip_next', 0)
         skipped_dates = data.get('skipped_dates', [])
+        if data.get('delete_previous'):
+            lines.append("**Delete Previous:** Yes")
         if skip_next:
             lines.append(f"**Skip Count:** {skip_next} occurrence(s)")
         if skipped_dates:
@@ -1102,6 +1215,27 @@ def get_next_occurrences(data, n=8):
             if month > 12:
                 month = 1
                 year += 1
+    elif frequency == 'every_x_days':
+        try:
+            interval = int(schedule_data.get('interval_days', 1))
+        except (ValueError, TypeError):
+            return []
+        next_dt = now_utc.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if next_dt <= now_utc:
+            next_dt += timedelta(days=1)
+        # Align to interval from last sent if available
+        last_ts = data.get('last_sent_timestamp')
+        if last_ts:
+            try:
+                ts = int(last_ts) if isinstance(last_ts, str) else last_ts
+                last_sent = datetime.fromtimestamp(ts, tz=timezone.utc)
+                aligned = last_sent.replace(hour=hour, minute=minute, second=0, microsecond=0) + timedelta(days=interval)
+                if aligned > now_utc:
+                    next_dt = aligned
+            except (ValueError, TypeError, OSError):
+                pass
+        for i in range(n):
+            occurrences.append(next_dt + timedelta(days=interval * i))
     return occurrences[:n]
 
 
@@ -1324,12 +1458,11 @@ class ReminderDetailView(BaseView):
             new_d.update({
                 'name': f"{d['name']} (Copy)", 'editing_key': None,
                 'last_sent_timestamp': None, 'last_sticky_ids': {},
+                'last_message_ids': {},
                 'skip_next': 0, 'skipped_dates': []
             })
-            await interaction.response.edit_message(
-                content=None,
-                embed=discord.Embed(title="Configure Duplicate", description="Set up the copied reminder.", color=0x2B2D31),
-                view=ReminderConfigView(self.cog, new_d, self.guild)
+            await interaction.response.send_modal(
+                ReminderModal(self.cog, d['type'], new_d, guild=self.guild)
             )
 
         elif action == "delete":
@@ -1552,7 +1685,10 @@ class ReminderModal(discord.ui.Modal):
             'event_schedule': self.data.get('event_schedule'),
             'last_sent_timestamp': self.data.get('last_sent_timestamp'),
             'skip_next': self.data.get('skip_next', 0),
-            'skipped_dates': self.data.get('skipped_dates', [])
+            'skipped_dates': self.data.get('skipped_dates', []),
+            'delete_previous': self.data.get('delete_previous', False),
+            'last_message_ids': self.data.get('last_message_ids', {}),
+            'plain_text': self.data.get('plain_text', False)
         }
 
         img_url = new_data['image_url'].strip()
@@ -1618,6 +1754,7 @@ class ScheduleView(BaseView):
 
         self.selected_days = list(schedule_data.get('days_of_week') or [])
         self.selected_dom = schedule_data.get('day_of_month')
+        self.selected_interval = schedule_data.get('interval_days')
         self.build_ui()
 
     def _summary(self):
@@ -1630,6 +1767,8 @@ class ScheduleView(BaseView):
                 pass
         elif self.selected_frequency == 'monthly' and self.selected_dom:
             parts.append(f"**Day of Month:** {self.selected_dom}")
+        elif self.selected_frequency == 'every_x_days' and self.selected_interval:
+            parts.append(f"**Interval:** Every {self.selected_interval} day(s)")
         if self.selected_hour is not None and self.selected_minute is not None:
             parts.append(f"**Time:** {self.selected_hour:02d}:{self.selected_minute:02d} (local)")
         return "\n".join(parts)
@@ -1640,6 +1779,7 @@ class ScheduleView(BaseView):
             placeholder="Frequency...",
             options=[
                 discord.SelectOption(label="Daily", value="daily", default=self.selected_frequency == 'daily'),
+                discord.SelectOption(label="Every X Days", value="every_x_days", default=self.selected_frequency == 'every_x_days'),
                 discord.SelectOption(label="Weekly", value="weekly", default=self.selected_frequency == 'weekly'),
                 discord.SelectOption(label="Biweekly", value="biweekly", default=self.selected_frequency == 'biweekly'),
                 discord.SelectOption(label="Monthly", value="monthly", default=self.selected_frequency == 'monthly'),
@@ -1673,6 +1813,14 @@ class ScheduleView(BaseView):
             )
             dom_select.callback = self.on_dom
             self.add_item(dom_select)
+        elif self.selected_frequency == 'every_x_days':
+            interval_select = discord.ui.Select(
+                placeholder="Post every how many days?",
+                options=[discord.SelectOption(label=f"Every {i} days", value=str(i), default=self.selected_interval == i) for i in range(2, 26)],
+                row=1
+            )
+            interval_select.callback = self.on_interval
+            self.add_item(interval_select)
 
         hour_select = discord.ui.Select(
             placeholder="Hour (0-23)...",
@@ -1694,14 +1842,33 @@ class ScheduleView(BaseView):
         info_btn = discord.ui.Button(label=f"Timezone: {guild_tz}", style=discord.ButtonStyle.secondary, disabled=True, row=4)
         self.add_item(info_btn)
 
+        back_btn = discord.ui.Button(label="Back", style=discord.ButtonStyle.secondary, row=4)
+        back_btn.callback = self.on_back
+        self.add_item(back_btn)
+
         next_btn = discord.ui.Button(label="Next: Event Time", style=discord.ButtonStyle.primary, row=4)
         next_btn.callback = self.on_next
         self.add_item(next_btn)
+
+    async def on_back(self, interaction: discord.Interaction):
+        if self.editing_rid:
+            d = self.cog.reminders.get(self.editing_rid)
+            if d:
+                return await interaction.response.edit_message(
+                    content=None,
+                    embed=build_detail_embed(self.cog, self.editing_rid, d),
+                    view=ReminderDetailView(self.cog, self.editing_rid, self.guild)
+                )
+        guild_reminders = {k: v for k, v in self.cog.reminders.items() if v.get('guild_id') == self.guild.id}
+        await interaction.response.edit_message(
+            content=None, embed=build_panel_embed(guild_reminders), view=ReminderPanelView(self.cog, self.guild)
+        )
 
     async def on_frequency(self, interaction: discord.Interaction):
         self.selected_frequency = interaction.data['values'][0]
         self.selected_days = []
         self.selected_dom = None
+        self.selected_interval = None
         self.build_ui()
         await interaction.response.edit_message(
             embed=discord.Embed(title="Schedule Configuration", description=self._summary(), color=0x2B2D31),
@@ -1717,6 +1884,13 @@ class ScheduleView(BaseView):
 
     async def on_dom(self, interaction: discord.Interaction):
         self.selected_dom = int(interaction.data['values'][0])
+        await interaction.response.edit_message(
+            embed=discord.Embed(title="Schedule Configuration", description=self._summary(), color=0x2B2D31),
+            view=self
+        )
+
+    async def on_interval(self, interaction: discord.Interaction):
+        self.selected_interval = int(interaction.data['values'][0])
         await interaction.response.edit_message(
             embed=discord.Embed(title="Schedule Configuration", description=self._summary(), color=0x2B2D31),
             view=self
@@ -1743,6 +1917,8 @@ class ScheduleView(BaseView):
             return await interaction.response.send_message("Please select at least one day of the week.", ephemeral=True)
         if self.selected_frequency == 'monthly' and self.selected_dom is None:
             return await interaction.response.send_message("Please select a day of month.", ephemeral=True)
+        if self.selected_frequency == 'every_x_days' and not self.selected_interval:
+            return await interaction.response.send_message("Please select how many days between posts.", ephemeral=True)
 
         guild_tz = self.cog.get_guild_timezone(interaction.guild.id)
         time_local = f"{self.selected_hour:02d}:{self.selected_minute:02d}"
@@ -1757,6 +1933,8 @@ class ScheduleView(BaseView):
             schedule_data['days_of_week'] = self.selected_days
         elif self.selected_frequency == 'monthly':
             schedule_data['day_of_month'] = self.selected_dom
+        elif self.selected_frequency == 'every_x_days':
+            schedule_data['interval_days'] = self.selected_interval
         self.data['schedule_data'] = schedule_data
 
         await interaction.response.edit_message(
@@ -1780,6 +1958,10 @@ class EventTimestampChoiceView(BaseView):
         self.guild = guild
         self.editing_rid = editing_rid
 
+        back_btn = discord.ui.Button(label="Back", style=discord.ButtonStyle.secondary)
+        back_btn.callback = self.on_back
+        self.add_item(back_btn)
+
         skip_btn = discord.ui.Button(label="No Event Time (Skip)", style=discord.ButtonStyle.secondary)
         skip_btn.callback = self.on_skip
         self.add_item(skip_btn)
@@ -1787,6 +1969,13 @@ class EventTimestampChoiceView(BaseView):
         add_btn = discord.ui.Button(label="Add Event Time", style=discord.ButtonStyle.primary)
         add_btn.callback = self.on_add
         self.add_item(add_btn)
+
+    async def on_back(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(
+            content=None,
+            embed=discord.Embed(title="Schedule Configuration", description="Configure when this reminder fires.", color=0x2B2D31),
+            view=ScheduleView(self.cog, self.data, self.guild, editing_rid=self.editing_rid)
+        )
 
     async def on_skip(self, interaction: discord.Interaction):
         await interaction.response.edit_message(
@@ -1828,6 +2017,10 @@ class EventScheduleConfigView(BaseView):
 
     def build_ui(self):
         self.clear_items()
+
+        back_btn = discord.ui.Button(label="Back", style=discord.ButtonStyle.secondary, row=0)
+        back_btn.callback = self.on_back
+        self.add_item(back_btn)
 
         name_btn = discord.ui.Button(
             label=f"Event Name: {self.event_name or '(not set)'}",
@@ -1892,6 +2085,17 @@ class EventScheduleConfigView(BaseView):
         )
         minute_select.callback = self.on_minute
         self.add_item(minute_select)
+
+    async def on_back(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(
+            content=None,
+            embed=discord.Embed(
+                title="Add Event Timestamp?",
+                description="Should this reminder include a recurring event timestamp?\nExample: a reminder fires 1 hour before an event, and shows when the event actually starts.",
+                color=0x2B2D31
+            ),
+            view=EventTimestampChoiceView(self.cog, self.data, self.guild, editing_rid=self.editing_rid)
+        )
 
     async def on_name_button(self, interaction: discord.Interaction):
         await interaction.response.send_modal(EventNameModal(self))
@@ -2041,19 +2245,38 @@ class ReminderConfigView(BaseView):
         self.colors.callback = on_color
         self.add_item(self.colors)
 
-        # Row 3: Reaction role | Timestamp toggle
+        # Row 3: Reaction role | Timestamp toggle | Plain text | Delete previous
         rr_btn = discord.ui.Button(label="Reaction Role Button", style=discord.ButtonStyle.secondary, row=3)
         rr_btn.callback = self.on_reaction_role
         self.add_item(rr_btn)
 
         ts_enabled = data.get('use_timestamp', False)
         self.timestamp_btn = discord.ui.Button(
-            label=f"Dynamic Timestamp [{'ON' if ts_enabled else 'OFF'}]",
+            label=f"Timestamp [{'ON' if ts_enabled else 'OFF'}]",
             style=discord.ButtonStyle.primary if ts_enabled else discord.ButtonStyle.secondary,
             row=3
         )
         self.timestamp_btn.callback = self.on_timestamp
         self.add_item(self.timestamp_btn)
+
+        pt_enabled = data.get('plain_text', False)
+        self.plain_text_btn = discord.ui.Button(
+            label=f"Plain Text [{'ON' if pt_enabled else 'OFF'}]",
+            style=discord.ButtonStyle.primary if pt_enabled else discord.ButtonStyle.secondary,
+            row=3
+        )
+        self.plain_text_btn.callback = self.on_plain_text
+        self.add_item(self.plain_text_btn)
+
+        if data.get('type') == 'scheduled':
+            dp_enabled = data.get('delete_previous', False)
+            self.delete_prev_btn = discord.ui.Button(
+                label=f"Del Previous [{'ON' if dp_enabled else 'OFF'}]",
+                style=discord.ButtonStyle.primary if dp_enabled else discord.ButtonStyle.secondary,
+                row=3
+            )
+            self.delete_prev_btn.callback = self.on_delete_previous
+            self.add_item(self.delete_prev_btn)
 
         # Row 4: Preview | Save | Back
         preview_btn = discord.ui.Button(label="Preview", style=discord.ButtonStyle.secondary, row=4)
@@ -2074,18 +2297,38 @@ class ReminderConfigView(BaseView):
     async def on_timestamp(self, interaction: discord.Interaction):
         self.data['use_timestamp'] = not self.data.get('use_timestamp', False)
         ts_on = self.data['use_timestamp']
-        self.timestamp_btn.label = f"Dynamic Timestamp [{'ON' if ts_on else 'OFF'}]"
+        self.timestamp_btn.label = f"Timestamp [{'ON' if ts_on else 'OFF'}]"
         self.timestamp_btn.style = discord.ButtonStyle.primary if ts_on else discord.ButtonStyle.secondary
+        await interaction.response.edit_message(view=self)
+
+    async def on_plain_text(self, interaction: discord.Interaction):
+        self.data['plain_text'] = not self.data.get('plain_text', False)
+        pt_on = self.data['plain_text']
+        self.plain_text_btn.label = f"Plain Text [{'ON' if pt_on else 'OFF'}]"
+        self.plain_text_btn.style = discord.ButtonStyle.primary if pt_on else discord.ButtonStyle.secondary
+        await interaction.response.edit_message(view=self)
+
+    async def on_delete_previous(self, interaction: discord.Interaction):
+        self.data['delete_previous'] = not self.data.get('delete_previous', False)
+        dp_on = self.data['delete_previous']
+        self.delete_prev_btn.label = f"Delete Previous [{'ON' if dp_on else 'OFF'}]"
+        self.delete_prev_btn.style = discord.ButtonStyle.primary if dp_on else discord.ButtonStyle.secondary
         await interaction.response.edit_message(view=self)
 
     async def on_preview(self, interaction: discord.Interaction):
         if self.channels.values:
             self.data['channel_ids'] = [c.id for c in self.channels.values]
         preview_view = self.cog.build_view(self.data)
-        content = self.cog.build_content(self.data) or None
-        await interaction.response.send_message(
-            content=content, embed=self.cog.build_embed(self.data), view=preview_view, ephemeral=True
-        )
+        if self.data.get('plain_text'):
+            content = self.cog.build_plain_content(self.data) or None
+            await interaction.response.send_message(
+                content=content, view=preview_view, ephemeral=True
+            )
+        else:
+            content = self.cog.build_content(self.data) or None
+            await interaction.response.send_message(
+                content=content, embed=self.cog.build_embed(self.data), view=preview_view, ephemeral=True
+            )
 
     async def on_back(self, interaction: discord.Interaction):
         if self.data.get('type') == 'scheduled':
@@ -2095,9 +2338,9 @@ class ReminderConfigView(BaseView):
                 view=EventTimestampChoiceView(self.cog, self.data, self.guild, editing_rid=self.editing_rid)
             )
         else:
-            guild_reminders = {k: v for k, v in self.cog.reminders.items() if v.get('guild_id') == self.guild.id}
-            await interaction.response.edit_message(
-                content=None, embed=build_panel_embed(guild_reminders), view=ReminderPanelView(self.cog, self.guild)
+            # Re-open the content modal so the user can edit name/title/message
+            await interaction.response.send_modal(
+                ReminderModal(self.cog, self.data['type'], self.data, self.editing_rid, guild=self.guild)
             )
 
     async def do_save(self, interaction: discord.Interaction):

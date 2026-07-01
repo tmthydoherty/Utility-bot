@@ -559,28 +559,33 @@ class VoteRevealView(discord.ui.View):
             await interaction.response.send_message("❌ Esports cog not found.", ephemeral=True)
             return
 
+        # Defer immediately — API calls and image downloads can exceed Discord's 3s limit
+        await interaction.response.defer(ephemeral=True)
+
         async with cog.data_lock:
             data = load_data_sync()
             match_info = data.get("active_matches", {}).get(self.match_id)
 
         if not match_info:
-            await interaction.response.send_message("❌ Match details no longer available.", ephemeral=True)
+            await interaction.followup.send("❌ Match details no longer available.", ephemeral=True)
             return
 
         teams = match_info.get("teams", [])
         if len(teams) < 2:
-            await interaction.response.send_message("❌ Match data incomplete.", ephemeral=True)
+            await interaction.followup.send("❌ Match data incomplete.", ephemeral=True)
             return
 
-        match_details = await cog.get_pandascore_data(f"/matches/{self.match_id}")
+        match_details, banner = await asyncio.gather(
+            cog.get_pandascore_data(f"/matches/{self.match_id}"),
+            cog.generate_banner(
+                teams[0].get("image_url"), teams[1].get("image_url"),
+                GAME_LOGOS.get(self.game_slug), self.game_slug
+            )
+        )
         if not match_details:
             match_details = {"begin_at": match_info.get("start_time"), "status": "not_started",
                              "opponents": [], "number_of_games": None, "league": {}, "serie": {}, "tournament": {}}
 
-        banner = await cog.generate_banner(
-            teams[0].get("image_url"), teams[1].get("image_url"),
-            GAME_LOGOS.get(self.game_slug), self.game_slug
-        )
         embed = cog.build_match_embed(
             self.game_slug, GAMES.get(self.game_slug), match_details,
             teams[0], teams[1], match_info.get("votes", {}),
@@ -588,15 +593,18 @@ class VoteRevealView(discord.ui.View):
         )
 
         if banner:
-            await interaction.response.send_message(embed=embed, file=banner, ephemeral=True)
+            await interaction.followup.send(embed=embed, file=banner, ephemeral=True)
         else:
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
 
     async def reveal_vote(self, interaction: discord.Interaction):
         cog = interaction.client.get_cog("Esports")
         if not cog:
             await interaction.response.send_message("❌ Esports cog not found.", ephemeral=True)
             return
+
+        # Defer immediately — API calls and image downloads can exceed Discord's 3s limit
+        await interaction.response.defer(ephemeral=True)
 
         user_id = str(interaction.user.id)
 
@@ -625,27 +633,28 @@ class VoteRevealView(discord.ui.View):
             queue.insert(0, queue.pop(clicked_idx))
 
         if not queue:
-            await interaction.response.send_message("✓ You've already voted on all open matches for this game!", ephemeral=True)
+            await interaction.followup.send("✓ You've already voted on all open matches for this game!", ephemeral=True)
             return
 
         # Show first match in the queue
         first_mid, first_info, _ = queue[0]
         teams = first_info.get("teams", [])
         if len(teams) < 2:
-            await interaction.response.send_message("❌ Match data incomplete.", ephemeral=True)
+            await interaction.followup.send("❌ Match data incomplete.", ephemeral=True)
             return
 
-        # Build full embed with banner
-        match_details = await cog.get_pandascore_data(f"/matches/{first_mid}")
+        # Build full embed with banner (parallel fetch)
+        match_details, banner = await asyncio.gather(
+            cog.get_pandascore_data(f"/matches/{first_mid}"),
+            cog.generate_banner(
+                teams[0].get("image_url"), teams[1].get("image_url"),
+                GAME_LOGOS.get(self.game_slug), self.game_slug
+            )
+        )
         if not match_details:
-            # Fallback: build embed from stored data
             match_details = {"begin_at": first_info.get("start_time"), "status": "not_started",
                              "opponents": [], "number_of_games": None, "league": {}, "serie": {}, "tournament": {}}
 
-        banner = await cog.generate_banner(
-            teams[0].get("image_url"), teams[1].get("image_url"),
-            GAME_LOGOS.get(self.game_slug), self.game_slug
-        )
         embed = cog.build_match_embed(
             self.game_slug, GAMES.get(self.game_slug), match_details,
             teams[0], teams[1], first_info.get("votes", {}),
@@ -657,9 +666,9 @@ class VoteRevealView(discord.ui.View):
         vote_view = VoteCycleView(first_mid, teams[0], teams[1], self.game_slug, remaining_queue, user_id)
 
         if banner:
-            await interaction.response.send_message(embed=embed, file=banner, view=vote_view, ephemeral=True)
+            await interaction.followup.send(embed=embed, file=banner, view=vote_view, ephemeral=True)
         else:
-            await interaction.response.send_message(embed=embed, view=vote_view, ephemeral=True)
+            await interaction.followup.send(embed=embed, view=vote_view, ephemeral=True)
 
 
 class VoteCycleView(discord.ui.View):
@@ -697,20 +706,23 @@ class VoteCycleView(discord.ui.View):
             await interaction.response.send_message("❌ Esports cog not found.", ephemeral=True)
             return
 
+        # Defer immediately — API calls and image downloads can exceed Discord's 3s limit
+        await interaction.response.defer()
+
         match_id = self.match_id
         team_name = "Selected Team"
 
         async with cog.data_lock:
             data = load_data_sync()
             if match_id not in data["active_matches"]:
-                await interaction.response.send_message("❌ This match is closed.", ephemeral=True)
+                await interaction.edit_original_response(content="❌ This match is closed.", embed=None, view=None)
                 return
 
             match_info = data["active_matches"][match_id]
 
             start_dt = safe_parse_datetime(match_info.get("start_time"))
             if start_dt and datetime.datetime.now(datetime.timezone.utc) >= start_dt:
-                await interaction.response.send_message("🔒 Voting is locked for this match!", ephemeral=True)
+                await interaction.edit_original_response(content="🔒 Voting is locked for this match!", embed=None, view=None)
                 return
 
             data["active_matches"][match_id]["votes"][self.user_id] = team_index
@@ -746,16 +758,18 @@ class VoteCycleView(discord.ui.View):
                 else:
                     return await self._show_summary(interaction)
 
-            # Build embed for next match
-            match_details = await cog.get_pandascore_data(f"/matches/{next_mid}")
+            # Build embed for next match (parallel fetch)
+            match_details, banner = await asyncio.gather(
+                cog.get_pandascore_data(f"/matches/{next_mid}"),
+                cog.generate_banner(
+                    next_teams[0].get("image_url"), next_teams[1].get("image_url"),
+                    GAME_LOGOS.get(self.game_slug), self.game_slug
+                )
+            )
             if not match_details:
                 match_details = {"begin_at": next_info.get("start_time"), "status": "not_started",
                                  "opponents": [], "number_of_games": None, "league": {}, "serie": {}, "tournament": {}}
 
-            banner = await cog.generate_banner(
-                next_teams[0].get("image_url"), next_teams[1].get("image_url"),
-                GAME_LOGOS.get(self.game_slug), self.game_slug
-            )
             embed = cog.build_match_embed(
                 self.game_slug, GAMES.get(self.game_slug), match_details,
                 next_teams[0], next_teams[1], next_match.get("votes", {}),
@@ -771,9 +785,9 @@ class VoteCycleView(discord.ui.View):
             new_view.session_votes = self.session_votes
 
             if banner:
-                await interaction.response.edit_message(embed=embed, attachments=[banner], view=new_view)
+                await interaction.edit_original_response(embed=embed, attachments=[banner], view=new_view)
             else:
-                await interaction.response.edit_message(embed=embed, attachments=[], view=new_view)
+                await interaction.edit_original_response(embed=embed, attachments=[], view=new_view)
         else:
             await self._show_summary(interaction)
 
@@ -788,14 +802,16 @@ class VoteCycleView(discord.ui.View):
             if next_match and self.user_id not in next_match.get("votes", {}):
                 next_teams = next_info.get("teams", [])
                 if len(next_teams) >= 2:
-                    match_details = await cog.get_pandascore_data(f"/matches/{next_mid}")
+                    match_details, banner = await asyncio.gather(
+                        cog.get_pandascore_data(f"/matches/{next_mid}"),
+                        cog.generate_banner(
+                            next_teams[0].get("image_url"), next_teams[1].get("image_url"),
+                            GAME_LOGOS.get(self.game_slug), self.game_slug
+                        )
+                    )
                     if not match_details:
                         match_details = {"begin_at": next_info.get("start_time"), "status": "not_started",
                                          "opponents": [], "number_of_games": None, "league": {}, "serie": {}, "tournament": {}}
-                    banner = await cog.generate_banner(
-                        next_teams[0].get("image_url"), next_teams[1].get("image_url"),
-                        GAME_LOGOS.get(self.game_slug), self.game_slug
-                    )
                     embed = cog.build_match_embed(
                         self.game_slug, GAMES.get(self.game_slug), match_details,
                         next_teams[0], next_teams[1], next_match.get("votes", {}),
@@ -806,9 +822,9 @@ class VoteCycleView(discord.ui.View):
                                              self.remaining_queue, self.user_id)
                     new_view.session_votes = self.session_votes
                     if banner:
-                        await interaction.response.edit_message(embed=embed, attachments=[banner], view=new_view)
+                        await interaction.edit_original_response(embed=embed, attachments=[banner], view=new_view)
                     else:
-                        await interaction.response.edit_message(embed=embed, attachments=[], view=new_view)
+                        await interaction.edit_original_response(embed=embed, attachments=[], view=new_view)
                     return
         await self._show_summary(interaction)
 
@@ -822,10 +838,7 @@ class VoteCycleView(discord.ui.View):
             else:
                 lines.append(f"• {team_a} vs **✓{team_b}**")
         summary = "\n".join(lines)
-        try:
-            await interaction.response.edit_message(content=summary, embed=None, attachments=[], view=None)
-        except discord.InteractionResponded:
-            await interaction.edit_original_response(content=summary, embed=None, attachments=[], view=None)
+        await interaction.edit_original_response(content=summary, embed=None, attachments=[], view=None)
 
     async def vote_a(self, interaction: discord.Interaction): await self._handle_vote(interaction, 0)
     async def vote_b(self, interaction: discord.Interaction): await self._handle_vote(interaction, 1)
@@ -853,6 +866,9 @@ class BatchVoteRevealView(discord.ui.View):
         if not cog:
             await interaction.response.send_message("❌ Esports cog not found.", ephemeral=True)
             return
+
+        # Defer immediately — API calls and image downloads can exceed Discord's 3s limit
+        await interaction.response.defer(ephemeral=True)
 
         user_id = str(interaction.user.id)
 
@@ -890,24 +906,26 @@ class BatchVoteRevealView(discord.ui.View):
         queue.sort(key=lambda x: x[2])
 
         if not queue:
-            await interaction.response.send_message("✓ You've already voted on all open matches for this game!", ephemeral=True)
+            await interaction.followup.send("✓ You've already voted on all open matches for this game!", ephemeral=True)
             return
 
         first_mid, first_info, _ = queue[0]
         teams = first_info.get("teams", [])
         if len(teams) < 2:
-            await interaction.response.send_message("❌ Match data incomplete.", ephemeral=True)
+            await interaction.followup.send("❌ Match data incomplete.", ephemeral=True)
             return
 
-        match_details = await cog.get_pandascore_data(f"/matches/{first_mid}")
+        match_details, banner = await asyncio.gather(
+            cog.get_pandascore_data(f"/matches/{first_mid}"),
+            cog.generate_banner(
+                teams[0].get("image_url"), teams[1].get("image_url"),
+                GAME_LOGOS.get(self.game_slug), self.game_slug
+            )
+        )
         if not match_details:
             match_details = {"begin_at": first_info.get("start_time"), "status": "not_started",
                              "opponents": [], "number_of_games": None, "league": {}, "serie": {}, "tournament": {}}
 
-        banner = await cog.generate_banner(
-            teams[0].get("image_url"), teams[1].get("image_url"),
-            GAME_LOGOS.get(self.game_slug), self.game_slug
-        )
         embed = cog.build_match_embed(
             self.game_slug, GAMES.get(self.game_slug), match_details,
             teams[0], teams[1], first_info.get("votes", {}),
@@ -918,9 +936,9 @@ class BatchVoteRevealView(discord.ui.View):
         view = VoteCycleView(first_mid, teams[0], teams[1], self.game_slug, remaining, user_id)
 
         if banner:
-            await interaction.response.send_message(embed=embed, file=banner, view=view, ephemeral=True)
+            await interaction.followup.send(embed=embed, file=banner, view=view, ephemeral=True)
         else:
-            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
 
 class ResultDetailsView(discord.ui.View):
@@ -1017,6 +1035,9 @@ class UnifiedUpcomingView(discord.ui.View):
             await interaction.response.send_message("❌ Esports cog not found.", ephemeral=True)
             return
 
+        # Defer immediately — API calls and image downloads can exceed Discord's 3s limit
+        await interaction.response.defer(ephemeral=True)
+
         async with cog.data_lock:
             data = load_data_sync()
             active = data.get("active_matches", {})
@@ -1032,7 +1053,7 @@ class UnifiedUpcomingView(discord.ui.View):
             matches.append((mid, info))
 
         if not matches:
-            await interaction.response.send_message("❌ No match details available.", ephemeral=True)
+            await interaction.followup.send("❌ No match details available.", ephemeral=True)
             return
 
         # Sort by start time (earliest first)
@@ -1042,18 +1063,20 @@ class UnifiedUpcomingView(discord.ui.View):
         first_mid, first_info = matches[0]
         teams = first_info.get("teams", [])
         if len(teams) < 2:
-            await interaction.response.send_message("❌ Match data incomplete.", ephemeral=True)
+            await interaction.followup.send("❌ Match data incomplete.", ephemeral=True)
             return
 
-        match_details = await cog.get_pandascore_data(f"/matches/{first_mid}")
+        match_details, banner = await asyncio.gather(
+            cog.get_pandascore_data(f"/matches/{first_mid}"),
+            cog.generate_banner(
+                teams[0].get("image_url"), teams[1].get("image_url"),
+                GAME_LOGOS.get(self.game_slug), self.game_slug
+            )
+        )
         if not match_details:
             match_details = {"begin_at": first_info.get("start_time"), "status": "not_started",
                              "opponents": [], "number_of_games": None, "league": {}, "serie": {}, "tournament": {}}
 
-        banner = await cog.generate_banner(
-            teams[0].get("image_url"), teams[1].get("image_url"),
-            GAME_LOGOS.get(self.game_slug), self.game_slug
-        )
         embed = cog.build_match_embed(
             self.game_slug, GAMES.get(self.game_slug), match_details,
             teams[0], teams[1], first_info.get("votes", {}),
@@ -1070,7 +1093,7 @@ class UnifiedUpcomingView(discord.ui.View):
             kwargs["file"] = banner
         if view:
             kwargs["view"] = view
-        await interaction.response.send_message(**kwargs)
+        await interaction.followup.send(**kwargs)
 
     async def reveal_vote(self, interaction: discord.Interaction):
         """Open VoteCycleView for all unvoted matches of this game."""
@@ -1078,6 +1101,9 @@ class UnifiedUpcomingView(discord.ui.View):
         if not cog:
             await interaction.response.send_message("❌ Esports cog not found.", ephemeral=True)
             return
+
+        # Defer immediately — API calls and image downloads can exceed Discord's 3s limit
+        await interaction.response.defer(ephemeral=True)
 
         user_id = str(interaction.user.id)
 
@@ -1100,24 +1126,26 @@ class UnifiedUpcomingView(discord.ui.View):
         queue.sort(key=lambda x: x[2])
 
         if not queue:
-            await interaction.response.send_message("✓ You've already voted on all open matches for this game!", ephemeral=True)
+            await interaction.followup.send("✓ You've already voted on all open matches for this game!", ephemeral=True)
             return
 
         first_mid, first_info, _ = queue[0]
         teams = first_info.get("teams", [])
         if len(teams) < 2:
-            await interaction.response.send_message("❌ Match data incomplete.", ephemeral=True)
+            await interaction.followup.send("❌ Match data incomplete.", ephemeral=True)
             return
 
-        match_details = await cog.get_pandascore_data(f"/matches/{first_mid}")
+        match_details, banner = await asyncio.gather(
+            cog.get_pandascore_data(f"/matches/{first_mid}"),
+            cog.generate_banner(
+                teams[0].get("image_url"), teams[1].get("image_url"),
+                GAME_LOGOS.get(self.game_slug), self.game_slug
+            )
+        )
         if not match_details:
             match_details = {"begin_at": first_info.get("start_time"), "status": "not_started",
                              "opponents": [], "number_of_games": None, "league": {}, "serie": {}, "tournament": {}}
 
-        banner = await cog.generate_banner(
-            teams[0].get("image_url"), teams[1].get("image_url"),
-            GAME_LOGOS.get(self.game_slug), self.game_slug
-        )
         embed = cog.build_match_embed(
             self.game_slug, GAMES.get(self.game_slug), match_details,
             teams[0], teams[1], first_info.get("votes", {}),
@@ -1128,9 +1156,9 @@ class UnifiedUpcomingView(discord.ui.View):
         vote_view = VoteCycleView(first_mid, teams[0], teams[1], self.game_slug, remaining, user_id)
 
         if banner:
-            await interaction.response.send_message(embed=embed, file=banner, view=vote_view, ephemeral=True)
+            await interaction.followup.send(embed=embed, file=banner, view=vote_view, ephemeral=True)
         else:
-            await interaction.response.send_message(embed=embed, view=vote_view, ephemeral=True)
+            await interaction.followup.send(embed=embed, view=vote_view, ephemeral=True)
 
 
 class UpcomingDetailsDropdownView(discord.ui.View):
@@ -1169,28 +1197,33 @@ class UpcomingDetailsDropdownView(discord.ui.View):
             await interaction.response.edit_message(content="❌ Esports cog not found.", embed=None, view=None)
             return
 
+        # Defer immediately — API calls and image downloads can exceed Discord's 3s limit
+        await interaction.response.defer()
+
         async with cog.data_lock:
             data = load_data_sync()
             match_info = data.get("active_matches", {}).get(selected_mid)
 
         if not match_info:
-            await interaction.response.edit_message(content="❌ Match details no longer available.", embed=None, view=None)
+            await interaction.edit_original_response(content="❌ Match details no longer available.", embed=None, view=None)
             return
 
         teams = match_info.get("teams", [])
         if len(teams) < 2:
-            await interaction.response.edit_message(content="❌ Match data incomplete.", embed=None, view=None)
+            await interaction.edit_original_response(content="❌ Match data incomplete.", embed=None, view=None)
             return
 
-        match_details = await cog.get_pandascore_data(f"/matches/{selected_mid}")
+        match_details, banner = await asyncio.gather(
+            cog.get_pandascore_data(f"/matches/{selected_mid}"),
+            cog.generate_banner(
+                teams[0].get("image_url"), teams[1].get("image_url"),
+                GAME_LOGOS.get(self.game_slug), self.game_slug
+            )
+        )
         if not match_details:
             match_details = {"begin_at": match_info.get("start_time"), "status": "not_started",
                              "opponents": [], "number_of_games": None, "league": {}, "serie": {}, "tournament": {}}
 
-        banner = await cog.generate_banner(
-            teams[0].get("image_url"), teams[1].get("image_url"),
-            GAME_LOGOS.get(self.game_slug), self.game_slug
-        )
         embed = cog.build_match_embed(
             self.game_slug, GAMES.get(self.game_slug), match_details,
             teams[0], teams[1], match_info.get("votes", {}),
@@ -1204,9 +1237,9 @@ class UpcomingDetailsDropdownView(discord.ui.View):
                     opt.default = (opt.value == selected_mid)
 
         if banner:
-            await interaction.response.edit_message(embed=embed, attachments=[banner], view=self)
+            await interaction.edit_original_response(embed=embed, attachments=[banner], view=self)
         else:
-            await interaction.response.edit_message(embed=embed, attachments=[], view=self)
+            await interaction.edit_original_response(embed=embed, attachments=[], view=self)
 
 
 class UnifiedResultView(discord.ui.View):

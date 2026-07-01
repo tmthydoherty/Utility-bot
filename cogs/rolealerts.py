@@ -1538,52 +1538,55 @@ class RoleAlerts(commands.Cog):
     @tasks.loop(hours=6)
     async def check_expired_threads(self):
         """Check for threads that should be auto-deleted (7 days old)."""
-        async with aiosqlite.connect(DB_PATH) as db:
-            db.row_factory = aiosqlite.Row
+        try:
+            async with aiosqlite.connect(DB_PATH) as db:
+                db.row_factory = aiosqlite.Row
 
-            cursor = await db.execute(
-                "SELECT * FROM active_alerts WHERE status = 'claimed' AND thread_id IS NOT NULL"
-            )
-            alerts = await cursor.fetchall()
+                cursor = await db.execute(
+                    "SELECT * FROM active_alerts WHERE status = 'claimed' AND thread_id IS NOT NULL"
+                )
+                alerts = await cursor.fetchall()
 
-            for alert in alerts:
-                claimed_at = datetime.fromisoformat(alert['claimed_at']) if alert['claimed_at'] else None
-                if not claimed_at:
-                    continue
+                for alert in alerts:
+                    claimed_at = datetime.fromisoformat(alert['claimed_at']) if alert['claimed_at'] else None
+                    if not claimed_at:
+                        continue
 
-                if claimed_at.tzinfo is None:
-                    claimed_at = claimed_at.replace(tzinfo=timezone.utc)
+                    if claimed_at.tzinfo is None:
+                        claimed_at = claimed_at.replace(tzinfo=timezone.utc)
 
-                if datetime.now(timezone.utc) - claimed_at > timedelta(days=AUTO_DELETE_DAYS):
-                    try:
-                        guild = self.bot.get_guild(alert['guild_id'])
-                        if guild:
-                            thread = guild.get_channel_or_thread(alert['thread_id'])
-                            if thread:
-                                await thread.delete()
-                                logger.info(f"Auto-deleted thread {alert['thread_id']} after 7 days")
+                    if datetime.now(timezone.utc) - claimed_at > timedelta(days=AUTO_DELETE_DAYS):
+                        try:
+                            guild = self.bot.get_guild(alert['guild_id'])
+                            if guild:
+                                thread = guild.get_channel_or_thread(alert['thread_id'])
+                                if thread:
+                                    await thread.delete()
+                                    logger.info(f"Auto-deleted thread {alert['thread_id']} after 7 days")
 
-                            await db.execute(
-                                "UPDATE active_alerts SET status = 'auto_deleted', thread_id = NULL WHERE alert_id = ?",
-                                (alert['alert_id'],)
-                            )
+                                await db.execute(
+                                    "UPDATE active_alerts SET status = 'auto_deleted', thread_id = NULL WHERE alert_id = ?",
+                                    (alert['alert_id'],)
+                                )
 
-                            channel = guild.get_channel(alert['channel_id'])
-                            if channel:
-                                try:
-                                    message = await channel.fetch_message(alert['message_id'])
-                                    embed = message.embeds[0] if message.embeds else None
-                                    if embed:
-                                        embed.color = discord.Color.dark_gray()
-                                        embed.set_footer(text="Auto-deleted (7 days expired)")
-                                        await message.edit(embed=embed, view=None)
-                                except discord.NotFound:
-                                    pass
+                                channel = guild.get_channel(alert['channel_id'])
+                                if channel:
+                                    try:
+                                        message = await channel.fetch_message(alert['message_id'])
+                                        embed = message.embeds[0] if message.embeds else None
+                                        if embed:
+                                            embed.color = discord.Color.dark_gray()
+                                            embed.set_footer(text="Auto-deleted (7 days expired)")
+                                            await message.edit(embed=embed, view=None)
+                                    except discord.NotFound:
+                                        pass
 
-                    except Exception as e:
-                        logger.error(f"Error auto-deleting thread: {e}")
+                        except Exception as e:
+                            logger.error(f"Error auto-deleting thread: {e}")
 
-            await db.commit()
+                await db.commit()
+        except Exception as e:
+            await self.bot.error_reporter.report("RoleAlerts", f"check_expired_threads: {e}")
 
     @check_expired_threads.before_loop
     async def before_check_expired(self):

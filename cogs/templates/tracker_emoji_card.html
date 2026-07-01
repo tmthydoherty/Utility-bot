@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        @font-face {{
+            font-family: 'NotoSans';
+            src: url('file://{font_path}/NotoSans-Regular.ttf') format('truetype');
+            font-weight: normal;
+        }}
+        @font-face {{
+            font-family: 'NotoSans';
+            src: url('file://{font_path}/NotoSans-Bold.ttf') format('truetype');
+            font-weight: bold;
+        }}
+
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+
+        body {{
+            width: 580px;
+            font-family: 'NotoSans', 'Segoe UI', sans-serif;
+            font-weight: bold;
+            background: #1a1b1e;
+            color: #ffffff;
+            padding: 0;
+        }}
+
+        .card {{
+            background: #2b2d31;
+            border-radius: 12px;
+            overflow: hidden;
+            margin: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.04);
+        }}
+
+        .header {{
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            padding: 18px 22px;
+            background: #313338;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        }}
+
+        .server-icon {{
+            width: 40px;
+            height: 40px;
+            border-radius: 10px;
+            object-fit: cover;
+        }}
+
+        .header-text {{
+            flex: 1;
+        }}
+
+        .header-title {{
+            font-size: 20px;
+            font-weight: bold;
+            color: #ffffff;
+        }}
+
+        .header-subtitle {{
+            font-size: 14px;
+            color: #949ba4;
+            margin-top: 1px;
+        }}
+
+        /* --- DONUT CHART SECTION --- */
+        .donut-section {{
+            display: flex;
+            align-items: center;
+            padding: 20px 22px;
+            gap: 30px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        }}
+
+        .donut-chart {{
+            width: 130px;
+            height: 130px;
+            border-radius: 50%;
+            background: {donut_gradient};
+            position: relative;
+            flex-shrink: 0;
+        }}
+
+        .donut-hole {{
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 70px;
+            height: 70px;
+            border-radius: 50%;
+            background: #2b2d31;
+        }}
+
+        .donut-center {{
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+        }}
+
+        .donut-total {{
+            font-size: 20px;
+            font-weight: bold;
+            color: #ffffff;
+        }}
+
+        .donut-label {{
+            font-size: 11px;
+            color: #949ba4;
+            text-transform: uppercase;
+        }}
+
+        .donut-legend {{
+            flex: 1;
+        }}
+
+        .legend-item {{
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 5px 0;
+        }}
+
+        .legend-color {{
+            width: 12px;
+            height: 12px;
+            border-radius: 3px;
+            flex-shrink: 0;
+        }}
+
+        .legend-name {{
+            font-size: 15px;
+            color: #e0e1e5;
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }}
+
+        .legend-count {{
+            font-size: 15px;
+            color: #949ba4;
+            font-weight: bold;
+        }}
+
+        /* --- EMOJI LIST --- */
+        .emoji-list {{
+            padding: 12px 22px;
+        }}
+
+        .emoji-item {{
+            display: flex;
+            align-items: center;
+            padding: 10px 14px;
+            gap: 14px;
+            background: rgba(255, 255, 255, 0.02);
+            border-radius: 8px;
+            margin-bottom: 6px;
+            border: 1px solid rgba(255, 255, 255, 0.03);
+        }}
+
+        .emoji-rank {{
+            font-size: 16px;
+            font-weight: bold;
+            color: #ffffff;
+            min-width: 26px;
+        }}
+
+        .emoji-img {{
+            width: 32px;
+            height: 32px;
+            object-fit: contain;
+        }}
+
+        .emoji-name {{
+            font-size: 15px;
+            color: #e0e1e5;
+            font-weight: bold;
+            flex: 1;
+        }}
+
+        .emoji-stats {{
+            text-align: right;
+        }}
+
+        .emoji-uses {{
+            font-size: 15px;
+            color: #e0e1e5;
+            font-weight: bold;
+        }}
+
+        .emoji-users {{
+            font-size: 13px;
+            color: #949ba4;
+        }}
+
+        .no-data {{
+            text-align: center;
+            padding: 30px;
+            color: #6d6f78;
+            font-size: 15px;
+        }}
+
+        /* --- FOOTER --- */
+        .footer {{
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 22px;
+            border-top: 1px solid rgba(255, 255, 255, 0.06);
+            background: rgba(0, 0, 0, 0.15);
+        }}
+
+        .footer-text {{
+            font-size: 12px;
+            color: #5a5d6b;
+        }}
+
+        .footer-highlight {{
+            color: #e0e1e5;
+        }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="header">
+            <img class="server-icon" src="{server_icon_url}" alt="">
+            <div class="header-text">
+                <div class="header-title">{filter_label}</div>
+                <div class="header-subtitle">{server_name} &mdash; {period_label}</div>
+            </div>
+        </div>
+
+        <div class="donut-section">
+            <div class="donut-chart">
+                <div class="donut-hole">
+                    <div class="donut-center">
+                        <div class="donut-total">{total_uses}</div>
+                        <div class="donut-label">Total</div>
+                    </div>
+                </div>
+            </div>
+            <div class="donut-legend">
+                {legend_html}
+            </div>
+        </div>
+
+        <div class="emoji-list">
+            {emoji_list_html}
+        </div>
+
+        <div class="footer">
+            <div class="footer-text">Page {page_num}/{total_pages}</div>
+            <div class="footer-text">Powered by Vibey</div>
+        </div>
+    </div>
+</body>
+</html>

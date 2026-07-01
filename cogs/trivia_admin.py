@@ -310,6 +310,15 @@ class AdminPanelView(discord.ui.View):
         else:
             await i.edit_original_response(content="Post cancelled.", view=None)
             
+    @discord.ui.button(label="🔄 Bump Message", style=discord.ButtonStyle.secondary, row=2)
+    async def bump_msg(self, i: discord.Interaction, b: discord.ui.Button):
+        await i.response.defer(ephemeral=True)
+        try:
+            await self.main_cog._post_or_bump_messages(i.guild)
+            await i.followup.send("✅ Trivia message refreshed.", ephemeral=True)
+        except TriviaPostingError as e:
+            await i.followup.send(f"❌ **Could not refresh:** {e}", ephemeral=True)
+
     @discord.ui.button(label="Post Bonus Question", style=discord.ButtonStyle.secondary, row=2)
     async def post_bonus(self, i: discord.Interaction, b: discord.ui.Button):
         await i.response.defer(ephemeral=True)
@@ -323,11 +332,9 @@ class AdminPanelView(discord.ui.View):
         await i.followup.send("✅ Bonus question posted!", ephemeral=True)
 
     async def on_timeout(self):
-        try:
-            for item in self.children: 
-                item.disabled = True
-        except: 
-            pass
+        # No message reference available for ephemeral messages, so just stop the view.
+        # Discord will handle disabling the components on the client side after timeout.
+        self.stop()
 
 # =====================================================================================
 # ADMIN COG CLASS
@@ -353,17 +360,6 @@ class TriviaAdmin(commands.Cog, name="TriviaAdmin"):
             return await interaction.response.send_message("Trivia main cog is not loaded.", ephemeral=True)
         await interaction.response.send_message("Welcome to the Trivia Admin Panel.", view=AdminPanelView(main_cog), ephemeral=True)
 
-    @app_commands.command(name="trivia-bump", description="Refreshes the trivia message.")
-    async def bump(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        main_cog = self.get_main_cog()
-        if not main_cog: return await interaction.followup.send("Trivia main cog is not loaded.", ephemeral=True)
-        try:
-            await main_cog._post_or_bump_messages(interaction.guild)
-            await interaction.followup.send("✅ Trivia message refreshed.", ephemeral=True)
-        except TriviaPostingError as e:
-            await interaction.followup.send(f"❌ **Could not refresh:** {e}", ephemeral=True)
-    
     @commands.command(name="triviasync")
     @commands.guild_only()
     @commands.is_owner()

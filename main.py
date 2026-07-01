@@ -6,6 +6,8 @@ from dotenv import load_dotenv
 from pathlib import Path
 import logging
 
+from utils.error_reporter import ErrorReporter
+
 # --- LOGGING SETUP ---
 logger = logging.getLogger('bot_main')
 if not logger.handlers:
@@ -25,6 +27,7 @@ class Vibey(commands.Bot):
         intents.message_content = True
         intents.invites = True
         intents.voice_states = True  # <--- CRITICAL: Needed to track voice activity
+        intents.moderation = True    # Needed for on_audit_log_entry_create (anti-nuke)
 
         super().__init__(command_prefix="!", intents=intents)
 
@@ -38,6 +41,9 @@ class Vibey(commands.Bot):
         """This is called when the bot is starting up (before on_ready)."""
         logger.info("Setting up the bot...")
 
+        self.error_reporter = ErrorReporter(self, flush_interval=300)
+        self.error_reporter.start()
+
         cogs_folder = "cogs"
         if not os.path.exists(cogs_folder):
             os.makedirs(cogs_folder)
@@ -45,14 +51,24 @@ class Vibey(commands.Bot):
             return
 
         for filename in os.listdir(cogs_folder):
-            # Skip non-cog files: __init__, _shared modules, etc.
-            if filename.endswith(".py") and not filename.startswith("__") and not filename.endswith("_shared.py"):
+            # Load .py cog files (skip __init__, _shared modules, etc.)
+            if filename.endswith(".py") and not filename.startswith("__") and not filename.endswith("_shared.py") and not filename.endswith("_fetcher.py"):
                 cog_name = f"{cogs_folder}.{filename[:-3]}"
                 try:
                     await self.load_extension(cog_name)
                     logger.info(f"✅ Successfully loaded cog: {cog_name}")
                 except Exception as e:
                     logger.error(f"❌ Failed to load cog {cog_name}. Error: {e}", exc_info=True)
+            # Load cog packages (directories with __init__.py)
+            elif os.path.isdir(os.path.join(cogs_folder, filename)) and not filename.startswith("__"):
+                init_path = os.path.join(cogs_folder, filename, "__init__.py")
+                if os.path.exists(init_path):
+                    cog_name = f"{cogs_folder}.{filename}"
+                    try:
+                        await self.load_extension(cog_name)
+                        logger.info(f"✅ Successfully loaded cog package: {cog_name}")
+                    except Exception as e:
+                        logger.error(f"❌ Failed to load cog package {cog_name}. Error: {e}", exc_info=True)
 
     async def on_ready(self):
         """This is called when the bot has successfully connected to Discord."""

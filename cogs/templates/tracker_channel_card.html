@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        @font-face {{
+            font-family: 'NotoSans';
+            src: url('file://{font_path}/NotoSans-Regular.ttf') format('truetype');
+            font-weight: normal;
+        }}
+        @font-face {{
+            font-family: 'NotoSans';
+            src: url('file://{font_path}/NotoSans-Bold.ttf') format('truetype');
+            font-weight: bold;
+        }}
+
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+
+        body {{
+            width: 580px;
+            font-family: 'NotoSans', 'Segoe UI', sans-serif;
+            font-weight: bold;
+            background: #1a1b1e;
+            color: #ffffff;
+            padding: 0;
+        }}
+
+        .card {{
+            background: #2b2d31;
+            border-radius: 12px;
+            overflow: hidden;
+            margin: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.04);
+        }}
+
+        .header {{
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 18px 22px;
+            background: #313338;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        }}
+
+        .channel-icon {{
+            font-size: 22px;
+            color: #949ba4;
+        }}
+
+        .channel-name {{
+            font-size: 20px;
+            font-weight: bold;
+            color: #ffffff;
+            flex: 1;
+        }}
+
+        .period-label {{
+            font-size: 14px;
+            color: #949ba4;
+        }}
+
+        .hero-stats {{
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        }}
+
+        .hero-item {{
+            padding: 16px 22px;
+            text-align: center;
+            border-right: 1px solid rgba(255, 255, 255, 0.06);
+        }}
+
+        .hero-item:last-child {{
+            border-right: none;
+        }}
+
+        .hero-label {{
+            font-size: 13px;
+            font-weight: bold;
+            color: #949ba4;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+        }}
+
+        .dot {{
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+        }}
+
+        .dot-green {{ background: #23a559; }}
+
+        .hero-value {{
+            font-size: 28px;
+            font-weight: bold;
+            color: #ffffff;
+            line-height: 1;
+        }}
+
+        .chart-section {{
+            padding: 16px 22px 8px;
+            position: relative;
+        }}
+
+        .chart-header {{
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 12px;
+        }}
+
+        .chart-title {{
+            font-size: 14px;
+            font-weight: bold;
+            color: #949ba4;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }}
+
+        .bars-container {{
+            display: flex;
+            align-items: flex-end;
+            gap: 3px;
+            height: 120px;
+        }}
+
+        .bar {{
+            flex: 1;
+            background: linear-gradient(180deg, #2ecc71 0%, #1a9b4a 100%);
+            border-radius: 3px 3px 0 0;
+            min-height: 2px;
+            opacity: 0.8;
+        }}
+
+        .chart-labels {{
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0 0;
+        }}
+
+        .chart-label {{
+            font-size: 12px;
+            color: #6d6f78;
+            flex: 1;
+            text-align: center;
+        }}
+
+        .contributors-section {{
+            padding: 16px 22px;
+            border-top: 1px solid rgba(255, 255, 255, 0.06);
+        }}
+
+        .section-title {{
+            font-size: 14px;
+            font-weight: bold;
+            color: #949ba4;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 12px;
+        }}
+
+        .contributor-item {{
+            display: flex;
+            align-items: center;
+            padding: 6px 0;
+            gap: 10px;
+        }}
+
+        .rank {{
+            font-size: 15px;
+            font-weight: bold;
+            color: #ffffff;
+            min-width: 22px;
+        }}
+
+        .contrib-name {{
+            font-size: 15px;
+            color: #e0e1e5;
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }}
+
+        .contrib-bar-wrap {{
+            width: 80px;
+            height: 6px;
+            background: rgba(255, 255, 255, 0.06);
+            border-radius: 3px;
+            overflow: hidden;
+        }}
+
+        .contrib-bar {{
+            height: 100%;
+            background: #23a559;
+            border-radius: 3px;
+        }}
+
+        .contrib-value {{
+            font-size: 15px;
+            color: #949ba4;
+            font-weight: bold;
+            min-width: 50px;
+            text-align: right;
+        }}
+
+        .footer {{
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 22px;
+            border-top: 1px solid rgba(255, 255, 255, 0.06);
+            background: rgba(0, 0, 0, 0.15);
+        }}
+
+        .footer-text {{
+            font-size: 12px;
+            color: #5a5d6b;
+        }}
+
+        .footer-highlight {{
+            color: #e0e1e5;
+        }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="header">
+            <span class="channel-icon">#</span>
+            <div class="channel-name">{channel_name}</div>
+            <div class="period-label">{period_label}</div>
+        </div>
+
+        <div class="hero-stats">
+            <div class="hero-item">
+                <div class="hero-label">Messages <span class="dot dot-green"></span></div>
+                <div class="hero-value">{total_msgs}</div>
+            </div>
+            <div class="hero-item">
+                <div class="hero-label">Contributors</div>
+                <div class="hero-value">{contributors}</div>
+            </div>
+        </div>
+
+        <div class="chart-section">
+            <div class="chart-header">
+                <div class="chart-title">Activity</div>
+            </div>
+            <div class="bars-container">
+                {bars_html}
+            </div>
+            <div class="chart-labels">
+                {chart_labels_html}
+            </div>
+        </div>
+
+        <div class="contributors-section">
+            <div class="section-title">Top Contributors</div>
+            {contributors_html}
+        </div>
+
+        <div class="footer">
+            <div class="footer-text">Server Lookback: <span class="footer-highlight">{period_label}</span> &mdash; Timezone: UTC</div>
+            <div class="footer-text">Powered by Vibey</div>
+        </div>
+    </div>
+</body>
+</html>

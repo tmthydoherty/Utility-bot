@@ -78,6 +78,14 @@ class VC(commands.Cog):
         # FIX: Per-VC locks for knock panel updates to prevent duplicate thread creation
         self._knock_panel_locks = {}
 
+        # Issue #5 fix: Cache for hot-path config values (avoids DB hit on every voice event)
+        self._excluded_vc_names_cache = {}  # guild_id -> (exclusions_list, cache_time)
+        self._EXCLUSION_CACHE_TTL = 60  # seconds
+
+        # Issue #19 fix: Deduplicate on_ready/on_resume re-registration
+        self._last_view_reregister = 0
+        self._VIEW_REREGISTER_COOLDOWN = 30  # seconds
+
         shared.logger.info("VC Cog initialized")
 
     async def cog_load(self):
@@ -118,7 +126,8 @@ class VC(commands.Cog):
                         else:
                             try:
                                 await thread.fetch_message(data['knock_mgmt_msg_id'])
-                                view = shared.KnockManagementView(self.bot, self, data['owner_id'], vc_id, show_knock_buttons=True)
+                                _vc_type = "spectator" if data.get('spectator') else "locked"
+                                view = shared.KnockManagementView(self.bot, self, data['owner_id'], vc_id, show_knock_buttons=True, vc_type=_vc_type)
                                 self.bot.add_view(view, message_id=data['knock_mgmt_msg_id'])
                                 view_count += 1
                             except discord.NotFound:
@@ -253,11 +262,12 @@ class VC(commands.Cog):
                         shared.logger.warning(f"RESTORE: No guild found for VC {vc_id}, skipping (will try self-heal later)")
                         continue
 
-                    # Verify channel via API, not cache
+                    # Issue #2 fix: Rate-limited verification (sleep between calls)
                     vc, member_count = await shared.verify_channel_exists(self.bot, guild, vc_id)
+                    await asyncio.sleep(0.5)  # Prevent API flood on startup
 
                     # Can't verify - skip for safety, self-heal will handle later
-                    if vc == "FORBIDDEN" or vc == "ERROR":
+                    if vc == shared.VERIFY_FORBIDDEN or vc == shared.VERIFY_ERROR:
                         shared.logger.warning(f"RESTORE: Cannot verify VC {vc_id}, skipping (will try self-heal later)")
                         continue
 
@@ -367,7 +377,8 @@ class VC(commands.Cog):
                             shared.logger.warning(f"Thread {data['thread_id']} for VC {vc_id} not found")
                             data['thread_id'] = None
                             data['knock_mgmt_msg_id'] = None
-                        # Thread exists - keep it active, unarchive if needed                        elif isinstance(thread, discord.Thread) and thread.archived:
+                        # Issue #1 fix: Thread exists - keep it active, unarchive if needed
+                        elif isinstance(thread, discord.Thread) and thread.archived:
                             try:
                                 await thread.edit(archived=False)
                                 shared.logger.info(f"Unarchived thread {thread.id} for VC {vc_id}")
@@ -390,7 +401,8 @@ class VC(commands.Cog):
                                             except Exception:
                                                 pass
                                             embed = shared.create_knock_management_embed(owner, [], guild, data)
-                                            view = shared.KnockManagementView(self.bot, self, owner.id, vc_id)
+                                            _vc_type = "spectator" if data.get('spectator') else "locked"
+                                            view = shared.KnockManagementView(self.bot, self, owner.id, vc_id, vc_type=_vc_type)
                                             msg = await thread.send(embed=embed, view=view)
                                             self.bot.add_view(view, message_id=msg.id)
                                             data['knock_mgmt_msg_id'] = msg.id
@@ -408,12 +420,21 @@ class VC(commands.Cog):
                     # FIX: Reconcile permissions to match database state
                     vc_data = self.active_vcs.get(vc_id)
                     if vc_data:
-                        expected_connect = vc_data.get('unlocked', False) or vc_data.get('is_basic', False)
+                        is_spectator_vc = vc_data.get('spectator', False)
+                        expected_connect = vc_data.get('unlocked', False) or vc_data.get('is_basic', False) or is_spectator_vc
                         actual_perms = vc.overwrites_for(guild.default_role)
 
-                        if actual_perms.connect != expected_connect:
+                        # For spectator VCs, always set connect and speak together to avoid wiping speak=False
+                        if is_spectator_vc:
+                            if actual_perms.connect is not True or actual_perms.speak is not False:
+                                shared.logger.warning(f"Spectator VC {vc_id} permissions mismatch: connect={actual_perms.connect}, speak={actual_perms.speak}")
+                                try:
+                                    await self.safe_set_permissions(vc, guild.default_role, connect=True, speak=False)
+                                    shared.logger.info(f"Reconciled permissions for spectator VC {vc_id}")
+                                except Exception as e:
+                                    shared.logger.error(f"Failed to reconcile permissions for VC {vc_id}: {e}")
+                        elif actual_perms.connect != expected_connect:
                             shared.logger.warning(f"VC {vc_id} permissions mismatch: DB={'unlocked' if expected_connect else 'locked'}, Discord={actual_perms.connect}")
-                            # Fix permissions to match database
                             try:
                                 await self.safe_set_permissions(vc, guild.default_role, connect=expected_connect)
                                 shared.logger.info(f"Reconciled permissions for VC {vc_id}")
@@ -511,7 +532,8 @@ class VC(commands.Cog):
                         try:
                             # Verify message still exists
                             await thread.fetch_message(data['knock_mgmt_msg_id'])
-                            view = shared.KnockManagementView(self.bot, self, data['owner_id'], vc_id, show_knock_buttons=True)
+                            _vc_type = "spectator" if data.get('spectator') else "locked"
+                            view = shared.KnockManagementView(self.bot, self, data['owner_id'], vc_id, show_knock_buttons=True, vc_type=_vc_type)
                             self.bot.add_view(view, message_id=data['knock_mgmt_msg_id'])
                             knock_mgmt_count += 1
                         except discord.NotFound:
@@ -534,7 +556,8 @@ class VC(commands.Cog):
                                             pass
 
                                         embed = shared.create_knock_management_embed(owner, [], guild, data)
-                                        view = shared.KnockManagementView(self.bot, self, owner.id, vc_id)
+                                        _vc_type = "spectator" if data.get('spectator') else "locked"
+                                        view = shared.KnockManagementView(self.bot, self, owner.id, vc_id, vc_type=_vc_type)
                                         msg = await thread.send(embed=embed, view=view)
                                         self.bot.add_view(view, message_id=msg.id)
                                         data['knock_mgmt_msg_id'] = msg.id
@@ -573,6 +596,12 @@ class VC(commands.Cog):
     @commands.Cog.listener()
     async def on_ready(self):
         """Called when bot is ready - re-register views after reconnection"""
+        # Issue #19 fix: Deduplicate rapid on_ready calls
+        now = time.time()
+        if now - self._last_view_reregister < self._VIEW_REREGISTER_COOLDOWN:
+            shared.logger.info("VC Cog: Skipping on_ready re-registration (cooldown)")
+            return
+        self._last_view_reregister = now
         shared.logger.info("VC Cog: Bot ready event received")
 
         try:
@@ -593,6 +622,12 @@ class VC(commands.Cog):
     @commands.Cog.listener()
     async def on_resume(self):
         """Called when bot resumes connection after disconnect"""
+        # Issue #19 fix: Deduplicate rapid on_resume calls
+        now = time.time()
+        if now - self._last_view_reregister < self._VIEW_REREGISTER_COOLDOWN:
+            shared.logger.info("VC Cog: Skipping on_resume re-registration (cooldown)")
+            return
+        self._last_view_reregister = now
         shared.logger.info("VC Cog: Bot resume event received - re-registering views")
 
         try:
@@ -623,11 +658,12 @@ class VC(commands.Cog):
                     shared.logger.warning(f"Health check: No guild for VC {vc_id}, skipping")
                     continue
 
-                # === VERIFY VIA API ===
+                # Issue #2 fix: Rate-limited API verification
                 vc, member_count = await shared.verify_channel_exists(self.bot, guild, vc_id)
+                await asyncio.sleep(0.5)  # Prevent API flood
 
                 # Can't verify - skip to be safe
-                if vc == "FORBIDDEN" or vc == "ERROR":
+                if vc == shared.VERIFY_FORBIDDEN or vc == shared.VERIFY_ERROR:
                     shared.logger.debug(f"Health check: Cannot verify VC {vc_id}, skipping")
                     continue
 
@@ -679,9 +715,18 @@ class VC(commands.Cog):
                     continue
 
                 # Check permission state matches database
-                expected_connect = data.get('unlocked', False) or data.get('is_basic', False)
+                is_spectator_vc = data.get('spectator', False)
+                expected_connect = data.get('unlocked', False) or data.get('is_basic', False) or is_spectator_vc
                 actual_perms = vc.overwrites_for(guild.default_role)
-                if actual_perms.connect != expected_connect:
+
+                # For spectator VCs, always set connect and speak together to avoid wiping speak=False
+                if is_spectator_vc:
+                    if actual_perms.connect is not True or actual_perms.speak is not False:
+                        shared.logger.warning(f"Health check: Spectator VC {vc_id} permissions mismatch, fixing")
+                        await self.safe_set_permissions(vc, guild.default_role, connect=True, speak=False)
+                        issues_found += 1
+                        issues_fixed += 1
+                elif actual_perms.connect != expected_connect:
                     shared.logger.warning(f"Health check: VC {vc_id} permissions mismatch, fixing")
                     await self.safe_set_permissions(vc, guild.default_role, connect=expected_connect)
                     issues_found += 1
@@ -736,6 +781,51 @@ class VC(commands.Cog):
         if vc_id not in self._knock_accept_locks:
             self._knock_accept_locks[vc_id] = asyncio.Lock()
         return self._knock_accept_locks[vc_id]
+
+    async def get_excluded_names(self, guild_id):
+        """Issue #5 fix: Get excluded VC names with caching to avoid DB hits on every voice event"""
+        now = time.time()
+        cached = self._excluded_vc_names_cache.get(guild_id)
+        if cached and (now - cached[1]) < self._EXCLUSION_CACHE_TTL:
+            return cached[0]
+
+        raw = await shared.get_config(f"excluded_vc_names_{guild_id}", "")
+        exclusions = [n.strip().lower() for n in raw.split(",") if n.strip()] if raw else []
+        self._excluded_vc_names_cache[guild_id] = (exclusions, now)
+        return exclusions
+
+    def invalidate_exclusion_cache(self, guild_id):
+        """Invalidate the exclusion cache for a guild (called after admin updates)"""
+        self._excluded_vc_names_cache.pop(guild_id, None)
+
+    async def _batch_verify_channels(self, guild, vc_ids, max_per_second=3):
+        """Issue #2 fix: Verify multiple channels with rate limiting to avoid 429s"""
+        results = {}
+        for i, vc_id in enumerate(vc_ids):
+            if i > 0 and i % max_per_second == 0:
+                await asyncio.sleep(1.5)
+            try:
+                result = await shared.verify_channel_exists(self.bot, guild, vc_id)
+                results[vc_id] = result
+            except Exception as e:
+                shared.logger.error(f"Batch verify failed for {vc_id}: {e}")
+                results[vc_id] = (shared.VERIFY_ERROR, -1)
+        return results
+
+    async def save_state_immediate(self):
+        """Issue #8 fix: Immediately persist state to DB without debounce. Use for critical ops."""
+        async with self._save_lock:
+            self._save_pending = False
+            if self._save_task and not self._save_task.done():
+                self._save_task.cancel()
+            try:
+                vcs_to_save = copy.deepcopy(self.active_vcs)
+                await shared.save_multiple_vcs(vcs_to_save)
+                shared.logger.debug("State saved immediately")
+            except Exception as e:
+                shared.logger.error(f"Immediate save failed: {e}", exc_info=True)
+                self._save_pending = True
+                raise
 
     # --- HELPERS ---
 
@@ -809,12 +899,17 @@ class VC(commands.Cog):
             shared.logger.warning(f"RECONNECT: Cannot reconnect VC {vc_id} - no owner found and no members")
             return False
 
-        # Determine if locked based on name prefix and permissions
+        # Determine VC type based on name prefix and permissions
         is_locked = voice_channel.name.startswith("🔒 ")
+        is_spectator = voice_channel.name.startswith(shared.SPECTATOR_PREFIX)
         default_perms = voice_channel.overwrites_for(guild.default_role)
         is_unlocked = default_perms.connect is not False  # None or True means unlocked
 
-        shared.logger.info(f"RECONNECT: VC {vc_id} - is_locked={is_locked}, is_unlocked={is_unlocked}")
+        # Spectator detection: has 🤫 prefix AND speak=False for @everyone
+        if is_spectator and default_perms.speak is not False:
+            is_spectator = False  # Has prefix but not actually spectator permissions
+
+        shared.logger.info(f"RECONNECT: VC {vc_id} - is_locked={is_locked}, is_unlocked={is_unlocked}, is_spectator={is_spectator}")
 
         # Restore tracking entry
         async with self._active_vcs_lock:
@@ -824,11 +919,12 @@ class VC(commands.Cog):
                 'knock_mgmt_msg_id': None,
                 'thread_id': None,
                 'ghost': False,
-                'unlocked': is_unlocked,
-                'is_basic': not is_locked and is_unlocked,
+                'unlocked': is_unlocked or is_spectator,
+                'is_basic': not is_locked and not is_spectator and is_unlocked,
                 'bans': [],
                 'mute_knock_pings': False,
-                'guild_id': guild.id
+                'guild_id': guild.id,
+                'spectator': is_spectator
             }
 
         # Initialize tracking dicts
@@ -837,9 +933,11 @@ class VC(commands.Cog):
 
         await self.save_state()
 
-        # For locked VCs, restore settings thread FIRST, then create hub message
-        if is_locked and not is_unlocked:
-            shared.logger.info(f"RECONNECT: Restoring thread and hub message for locked VC {vc_id}")
+        # For locked and spectator VCs, restore settings thread FIRST, then create hub message
+        if (is_locked and not is_unlocked) or is_spectator:
+            vc_type = "spectator" if is_spectator else "locked"
+            thread_prefix = shared.SPECTATOR_PREFIX if is_spectator else "🔒 "
+            shared.logger.info(f"RECONNECT: Restoring thread and hub message for {vc_type} VC {vc_id}")
 
             # FIX: Create thread FIRST and save thread_id IMMEDIATELY to prevent race conditions
             hub_id = await shared.get_config(f"hub_channel_id_{guild.id}")
@@ -848,7 +946,7 @@ class VC(commands.Cog):
                 if hub:
                     try:
                         clean_name = shared.sanitize_name(owner.display_name, owner.id)[:20]
-                        expected_thread_name = f"🔒 {clean_name}'s VC Settings"
+                        expected_thread_name = f"{thread_prefix}{clean_name}'s VC Settings"
                         thread = None
 
                         # Check active threads first (faster)
@@ -899,7 +997,7 @@ class VC(commands.Cog):
                         self.active_vcs[vc_id]['thread_id'] = thread.id
 
                         # Send new settings embed silently (no ping/mention)
-                        view = shared.KnockManagementView(self.bot, self, owner.id, vc_id)
+                        view = shared.KnockManagementView(self.bot, self, owner.id, vc_id, vc_type=vc_type)
                         embed = shared.create_knock_management_embed(owner, [], guild, self.active_vcs[vc_id])
                         knock_msg = await thread.send(embed=embed, view=view)  # No content/mention
                         self.bot.add_view(view, message_id=knock_msg.id)
@@ -911,8 +1009,9 @@ class VC(commands.Cog):
                     except Exception as e:
                         shared.logger.error(f"RECONNECT: Failed to restore thread for VC {vc_id}: {e}")
 
-            # FIX: Create hub message AFTER thread is fully set up
-            await self.create_hub_message(voice_channel)
+            # Create hub message only for locked VCs (spectator VCs are open)
+            if not is_spectator:
+                await self.create_hub_message(voice_channel)
 
         shared.logger.info(f"RECONNECT: Successfully reconnected VC {vc_id} owned by {owner.id} ({owner.display_name})")
         return True
@@ -987,8 +1086,13 @@ class VC(commands.Cog):
 
         # Determine VC state from name and permissions
         is_locked = vc.name.startswith("🔒 ")
+        is_spectator = vc.name.startswith(shared.SPECTATOR_PREFIX)
         default_perms = vc.overwrites_for(guild.default_role)
         is_unlocked = default_perms.connect is not False
+
+        # Spectator detection: has prefix AND speak=False
+        if is_spectator and default_perms.speak is not False:
+            is_spectator = False
 
         # Create tracking entry
         async with self._active_vcs_lock:
@@ -998,11 +1102,12 @@ class VC(commands.Cog):
                 'knock_mgmt_msg_id': None,
                 'thread_id': None,
                 'ghost': False,
-                'unlocked': is_unlocked,
-                'is_basic': not is_locked and is_unlocked,
+                'unlocked': is_unlocked or is_spectator,
+                'is_basic': not is_locked and not is_spectator and is_unlocked,
                 'bans': [],
                 'mute_knock_pings': False,
-                'guild_id': guild.id
+                'guild_id': guild.id,
+                'spectator': is_spectator
             }
 
         # Initialize tracking dicts
@@ -1011,15 +1116,16 @@ class VC(commands.Cog):
 
         await self.save_state()
 
-        # FIX: For locked VCs, set up thread FIRST, then create hub message
-        if is_locked and not is_unlocked:
+        # For locked and spectator VCs, set up thread FIRST, then create hub message
+        if (is_locked and not is_unlocked) or is_spectator:
+            thread_prefix = shared.SPECTATOR_PREFIX if is_spectator else "🔒 "
             # Try to find and link existing thread
             hub_id = await shared.get_config(f"hub_channel_id_{guild.id}")
             if hub_id:
                 hub = guild.get_channel(int(hub_id))
                 if hub:
                     clean_name = shared.sanitize_name(owner.display_name, owner.id)[:20]
-                    expected_thread_name = f"🔒 {clean_name}'s VC Settings"
+                    expected_thread_name = f"{thread_prefix}{clean_name}'s VC Settings"
 
                     # Search for existing active thread
                     thread = None
@@ -1074,7 +1180,8 @@ class VC(commands.Cog):
                         # Create new knock management message in thread
                         try:
                             embed = shared.create_knock_management_embed(owner, [], guild, self.active_vcs[voice_id])
-                            view = shared.KnockManagementView(self.bot, self, owner.id, voice_id)
+                            _vc_type = "spectator" if self.active_vcs[voice_id].get('spectator') else "locked"
+                            view = shared.KnockManagementView(self.bot, self, owner.id, voice_id, vc_type=_vc_type)
                             knock_msg = await thread.send(embed=embed, view=view)
                             self.bot.add_view(view, message_id=knock_msg.id)
                             self.active_vcs[voice_id]['knock_mgmt_msg_id'] = knock_msg.id
@@ -1083,11 +1190,13 @@ class VC(commands.Cog):
 
                         await self.save_state()
 
-            # FIX: Create hub message AFTER thread is set up
-            await self.create_hub_message(vc)
+            # Create hub message only for locked VCs (spectator VCs are open)
+            if not is_spectator:
+                await self.create_hub_message(vc)
 
         # Update hub name
-        await self.update_hub_name(guild, force=True)
+        if not is_spectator:
+            await self.update_hub_name(guild, force=True)
 
         shared.logger.info(f"MANUAL RECONNECT: Successfully reconnected VC {voice_id} for owner {owner.id}")
         return True, f"VC reconnected! Owner: {owner.display_name}"
@@ -1110,7 +1219,7 @@ class VC(commands.Cog):
                 channel, member_count = await shared.verify_channel_exists(self.bot, guild, vc_id)
 
                 # If we can't verify (API error or forbidden), abort cleanup to be safe
-                if channel == "FORBIDDEN" or channel == "ERROR":
+                if channel == shared.VERIFY_FORBIDDEN or channel == shared.VERIFY_ERROR:
                     shared.logger.warning(f"ABORT CLEANUP: Cannot verify VC {vc_id}, aborting to prevent data loss")
                     return
 
@@ -1319,7 +1428,7 @@ class VC(commands.Cog):
         return results
 
     async def periodic_cleanup(self):
-        """Periodic cleanup task - runs every 60 seconds"""
+        """Issue #6 fix: Periodic cleanup with staggered API-heavy operations"""
         await self.bot.wait_until_ready()
         cleanup_iteration = 0
 
@@ -1328,8 +1437,7 @@ class VC(commands.Cog):
                 cleanup_iteration += 1
                 shared.logger.debug(f"Periodic cleanup iteration #{cleanup_iteration}")
 
-                # Core cleanup tasks
-                await self.cleanup_orphaned_data()
+                # Core cleanup (cache-based, no API calls)
                 await self.cleanup_knock_tracking()
 
                 now = time.time()
@@ -1338,63 +1446,69 @@ class VC(commands.Cog):
                 self.vc_creation_cooldowns = {uid: ts for uid, ts in self.vc_creation_cooldowns.items() if now - ts < 3600}
                 self._hub_update_cooldowns = {k: ts for k, ts in self._hub_update_cooldowns.items() if now - ts < 60}
                 self._name_update_debounce = {k: ts for k, ts in self._name_update_debounce.items() if now - ts < 10}
-                # FIX: Only clear stale creating_vcs entries (older than 60 seconds) to prevent race conditions
                 self.creating_vcs = {uid: ts for uid, ts in self.creating_vcs.items() if now - ts < 60}
 
-                # Clean up stale accepted knocks (shouldn't happen but safety check)
+                # Clean up stale accepted knocks (cache-based)
                 for vc_id, users in list(self.accepted_knocks.items()):
                     if vc_id not in self.active_vcs:
-                        # VC no longer exists, clean up all accepted knocks
                         for user_id in list(users.keys()):
                             await self.cleanup_accepted_knock(vc_id, user_id)
                         if vc_id in self.accepted_knocks:
                             del self.accepted_knocks[vc_id]
 
-                # FALLBACK: Aggressive orphaned message cleanup (every iteration)
-                for guild in self.bot.guilds:
-                    try:
-                        await self.cleanup_orphaned_hub_messages(guild)
-                    except Exception as e:
-                        shared.logger.error(f"Orphaned message cleanup error for guild {guild.id}: {e}")
+                # Issue #6 fix: Stagger API-heavy operations across iterations
+                # Self-heal scan: every 2 minutes (cache-based, low cost)
+                if cleanup_iteration % 2 == 0:
+                    for guild in self.bot.guilds:
+                        try:
+                            await self.self_heal_scan(guild)
+                        except Exception as e:
+                            shared.logger.error(f"Self-heal scan error for guild {guild.id}: {e}", exc_info=True)
 
-                # FALLBACK: Force hub name reconciliation (every iteration)
-                for guild in self.bot.guilds:
-                    try:
-                        await self.reconcile_hub_state(guild)
-                    except Exception as e:
-                        shared.logger.error(f"Hub reconciliation error for guild {guild.id}: {e}")
-
-                # FALLBACK: Validate empty VCs are being cleaned up (every 3 iterations)
+                # Hub state reconciliation: every 3 minutes
                 if cleanup_iteration % 3 == 0:
+                    for guild in self.bot.guilds:
+                        try:
+                            await self.reconcile_hub_state(guild)
+                        except Exception as e:
+                            shared.logger.error(f"Hub reconciliation error for guild {guild.id}: {e}")
+
+                # Orphaned hub messages: every 5 minutes (API: hub.history)
+                if cleanup_iteration % 5 == 0:
+                    for guild in self.bot.guilds:
+                        try:
+                            await self.cleanup_orphaned_hub_messages(guild)
+                        except Exception as e:
+                            shared.logger.error(f"Orphaned message cleanup error for guild {guild.id}: {e}")
+
+                # Orphaned data + empty VC validation: every 5 minutes (API: fetch_channel)
+                if cleanup_iteration % 5 == 2:
+                    await self.cleanup_orphaned_data()
                     try:
                         await self.validate_empty_vcs()
                     except Exception as e:
                         shared.logger.error(f"Empty VC validation error: {e}", exc_info=True)
 
-                # Every 10 iterations (~10 minutes), do a more thorough health check
-                if cleanup_iteration % 10 == 0:
+                # Full health check: every 30 minutes (heavy API usage)
+                if cleanup_iteration % 30 == 0:
                     shared.logger.info(f"Running thorough health check (iteration #{cleanup_iteration})")
                     try:
                         await self._health_check_all_vcs()
                     except Exception as e:
                         shared.logger.error(f"Health check error: {e}", exc_info=True)
 
-                # SELF-HEALING: Every iteration (~1 minute), scan for orphaned VCs for faster recovery
-                shared.logger.debug(f"Running self-heal scan (iteration #{cleanup_iteration})")
-                for guild in self.bot.guilds:
-                    try:
-                        await self.self_heal_scan(guild)
-                    except Exception as e:
-                        shared.logger.error(f"Self-heal scan error for guild {guild.id}: {e}", exc_info=True)
-
-                # Purge stale entries from timestamp/cooldown dicts to prevent memory leaks
+                # Issue #11 fix: Prune orphaned lock dicts every 10 minutes
                 if cleanup_iteration % 10 == 0:
-                    now = time.time()
-                    stale_threshold = now - 3600  # 1 hour
+                    stale_threshold = now - 3600
                     self.vc_creation_cooldowns = {k: v for k, v in self.vc_creation_cooldowns.items() if v > stale_threshold}
-                    self.last_knock_ping = {k: v for k, v in self.last_knock_ping.items() if v > stale_threshold}
+                    self.last_knock_ping = {k: v for k, v in self.last_knock_ping.items() if k in self.active_vcs}
                     self._name_update_debounce = {k: v for k, v in self._name_update_debounce.items() if v > stale_threshold}
                     self._hub_update_cooldowns = {k: v for k, v in self._hub_update_cooldowns.items() if v > stale_threshold}
+                    # Prune lock dicts for VCs that no longer exist
+                    for lock_dict in (self._knock_accept_locks, self._knock_panel_locks, self._transfer_locks, self._hub_message_locks):
+                        for k in list(lock_dict.keys()):
+                            if k not in self.active_vcs:
+                                del lock_dict[k]
 
             except Exception as e:
                 shared.logger.error(f"Periodic cleanup error (iteration #{cleanup_iteration}): {e}", exc_info=True)
@@ -1443,21 +1557,20 @@ class VC(commands.Cog):
             if not category:
                 return
 
-            # FIX: Check exclusion list
-            excluded_names = await shared.get_config(f"excluded_vc_names_{guild.id}", "")
-            exclusions = [n.strip().lower() for n in excluded_names.split(",") if n.strip()] if excluded_names else []
+            # Issue #5 fix: Use cached exclusion list
+            exclusions = await self.get_excluded_names(guild.id)
 
             reconnected = 0
             for channel in category.voice_channels:
                 # Skip trigger channels
-                if channel.name in [shared.TRIGGER_NAME, shared.TRIGGER_NAME_BASIC]:
+                if channel.name in [shared.TRIGGER_NAME, shared.TRIGGER_NAME_BASIC, shared.TRIGGER_NAME_SPECTATOR]:
                     continue
 
                 # Skip if already tracked
                 if channel.id in self.active_vcs:
                     continue
 
-                # FIX: Skip excluded VCs
+                # Skip excluded VCs
                 if exclusions and channel.name.lower() in exclusions:
                     shared.logger.debug(f"SELF-HEAL: Skipping excluded VC {channel.name}")
                     continue
@@ -1465,7 +1578,7 @@ class VC(commands.Cog):
                 # FIX: Handle empty orphaned VCs - check if they match locked VC naming patterns
                 if len(channel.members) == 0:
                     # Check if this looks like a locked VC (has lock emoji or "'s VC" suffix)
-                    is_locked_vc_pattern = channel.name.startswith("🔒 ") or "'s VC" in channel.name
+                    is_locked_vc_pattern = channel.name.startswith("🔒 ") or channel.name.startswith(shared.SPECTATOR_PREFIX) or "'s VC" in channel.name
 
                     if is_locked_vc_pattern:
                         # Empty orphaned locked VC - schedule for cleanup with shorter grace period
@@ -1512,7 +1625,7 @@ class VC(commands.Cog):
             channel, member_count = await shared.verify_channel_exists(self.bot, guild, voice_channel.id)
 
             # Can't verify - don't cleanup
-            if channel == "FORBIDDEN" or channel == "ERROR":
+            if channel == shared.VERIFY_FORBIDDEN or channel == shared.VERIFY_ERROR:
                 return
 
             # Channel deleted already
@@ -1632,11 +1745,12 @@ class VC(commands.Cog):
                 shared.logger.warning(f"VALIDATE EMPTY: No guild for VC {vc_id}, skipping")
                 continue
 
-            # === VERIFY VIA API ===
+            # Issue #2 fix: Rate-limited API verification
             channel, member_count = await shared.verify_channel_exists(self.bot, guild, vc_id)
+            await asyncio.sleep(0.5)  # Prevent API flood
 
             # Can't verify - skip to be safe
-            if channel == "FORBIDDEN" or channel == "ERROR":
+            if channel == shared.VERIFY_FORBIDDEN or channel == shared.VERIFY_ERROR:
                 shared.logger.debug(f"VALIDATE EMPTY: Cannot verify VC {vc_id}, skipping")
                 continue
 
@@ -1673,12 +1787,13 @@ class VC(commands.Cog):
             guild_id = vc_data.get('guild_id')
             guild = self.bot.get_guild(guild_id) if guild_id else None
 
-            # === VERIFY VIA API ===
+            # Issue #2 fix: Rate-limited API verification
             if guild:
                 channel, member_count = await shared.verify_channel_exists(self.bot, guild, vc_id)
+                await asyncio.sleep(0.5)  # Prevent API flood
 
                 # Can't verify - skip this VC to be safe
-                if channel == "FORBIDDEN" or channel == "ERROR":
+                if channel == shared.VERIFY_FORBIDDEN or channel == shared.VERIFY_ERROR:
                     shared.logger.debug(f"ORPHAN CHECK: Cannot verify VC {vc_id}, skipping")
                     continue
 
@@ -1715,9 +1830,10 @@ class VC(commands.Cog):
         while not self.bot.is_closed():
             await asyncio.sleep(300)
             for guild in self.bot.guilds:
-                found = any(c.name == self.trigger_name and isinstance(c, discord.VoiceChannel) for c in guild.channels)
-                if not found: 
-                    shared.logger.warning(f"Trigger channel missing in guild: {guild.name}")
+                for trigger in [self.trigger_name, shared.TRIGGER_NAME_BASIC, shared.TRIGGER_NAME_SPECTATOR]:
+                    found = any(c.name == trigger and isinstance(c, discord.VoiceChannel) for c in guild.channels)
+                    if not found:
+                        shared.logger.warning(f"Trigger channel '{trigger}' missing in guild: {guild.name}")
 
     def get_guild_bitrate_limit(self, guild):
         if guild.premium_tier == 3: return 384000
@@ -1795,17 +1911,18 @@ class VC(commands.Cog):
 
         try:
             has_pending = len(self.pending_knocks.get(vc_id, [])) > 0
+            _vc_type = "spectator" if vc_data.get('spectator') else "locked"
             embed = shared.create_knock_management_embed(owner, self.pending_knocks.get(vc_id, []), guild, vc_data)
-            view = shared.KnockManagementView(self.bot, self, owner.id, vc_id, show_knock_buttons=has_pending)
+            view = shared.KnockManagementView(self.bot, self, owner.id, vc_id, show_knock_buttons=has_pending, vc_type=_vc_type)
 
-            # Check if panel is buried — compare panel msg ID to thread's last message
-            # If buried, delete + resend at bottom; otherwise just edit in place
+            # Issue #10 fix: Only resend panel if buried AND there are pending knocks
+            # This prevents delete+resend spam when owner is just chatting in the thread
             panel_is_buried = False
             if knock_msg_id and thread.last_message_id:
                 panel_is_buried = knock_msg_id != thread.last_message_id
 
-            if panel_is_buried and knock_msg_id:
-                # Delete old and resend at bottom
+            if panel_is_buried and knock_msg_id and has_pending:
+                # Only move panel to bottom when there are actual pending knocks to action
                 try:
                     old_msg = thread.get_partial_message(knock_msg_id)
                     await old_msg.delete()
@@ -1939,7 +2056,8 @@ class VC(commands.Cog):
 
         try:
             clean_name = shared.sanitize_name(owner.display_name, owner.id)[:20]
-            expected_thread_name = f"🔒 {clean_name}'s VC Settings"
+            thread_prefix = shared.SPECTATOR_PREFIX if vc_data.get('spectator') else "🔒 "
+            expected_thread_name = f"{thread_prefix}{clean_name}'s VC Settings"
 
             # FIX: Search for existing thread BEFORE creating a new one
             # This prevents duplicate threads from being created during race conditions
@@ -2001,7 +2119,8 @@ class VC(commands.Cog):
 
             pending = self.pending_knocks.get(vc_id, [])
             has_pending = len(pending) > 0
-            view = shared.KnockManagementView(self.bot, self, owner.id, vc_id, show_knock_buttons=has_pending)
+            _vc_type = "spectator" if vc_data.get('spectator') else "locked"
+            view = shared.KnockManagementView(self.bot, self, owner.id, vc_id, show_knock_buttons=has_pending, vc_type=_vc_type)
             embed = shared.create_knock_management_embed(owner, pending, guild, vc_data)
             knock_msg = await thread.send(embed=embed, view=view)
             self.bot.add_view(view, message_id=knock_msg.id)
@@ -2146,27 +2265,40 @@ class VC(commands.Cog):
                     vc_id = vid
                     break
             
-            if not vc_id: 
+            if not vc_id:
                 return
             vc_data = self.active_vcs.get(vc_id)
-            if not vc_data or message.author.id != vc_data['owner_id']: 
+            if not vc_data or message.author.id != vc_data['owner_id']:
                 return
-            if not message.mentions: 
+            if not message.mentions:
                 return
 
             vc = self.bot.get_channel(vc_id)
-            if not vc: 
+            if not vc:
                 return
+
+            # Issue #12 fix: Cap mentions to prevent API abuse
+            MAX_VIP_PER_MESSAGE = 10
+            mentions_to_process = message.mentions[:MAX_VIP_PER_MESSAGE]
+            if len(message.mentions) > MAX_VIP_PER_MESSAGE:
+                try:
+                    await message.reply(
+                        f"⚠️ Processing first {MAX_VIP_PER_MESSAGE} mentions only (max per message).",
+                        mention_author=False
+                    )
+                except Exception:
+                    pass
             
             added = []
             failed = []
             already_vip = []
-            
-            for user in message.mentions:
-                if user.bot: 
+            is_spectator = vc_data.get('spectator', False)
+
+            for user in mentions_to_process:
+                if user.bot:
                     continue
-                
-                # FIX: Ensure user is a Member, not just a User
+
+                # Ensure user is a Member, not just a User
                 member = message.guild.get_member(user.id)
                 if not member:
                     try:
@@ -2177,33 +2309,44 @@ class VC(commands.Cog):
                     except discord.HTTPException:
                         failed.append(f"{user.mention} (fetch failed)")
                         continue
-                
-                if member.id in vc_data.get('bans', []): 
+
+                if member.id in vc_data.get('bans', []):
                     failed.append(f"{member.mention} (banned)")
                     continue
-                
-                # FIX: Check if already has VIP access to avoid redundant operations
+
+                # FIX: For spectator VCs, check speak (not connect) since connect is open
                 current_perms = vc.overwrites_for(member)
-                if current_perms.connect is True:
-                    already_vip.append(member.mention)
-                    continue
-                
+                if is_spectator:
+                    if current_perms.speak is True:
+                        already_vip.append(member.mention)
+                        continue
+                else:
+                    if current_perms.connect is True:
+                        already_vip.append(member.mention)
+                        continue
+
                 try:
-                    if await self.safe_set_permissions(vc, member, connect=True, speak=True):
+                    if is_spectator:
+                        success = await self.safe_set_permissions(vc, member, speak=True)
+                    else:
+                        success = await self.safe_set_permissions(vc, member, connect=True, speak=True)
+                    if success:
                         added.append(member.mention)
                     else:
                         failed.append(f"{member.mention} (permission error)")
-                except Exception as e: 
+                except Exception as e:
                     shared.logger.error(f"Failed to add VIP {member.id}: {e}")
                     failed.append(f"{member.mention} (error)")
-            
+
             if added or failed or already_vip:
                 response = ""
-                if added: 
-                    response += f"✅ **VIP Access:** {', '.join(added)}\n"
+                if added:
+                    label = "Unmuted" if is_spectator else "VIP Access"
+                    response += f"✅ **{label}:** {', '.join(added)}\n"
                 if already_vip:
-                    response += f"ℹ️ **Already VIP:** {', '.join(already_vip)}\n"
-                if failed: 
+                    label = "Already unmuted" if is_spectator else "Already VIP"
+                    response += f"ℹ️ **{label}:** {', '.join(already_vip)}\n"
+                if failed:
                     response += f"❌ **Failed:** {', '.join(failed)}"
                 try: 
                     await message.reply(response.strip(), mention_author=False)
@@ -2229,14 +2372,34 @@ class VC(commands.Cog):
 
             vc_data = self.active_vcs[after.id]
             is_locked = not vc_data.get('unlocked', False)
-            prefix = "🔒 "
+            is_spectator = vc_data.get('spectator', False)
+            lock_prefix = "🔒 "
+            spec_prefix = shared.SPECTATOR_PREFIX
             try:
-                if is_locked and not after.name.startswith(prefix):
-                    self._name_update_debounce[debounce_key] = now
-                    await self.safe_edit_channel(after, name=f"{prefix}{after.name}")
-                elif not is_locked and after.name.startswith(prefix):
-                    self._name_update_debounce[debounce_key] = now
-                    await self.safe_edit_channel(after, name=after.name.replace(prefix, "", 1))
+                if is_spectator:
+                    # Spectator VC: ensure 🤫 prefix, remove 🔒 if present
+                    if after.name.startswith(lock_prefix):
+                        self._name_update_debounce[debounce_key] = now
+                        await self.safe_edit_channel(after, name=f"{spec_prefix}{after.name[len(lock_prefix):]}")
+                    elif not after.name.startswith(spec_prefix):
+                        self._name_update_debounce[debounce_key] = now
+                        await self.safe_edit_channel(after, name=f"{spec_prefix}{after.name}")
+                elif is_locked:
+                    # Locked VC: ensure 🔒 prefix, remove 🤫 if present
+                    if after.name.startswith(spec_prefix):
+                        self._name_update_debounce[debounce_key] = now
+                        await self.safe_edit_channel(after, name=f"{lock_prefix}{after.name[len(spec_prefix):]}")
+                    elif not after.name.startswith(lock_prefix):
+                        self._name_update_debounce[debounce_key] = now
+                        await self.safe_edit_channel(after, name=f"{lock_prefix}{after.name}")
+                else:
+                    # Unlocked/basic: remove any prefix
+                    if after.name.startswith(lock_prefix):
+                        self._name_update_debounce[debounce_key] = now
+                        await self.safe_edit_channel(after, name=after.name[len(lock_prefix):])
+                    elif after.name.startswith(spec_prefix):
+                        self._name_update_debounce[debounce_key] = now
+                        await self.safe_edit_channel(after, name=after.name[len(spec_prefix):])
             except Exception as e:
                 shared.logger.debug(f"Failed to update VC prefix for {after.id}: {e}")
             await self.update_hub_embed(after.id)
@@ -2269,17 +2432,15 @@ class VC(commands.Cog):
     @commands.Cog.listener()
     async def on_voice_state_update(self, member, before, after):
         try:
-            # FIX: Check exclusion list for the channel being joined
-            if after.channel and after.channel.id not in [None] and after.channel.name not in [self.trigger_name, shared.TRIGGER_NAME_BASIC]:
-                excluded_names = await shared.get_config(f"excluded_vc_names_{after.channel.guild.id}", "")
-                if excluded_names:
-                    exclusions = [n.strip().lower() for n in excluded_names.split(",") if n.strip()]
-                    if after.channel.name.lower() in exclusions:
-                        shared.logger.debug(f"Skipping excluded VC: {after.channel.name}")
-                        return  # Skip this VC entirely
+            # Issue #5 fix: Use cached exclusion list instead of DB hit on every voice event
+            if after.channel and after.channel.name not in [self.trigger_name, shared.TRIGGER_NAME_BASIC, shared.TRIGGER_NAME_SPECTATOR]:
+                exclusions = await self.get_excluded_names(after.channel.guild.id)
+                if exclusions and after.channel.name.lower() in exclusions:
+                    shared.logger.debug(f"Skipping excluded VC: {after.channel.name}")
+                    return  # Skip this VC entirely
 
-            # FIX: Check for BOTH trigger channels (locked and basic VCs)
-            if after.channel and after.channel.name in [self.trigger_name, shared.TRIGGER_NAME_BASIC]:
+            # FIX: Check for ALL trigger channels (locked, basic, and spectator VCs)
+            if after.channel and after.channel.name in [self.trigger_name, shared.TRIGGER_NAME_BASIC, shared.TRIGGER_NAME_SPECTATOR]:
                 # FIX: Use lock to make check-and-add atomic, preventing duplicate VC creation
                 now = time.time()
                 async with self._creating_vcs_lock:
@@ -2298,8 +2459,15 @@ class VC(commands.Cog):
 
                 # Determine VC type based on trigger channel
                 is_basic = (after.channel.name == shared.TRIGGER_NAME_BASIC)
-                shared.logger.info(f"User {member.id} triggered {'basic' if is_basic else 'locked'} VC creation")
-                self.bot.loop.create_task(self._handle_vc_creation(member, after.channel.guild, is_basic=is_basic))
+                is_spectator = (after.channel.name == shared.TRIGGER_NAME_SPECTATOR)
+                vc_type_label = 'basic' if is_basic else ('spectator' if is_spectator else 'locked')
+                shared.logger.info(f"User {member.id} triggered {vc_type_label} VC creation")
+                # Issue #20 fix: Wrap task creation in try/except to prevent permanent lock-out
+                try:
+                    self.bot.loop.create_task(self._handle_vc_creation(member, after.channel.guild, is_basic=is_basic, is_spectator=is_spectator))
+                except Exception as e:
+                    shared.logger.error(f"Failed to create VC creation task for {member.id}: {e}")
+                    self.creating_vcs.pop(member.id, None)
                 return
 
             if before.channel and before.channel.id in self.active_vcs:
@@ -2329,7 +2497,11 @@ class VC(commands.Cog):
                 if member.id == vc_data['owner_id']:
                     ov = after.channel.overwrites_for(member)
                     if not ov.manage_channels:
-                        await self.safe_set_permissions(after.channel, member, connect=True, move_members=True, manage_channels=True)
+                        # For spectator VCs, include speak=True so owner isn't muted by @everyone speak=False
+                        if vc_data.get('spectator', False):
+                            await self.safe_set_permissions(after.channel, member, connect=True, speak=True, move_members=True, manage_channels=True)
+                        else:
+                            await self.safe_set_permissions(after.channel, member, connect=True, move_members=True, manage_channels=True)
                     
                     # Cancel transfer task if owner rejoined
                     if vc_id in self.tasks and self.tasks[vc_id].get('transfer'):
@@ -2345,7 +2517,7 @@ class VC(commands.Cog):
         except Exception as e: 
             shared.logger.error(f"Voice state update error: {e}", exc_info=True)
 
-    async def _handle_vc_creation(self, member, guild, is_basic=False):
+    async def _handle_vc_creation(self, member, guild, is_basic=False, is_spectator=False):
         self.vc_creation_cooldowns[member.id] = time.time()
         created_vc = None  # Track for cleanup on failure
         try:
@@ -2357,7 +2529,7 @@ class VC(commands.Cog):
                     except Exception as e:
                         shared.logger.debug(f"Failed to notify/move duplicate VC owner {member.id}: {e}")
                     return
-            created_vc = await self.create_vc(member, guild, is_basic=is_basic)
+            created_vc = await self.create_vc(member, guild, is_basic=is_basic, is_spectator=is_spectator)
         except Exception as e:
             shared.logger.error(f"VC creation error for user {member.id}: {e}", exc_info=True)
             # FIX: If VC was created on Discord but tracking failed, clean it up
@@ -2400,7 +2572,7 @@ class VC(commands.Cog):
             channel, member_count = await shared.verify_channel_exists(self.bot, guild, vc_id)
 
             # If we can't verify (API error or forbidden), don't cleanup
-            if channel == "FORBIDDEN" or channel == "ERROR":
+            if channel == shared.VERIFY_FORBIDDEN or channel == shared.VERIFY_ERROR:
                 shared.logger.warning(f"MONITOR: Cannot verify VC {vc_id}, skipping cleanup to be safe")
                 return
 
@@ -2428,7 +2600,7 @@ class VC(commands.Cog):
                     if guild:
                         channel, member_count = await shared.verify_channel_exists(self.bot, guild, vc_id)
                         # Only cleanup if we can confirm it's deleted or empty
-                        if channel == "FORBIDDEN" or channel == "ERROR":
+                        if channel == shared.VERIFY_FORBIDDEN or channel == shared.VERIFY_ERROR:
                             shared.logger.warning(f"FALLBACK: Cannot verify VC {vc_id}, not cleaning up")
                         elif not channel:
                             shared.logger.warning(f"FALLBACK: VC {vc_id} confirmed deleted, cleaning up")
@@ -2452,20 +2624,28 @@ class VC(commands.Cog):
         max_attempts = 30
         attempts = 0
         vc_id = voice_channel.id
+        guild = voice_channel.guild
 
         try:
             while attempts < max_attempts:
                 await asyncio.sleep(1)
                 attempts += 1
 
+                # Issue #13 fix: Use API verification instead of potentially stale cache
                 fresh_channel = self.bot.get_channel(vc_id)
                 if not fresh_channel:
-                    return
+                    # Verify via API before giving up
+                    if guild:
+                        channel, member_count = await shared.verify_channel_exists(self.bot, guild, vc_id)
+                        if not channel or channel == shared.VERIFY_FORBIDDEN or channel == shared.VERIFY_ERROR:
+                            return
+                        fresh_channel = channel
+                    else:
+                        return
 
-                # FIX: Check if old owner rejoined
+                # Check if old owner rejoined
                 vc_data = self.active_vcs.get(vc_id)
                 if not vc_data:
-                    # VC data gone, abort transfer
                     shared.logger.debug(f"VC {vc_id} data missing during transfer, aborting")
                     return
 
@@ -2526,9 +2706,18 @@ class VC(commands.Cog):
             await self.safe_set_permissions(voice_channel, new_owner, connect=True, move_members=True, manage_channels=True)
 
             # Update channel name
-            prefix = "🔒 " if not vc_data.get('unlocked', False) else ""
+            if vc_data.get('spectator', False):
+                prefix = shared.SPECTATOR_PREFIX
+            elif not vc_data.get('unlocked', False):
+                prefix = "🔒 "
+            else:
+                prefix = ""
             clean_name = shared.sanitize_name(new_owner.display_name, new_owner.id)[:20]
             await self.safe_edit_channel(voice_channel, name=f"{prefix}{clean_name}'s VC")
+
+            # Ensure new owner has speak=True for spectator VCs
+            if vc_data.get('spectator', False):
+                await self.safe_set_permissions(voice_channel, new_owner, connect=True, speak=True, move_members=True, manage_channels=True)
 
             thread_id = vc_data.get('thread_id')
             if thread_id:
@@ -2554,7 +2743,8 @@ class VC(commands.Cog):
                                 shared.logger.debug(f"Failed to remove old owner from thread: {e}")
                         await thread.add_user(new_owner)
                         try:
-                            await thread.edit(name=f"🔒 {clean_name}'s VC Settings")
+                            _thread_prefix = shared.SPECTATOR_PREFIX if vc_data.get('spectator') else "🔒 "
+                            await thread.edit(name=f"{_thread_prefix}{clean_name}'s VC Settings")
                         except Exception as e:
                             shared.logger.debug(f"Failed to rename thread during transfer: {e}")
 
@@ -2573,8 +2763,9 @@ class VC(commands.Cog):
                         # Now create new knock management message
                         pending = self.pending_knocks.get(vc_id, [])
                         has_pending = len(pending) > 0
+                        _vc_type = "spectator" if vc_data.get('spectator') else "locked"
                         embed = shared.create_knock_management_embed(new_owner, pending, voice_channel.guild, vc_data)
-                        view = shared.KnockManagementView(self.bot, self, new_owner.id, vc_id, show_knock_buttons=has_pending)
+                        view = shared.KnockManagementView(self.bot, self, new_owner.id, vc_id, show_knock_buttons=has_pending, vc_type=_vc_type)
                         knock_msg = await thread.send(embed=embed, view=view)
                         self.bot.add_view(view, message_id=knock_msg.id)
                         vc_data['knock_mgmt_msg_id'] = knock_msg.id
@@ -2585,10 +2776,10 @@ class VC(commands.Cog):
             if not vc_data.get('ghost', False) and not vc_data.get('unlocked', False):
                 await self.create_hub_message(voice_channel)
 
-            # FIX: Save state AFTER all operations complete (atomic-style)
-            await self.save_state()
+            # Issue #8 fix: Immediate save for critical ownership transfer
+            await self.save_state_immediate()
 
-            # FIX: Always update hub name after ownership transfer
+            # Always update hub name after ownership transfer
             await self.update_hub_name(voice_channel.guild, force=True)
 
             shared.logger.info(f"Transferred ownership of VC {vc_id} from {old_owner_id} to {new_owner.id}")
@@ -3016,7 +3207,7 @@ class VC(commands.Cog):
             shared.logger.error(f"Failed to create hub channel in guild {guild.id}: {e}")
             return None
 
-    async def create_vc(self, owner, guild, is_basic=False):
+    async def create_vc(self, owner, guild, is_basic=False, is_spectator=False):
         """Create a new VC. Returns the VC object on success, None on failure."""
         cat_id = await shared.get_config(f"category_id_{guild.id}")
         if not cat_id:
@@ -3033,19 +3224,25 @@ class VC(commands.Cog):
             return None
 
         clean_name = shared.sanitize_name(owner.display_name, owner.id)[:20]
-        if is_basic:
-            vc_name = f"{clean_name}'s VC"  # No lock emoji
-            vc_limit, vc_bitrate, vc_bans = 0, 64000, []
+        vc_limit, vc_bitrate, vc_bans = 0, 64000, []
+
+        if is_spectator:
+            vc_name = f"{shared.SPECTATOR_PREFIX}{clean_name}'s VC"
+        elif is_basic:
+            vc_name = f"{clean_name}'s VC"
         else:
             vc_name = f"🔒 {clean_name}'s VC"
-            vc_limit, vc_bitrate, vc_bans = 0, 64000, []
 
-        # FIX: Basic VCs allow everyone to connect
-        if is_basic:
+        if is_spectator:
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(connect=True, speak=False),
+                owner: discord.PermissionOverwrite(connect=True, speak=True, move_members=True, manage_channels=True),
+                guild.me: discord.PermissionOverwrite(connect=True, speak=True, manage_channels=True)
+            }
+        elif is_basic:
             overwrites = {
                 owner: discord.PermissionOverwrite(connect=True, move_members=True, manage_channels=True),
                 guild.me: discord.PermissionOverwrite(connect=True, manage_channels=True)
-                # No default_role restriction for basic VCs
             }
         else:
             overwrites = {
@@ -3075,33 +3272,35 @@ class VC(commands.Cog):
                     'knock_mgmt_msg_id': None,
                     'thread_id': None,
                     'ghost': False,
-                    'unlocked': is_basic,  # FIX: Basic VCs are marked as unlocked
-                    'is_basic': is_basic,  # FIX: New flag to distinguish basic VCs
-                    'bans': [] if is_basic else vc_bans,
+                    'unlocked': is_basic or is_spectator,
+                    'is_basic': is_basic,
+                    'bans': [] if (is_basic or is_spectator) else vc_bans,
                     'mute_knock_pings': False,
-                    'guild_id': guild.id
+                    'guild_id': guild.id,
+                    'spectator': is_spectator
                 }
-            await self.save_state()
+            # Issue #8 fix: Immediate save for critical VC creation
+            await self.save_state_immediate()
 
             self.pending_knocks[vc.id] = []
             self.last_knock_ping[vc.id] = 0
 
-            # FIX: Only create hub message and thread for LOCKED VCs
+            # Create hub message and thread for LOCKED and SPECTATOR VCs (not basic)
             if not is_basic:
+                vc_type = "spectator" if is_spectator else "locked"
+                thread_prefix = shared.SPECTATOR_PREFIX if is_spectator else "🔒 "
+
                 hub = await self.get_or_create_hub(guild, category)
                 if hub:
-                    # FIX: Create thread FIRST and save thread_id IMMEDIATELY to prevent race conditions
-                    # This prevents update_knock_panel from creating duplicate threads during setup
+                    # Create thread FIRST and save thread_id IMMEDIATELY to prevent race conditions
                     perms = hub.permissions_for(guild.me)
                     try:
+                        thread_name = f"{thread_prefix}{clean_name}'s VC Settings"
                         if not perms.create_private_threads or not perms.manage_threads:
-                            thread = await hub.create_thread(name=f"🔒 {clean_name}'s VC Settings", auto_archive_duration=1440)
+                            thread = await hub.create_thread(name=thread_name, auto_archive_duration=1440)
                         else:
-                            thread = await hub.create_thread(name=f"🔒 {clean_name}'s VC Settings", type=discord.ChannelType.private_thread, auto_archive_duration=1440, invitable=False)
+                            thread = await hub.create_thread(name=thread_name, type=discord.ChannelType.private_thread, auto_archive_duration=1440, invitable=False)
 
-                        # FIX: CRITICAL - Save thread_id IMMEDIATELY after creation to prevent duplicates
-                        # This must happen BEFORE create_hub_message or any other operation that might
-                        # trigger update_knock_panel, which would otherwise see thread_id=None and create another thread
                         self.active_vcs[vc.id]['thread_id'] = thread.id
                         shared.logger.info(f"Thread {thread.id} created for VC {vc.id}, saved immediately to prevent duplicates")
 
@@ -3110,9 +3309,8 @@ class VC(commands.Cog):
                         except discord.Forbidden:
                             await thread.send(f"⚠️ {owner.mention} - Access VC settings here!")
 
-                        # FIX: Log view creation during VC setup for diagnostics
-                        shared.logger.info(f"Creating initial KnockManagementView for new VC {vc.id}, owner={owner.id}")
-                        view = shared.KnockManagementView(self.bot, self, owner.id, vc.id)
+                        shared.logger.info(f"Creating initial KnockManagementView for new VC {vc.id}, owner={owner.id}, type={vc_type}")
+                        view = shared.KnockManagementView(self.bot, self, owner.id, vc.id, vc_type=vc_type)
                         embed = shared.create_knock_management_embed(owner, [], guild, self.active_vcs[vc.id])
                         knock_msg = await thread.send(embed=embed, view=view)
                         self.bot.add_view(view, message_id=knock_msg.id)
@@ -3120,15 +3318,16 @@ class VC(commands.Cog):
                         shared.logger.info(f"VC {vc.id} fully initialized: msg_id={knock_msg.id}, thread_id={thread.id}")
                         await self.save_state()
                     except Exception as e:
-                        # FIX: Log thread creation failure but don't fail entire VC creation
                         shared.logger.error(f"Failed to create thread for VC {vc.id}: {e}")
                         shared.logger.warning(f"VC {vc.id} created without settings thread")
 
-                    # FIX: Create hub message AFTER thread is fully set up to prevent race conditions
-                    await self.create_hub_message(vc)
+                    # Create knock hub message only for locked VCs (spectator VCs are open)
+                    if not is_spectator:
+                        await self.create_hub_message(vc)
 
-                # Update hub name for locked VCs only
-                await self.update_hub_name(guild, force=True)
+                # Update hub name for locked VCs only (spectator doesn't affect count)
+                if not is_spectator:
+                    await self.update_hub_name(guild, force=True)
 
             # FIX: Return VC on success for error handling in caller
             return vc
@@ -3138,6 +3337,139 @@ class VC(commands.Cog):
             if 'vc' in locals():
                 return vc
             return None
+
+    async def convert_to_spectator(self, vc, interaction):
+        """Convert a locked/unlocked VC to spectator mode"""
+        vc_id = vc.id
+        vc_data = self.active_vcs.get(vc_id)
+        if not vc_data:
+            await interaction.followup.send("❌ VC data not found.", ephemeral=True)
+            return
+
+        guild = interaction.guild
+
+        # Set @everyone: speak=False (connect defaults to True)
+        await self.safe_set_permissions(vc, guild.default_role, speak=False, connect=True)
+
+        # Grandfather existing members with speak=True
+        current_members = [m for m in vc.members if not m.bot and m.id != interaction.user.id]
+        for member in current_members:
+            await self.safe_set_permissions(vc, member, speak=True)
+            await asyncio.sleep(0.3)
+
+        # Update data BEFORE renaming to prevent race conditions
+        vc_data['spectator'] = True
+        vc_data['unlocked'] = True
+        vc_data['ghost'] = False
+        await self.save_state()
+
+        # Rename: swap prefix
+        clean_name = shared.sanitize_name(interaction.user.display_name, interaction.user.id)[:20]
+        new_name = f"{shared.SPECTATOR_PREFIX}{clean_name}'s VC"
+        await self.safe_edit_channel(vc, name=new_name)
+
+        # Remove from knock hub (spectator VCs are open)
+        await self.delete_hub_message(vc_id)
+
+        # Update settings panel with spectator options
+        await self.update_knock_panel(vc_id)
+
+        # Update hub name
+        await self.update_hub_name(guild, force=True)
+
+        grandfathered_msg = ""
+        if current_members:
+            grandfathered_msg = f"\n🔊 {len(current_members)} member(s) unmuted."
+
+        await interaction.followup.send(
+            f"🤫 **Spectator mode enabled!**\n\n"
+            f"• Everyone can join but only unmuted users can speak\n"
+            f"• Use the settings menu to unmute users{grandfathered_msg}",
+            ephemeral=True
+        )
+
+    async def convert_spectator_to_basic(self, vc, interaction):
+        """Convert a spectator VC to a basic (normal) VC"""
+        vc_id = vc.id
+        vc_data = self.active_vcs.get(vc_id)
+        if not vc_data:
+            await interaction.followup.send("❌ VC data not found.", ephemeral=True)
+            return
+
+        guild = interaction.guild
+
+        # Remove speak restriction from @everyone (clear overwrite entirely)
+        await self.safe_set_permissions(vc, guild.default_role, overwrite=None)
+
+        # Update data
+        vc_data['spectator'] = False
+        vc_data['is_basic'] = True
+        vc_data['unlocked'] = True
+        await self.save_state()
+
+        # Remove prefix
+        clean_name = shared.sanitize_name(interaction.user.display_name, interaction.user.id)[:20]
+        new_name = f"{clean_name}'s VC"
+        await self.safe_edit_channel(vc, name=new_name)
+
+        # Delete settings thread
+        if vc_data.get('thread_id'):
+            await self._delete_thread(vc_data['thread_id'])
+            vc_data['thread_id'] = None
+            vc_data['knock_mgmt_msg_id'] = None
+            await self.save_state()
+
+        await interaction.followup.send("🔊 **Spectator mode removed!** Your VC is now a normal open VC.", ephemeral=True)
+
+    async def convert_spectator_to_locked(self, vc, interaction):
+        """Convert a spectator VC to a locked VC"""
+        vc_id = vc.id
+        vc_data = self.active_vcs.get(vc_id)
+        if not vc_data:
+            await interaction.followup.send("❌ VC data not found.", ephemeral=True)
+            return
+
+        guild = interaction.guild
+
+        # Grandfather current members with connect=True, speak=True
+        current_members = [m for m in vc.members if not m.bot and m.id != interaction.user.id]
+        for member in current_members:
+            await self.safe_set_permissions(vc, member, connect=True, speak=True)
+            await asyncio.sleep(0.3)
+
+        # Set @everyone: connect=False, reset speak
+        await self.safe_set_permissions(vc, guild.default_role, connect=False, speak=None)
+
+        # Update data BEFORE renaming
+        vc_data['spectator'] = False
+        vc_data['unlocked'] = False
+        vc_data['is_basic'] = False
+        await self.save_state()
+
+        # Rename: swap prefix
+        clean_name = shared.sanitize_name(interaction.user.display_name, interaction.user.id)[:20]
+        new_name = f"🔒 {clean_name}'s VC"
+        await self.safe_edit_channel(vc, name=new_name)
+
+        # Update settings panel with locked options
+        await self.update_knock_panel(vc_id)
+
+        # Create knock hub message
+        await self.create_hub_message(vc)
+
+        # Update hub name
+        await self.update_hub_name(guild, force=True)
+
+        grandfathered_msg = ""
+        if current_members:
+            grandfathered_msg = f"\n✅ {len(current_members)} member(s) grandfathered in with VIP access."
+
+        await interaction.followup.send(
+            f"🔒 **Your VC is now locked!**\n\n"
+            f"• A knock button has been added to the hub channel\n"
+            f"• You can manage settings in your private thread{grandfathered_msg}",
+            ephemeral=True
+        )
 
     async def cleanup_vc(self, voice_channel, manual_delete=False):
         """Clean up a VC - IMPROVED with better error handling"""

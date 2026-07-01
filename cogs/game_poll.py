@@ -1,3 +1,4 @@
+import aiohttp
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
@@ -488,12 +489,12 @@ class AdminPanel:
         guild = interaction.guild
         primary_mentions = []
         for cid in channel_ids:
-            ch = guild.get_channel(int(cid))
+            ch = guild.get_channel(int(cid)) or guild.get_thread(int(cid))
             if ch:
                 primary_mentions.append(ch.mention)
         secondary_mentions = []
         for cid in secondary_ids:
-            ch = guild.get_channel(int(cid))
+            ch = guild.get_channel(int(cid)) or guild.get_thread(int(cid))
             if ch:
                 secondary_mentions.append(ch.mention)
         vc_cat = guild.get_channel(int(vc_cat_id)) if vc_cat_id else None
@@ -619,12 +620,12 @@ class AdminPanel:
 
         primary_channels = []
         for cid in primary_ids:
-            ch = interaction.guild.get_channel(int(cid))
+            ch = interaction.guild.get_channel(int(cid)) or interaction.guild.get_thread(int(cid))
             if ch:
                 primary_channels.append(ch)
         secondary_channels = []
         for cid in secondary_ids:
-            ch = interaction.guild.get_channel(int(cid))
+            ch = interaction.guild.get_channel(int(cid)) or interaction.guild.get_thread(int(cid))
             if ch:
                 secondary_channels.append(ch)
 
@@ -966,6 +967,14 @@ class ChannelsView(discord.ui.View):
         cat_select.callback = self.vc_cat_cb
         self.add_item(cat_select)
 
+        clear_primary_btn = discord.ui.Button(label="Clear Primary", style=discord.ButtonStyle.danger, row=3)
+        clear_primary_btn.callback = self.clear_primary_cb
+        self.add_item(clear_primary_btn)
+
+        clear_secondary_btn = discord.ui.Button(label="Clear Secondary", style=discord.ButtonStyle.danger, row=3)
+        clear_secondary_btn.callback = self.clear_secondary_cb
+        self.add_item(clear_secondary_btn)
+
         back_btn = discord.ui.Button(label="Back", style=discord.ButtonStyle.secondary, row=3)
         back_btn.callback = self.back_cb
         self.add_item(back_btn)
@@ -982,6 +991,14 @@ class ChannelsView(discord.ui.View):
 
     async def vc_cat_cb(self, interaction: discord.Interaction):
         await DB.set_setting('vc_category_id', self.children[2].values[0].id)
+        await self.panel.show_channels(interaction)
+
+    async def clear_primary_cb(self, interaction: discord.Interaction):
+        await DB.set_setting('poll_channel_ids', json.dumps([]))
+        await self.panel.show_channels(interaction)
+
+    async def clear_secondary_cb(self, interaction: discord.Interaction):
+        await DB.set_setting('secondary_poll_channel_ids', json.dumps([]))
         await self.panel.show_channels(interaction)
 
     async def back_cb(self, interaction: discord.Interaction):
@@ -1628,57 +1645,65 @@ class GamePoll(commands.Cog):
     @tasks.loop(minutes=1)
     async def vc_monitor(self):
         """Auto-cleanup empty Game Night VCs."""
-        vc_id = await DB.get_setting('active_vc_id')
-        if not vc_id: return
+        try:
+            vc_id = await DB.get_setting('active_vc_id')
+            if not vc_id: return
 
-        channel = self.bot.get_channel(int(vc_id))
-        if not channel:
-            # Channel was manually deleted, wrap up session safely
-            await self.finalize_vc_session()
-            return
-
-        members_in_vc = [m for m in channel.members if not m.bot]
-
-        if len(members_in_vc) == 0:
-            self.vc_empty_minutes += 1
-            if self.vc_empty_minutes >= 5:
-                try:
-                    await channel.delete(reason="Auto-cleanup: Game Night VC empty for 5 minutes.")
-                except discord.NotFound:
-                    pass
-                except discord.Forbidden:
-                    logger.warning("Bot lacks permission to delete the Game Night VC.")
+            channel = self.bot.get_channel(int(vc_id))
+            if not channel:
+                # Channel was manually deleted, wrap up session safely
                 await self.finalize_vc_session()
-        else:
-            self.vc_empty_minutes = 0
-            # Flush elapsed time for active VC members and promote qualifiers live
-            now = time.time()
-            async with aiosqlite.connect(DB_PATH) as db:
-                for user_id, join_time in list(self.vc_join_times.items()):
-                    elapsed = now - join_time
-                    await db.execute(
-                        "INSERT INTO vc_sessions (user_id, total_seconds, join_time) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET total_seconds = total_seconds + ?, join_time = ?",
-                        (user_id, elapsed, now, elapsed, now))
-                    self.vc_join_times[user_id] = now  # Reset join time so we don't double-count
-                await db.execute(f"""
-                    INSERT OR IGNORE INTO returning_players (user_id)
-                    SELECT user_id FROM vc_sessions WHERE total_seconds >= {MIN_VC_SECONDS}
-                """)
-                await db.commit()
+                return
+
+            members_in_vc = [m for m in channel.members if not m.bot]
+
+            if len(members_in_vc) == 0:
+                self.vc_empty_minutes += 1
+                if self.vc_empty_minutes >= 5:
+                    try:
+                        await channel.delete(reason="Auto-cleanup: Game Night VC empty for 5 minutes.")
+                    except discord.NotFound:
+                        pass
+                    except discord.Forbidden:
+                        logger.warning("Bot lacks permission to delete the Game Night VC.")
+                    except aiohttp.ClientError:
+                        logger.warning("Network error deleting Game Night VC, will retry next loop.")
+                    await self.finalize_vc_session()
+            else:
+                self.vc_empty_minutes = 0
+                # Flush elapsed time for active VC members and promote qualifiers live
+                now = time.time()
+                async with aiosqlite.connect(DB_PATH) as db:
+                    for user_id, join_time in list(self.vc_join_times.items()):
+                        elapsed = now - join_time
+                        await db.execute(
+                            "INSERT INTO vc_sessions (user_id, total_seconds, join_time) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET total_seconds = total_seconds + ?, join_time = ?",
+                            (user_id, elapsed, now, elapsed, now))
+                        self.vc_join_times[user_id] = now  # Reset join time so we don't double-count
+                    await db.execute(f"""
+                        INSERT OR IGNORE INTO returning_players (user_id)
+                        SELECT user_id FROM vc_sessions WHERE total_seconds >= {MIN_VC_SECONDS}
+                    """)
+                    await db.commit()
+        except Exception as e:
+            await self.bot.error_reporter.report("GamePoll", f"vc_monitor: {e}")
 
     @tasks.loop(minutes=1)
     async def poll_monitor(self):
         """Check if active poll has expired."""
-        poll_id = await DB.get_setting('active_poll_id')
-        if not poll_id: return
+        try:
+            poll_id = await DB.get_setting('active_poll_id')
+            if not poll_id: return
 
-        async with aiosqlite.connect(DB_PATH) as db:
-            async with db.execute("SELECT end_time FROM active_poll WHERE id = ?", (poll_id,)) as cur:
-                row = await cur.fetchone()
-                if not row: return
+            async with aiosqlite.connect(DB_PATH) as db:
+                async with db.execute("SELECT end_time FROM active_poll WHERE id = ?", (poll_id,)) as cur:
+                    row = await cur.fetchone()
+                    if not row: return
 
-                if datetime.now(EASTERN).timestamp() >= row[0]:
-                    await self.end_poll()
+                    if datetime.now(EASTERN).timestamp() >= row[0]:
+                        await self.end_poll()
+        except Exception as e:
+            await self.bot.error_reporter.report("GamePoll", f"poll_monitor: {e}")
 
     @poll_monitor.before_loop
     @vc_monitor.before_loop

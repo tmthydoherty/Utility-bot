@@ -658,125 +658,128 @@ class DM(commands.Cog):
     @tasks.loop(seconds=5)
     async def dm_sender_task(self):
         """Background task that sends DMs safely"""
-        if not self.current_task:
-            self.dm_sender_task.stop()
-            return
-
-        task = self.current_task
-        guild = self.bot.get_guild(task.guild_id)
-        if not guild:
-            log.error(f"Guild {task.guild_id} not found, stopping task")
-            self.current_task = None
-            self.save_task_state()
-            self.dm_sender_task.stop()
-            return
-        
-        # Handle cancellation
-        if task.is_cancelled:
-            await self.finish_task("🛑 Send Cancelled", guild)
-            return
-        
-        # Handle pause
-        if task.is_paused:
-            return
-        
-        # Check if finished
-        if task.current_index >= task.total:
-            await self.finish_task("✅ Send Complete!", guild)
-            return
-
-        # Check if new day (reset daily counter)
-        today = discord.utils.utcnow().date()
-        if today != task.daily_reset_date:
-            task.daily_reset_date = today
-            log.info("New day detected, daily limit reset")
-            self.save_task_state()
-
-        # Check daily limit
-        sent_today = self.get_dms_sent_today()
-        if sent_today >= DAILY_LIMIT:
-            log.info(f"Daily limit reached ({sent_today}/{DAILY_LIMIT}), waiting for next day...")
-            # Update status to show waiting
-            await self.update_status_embed(guild)
-            return
-
-        # Check hourly limit
-        now = discord.utils.utcnow()
-        hour_ago = now - datetime.timedelta(hours=1)
-        sent_last_hour = len([t for t in self.dm_log if t > hour_ago])
-        
-        if sent_last_hour >= HOURLY_LIMIT:
-            log.info(f"Hourly rate limit reached ({sent_last_hour}/{HOURLY_LIMIT}), waiting...")
-            return
-
-        # Get current member
-        member_id = task.member_ids[task.current_index]
-        member = guild.get_member(member_id)
-        
-        if not member:
-            # Member left server or is no longer accessible
-            task.fail_count += 1
-            task.failed_members.append(f"ID:{member_id} - Member not found")
-            task.current_index += 1
-            self.save_task_state()
-            return
-
-        # Re-fetch image if needed and not cached
-        if task.embed_dict.get("image_url") == "attachment://image.png" and not task.image_data:
-            # Can't send without image data, skip this member
-            log.warning("Image data missing, cannot send DM with image")
-            task.fail_count += 1
-            task.failed_members.append(f"{member.name} ({member.id}) - Image data unavailable")
-            task.current_index += 1
-            self.save_task_state()
-            return
-
-        # Create embed from dict
-        embed = Embed(
-            title=task.embed_dict.get("title"),
-            description=task.embed_dict.get("description"),
-            color=discord.Color(task.embed_dict.get("color", discord.Color.purple().value))
-        )
-        if task.embed_dict.get("footer"):
-            embed.set_footer(text=task.embed_dict["footer"])
-        if task.embed_dict.get("image_url"):
-            embed.set_image(url=task.embed_dict["image_url"])
-
-        # Send DM
         try:
-            send_file = File(io.BytesIO(task.image_data), filename="image.png") if task.image_data else None
-            await member.send(embed=embed, file=send_file)
-            task.success_count += 1
-            self.log_dm_sent()
-            log.info(f"DM sent to {member.name} ({task.current_index + 1}/{task.total})")
-        except discord.Forbidden:
-            task.fail_count += 1
-            task.failed_members.append(f"{member.name} ({member.id}) - Forbidden")
-            log.warning(f"Failed to DM {member.name}: DMs disabled")
-        except discord.HTTPException as e:
-            task.fail_count += 1
-            task.failed_members.append(f"{member.name} ({member.id}) - HTTPException")
-            log.warning(f"Failed to DM {member.name}: {e}")
-        
-        task.current_index += 1
-        
-        # Save state periodically
-        if task.current_index % SAVE_INTERVAL == 0:
-            self.save_task_state()
-            log.info(f"Progress saved: {task.current_index}/{task.total}")
-        
-        # Update status embed every 5 DMs or on completion
-        if task.current_index % 5 == 0 or task.current_index == task.total:
-            await self.update_status_embed(guild)
-        
-        # Recreate embed periodically
-        if task.channel_status_message_id and task.last_embed_recreate:
-            time_since_recreate = discord.utils.utcnow() - task.last_embed_recreate
-            if time_since_recreate.total_seconds() > (EMBED_RECREATE_HOURS * 3600):
-                await self.recreate_status_embed(guild)
-        
-        # Random delay between DMs
-        await asyncio.sleep(random.uniform(DM_DELAY_MIN, DM_DELAY_MAX))
+            if not self.current_task:
+                self.dm_sender_task.stop()
+                return
+
+            task = self.current_task
+            guild = self.bot.get_guild(task.guild_id)
+            if not guild:
+                log.error(f"Guild {task.guild_id} not found, stopping task")
+                self.current_task = None
+                self.save_task_state()
+                self.dm_sender_task.stop()
+                return
+
+            # Handle cancellation
+            if task.is_cancelled:
+                await self.finish_task("🛑 Send Cancelled", guild)
+                return
+
+            # Handle pause
+            if task.is_paused:
+                return
+
+            # Check if finished
+            if task.current_index >= task.total:
+                await self.finish_task("✅ Send Complete!", guild)
+                return
+
+            # Check if new day (reset daily counter)
+            today = discord.utils.utcnow().date()
+            if today != task.daily_reset_date:
+                task.daily_reset_date = today
+                log.info("New day detected, daily limit reset")
+                self.save_task_state()
+
+            # Check daily limit
+            sent_today = self.get_dms_sent_today()
+            if sent_today >= DAILY_LIMIT:
+                log.info(f"Daily limit reached ({sent_today}/{DAILY_LIMIT}), waiting for next day...")
+                # Update status to show waiting
+                await self.update_status_embed(guild)
+                return
+
+            # Check hourly limit
+            now = discord.utils.utcnow()
+            hour_ago = now - datetime.timedelta(hours=1)
+            sent_last_hour = len([t for t in self.dm_log if t > hour_ago])
+
+            if sent_last_hour >= HOURLY_LIMIT:
+                log.info(f"Hourly rate limit reached ({sent_last_hour}/{HOURLY_LIMIT}), waiting...")
+                return
+
+            # Get current member
+            member_id = task.member_ids[task.current_index]
+            member = guild.get_member(member_id)
+
+            if not member:
+                # Member left server or is no longer accessible
+                task.fail_count += 1
+                task.failed_members.append(f"ID:{member_id} - Member not found")
+                task.current_index += 1
+                self.save_task_state()
+                return
+
+            # Re-fetch image if needed and not cached
+            if task.embed_dict.get("image_url") == "attachment://image.png" and not task.image_data:
+                # Can't send without image data, skip this member
+                log.warning("Image data missing, cannot send DM with image")
+                task.fail_count += 1
+                task.failed_members.append(f"{member.name} ({member.id}) - Image data unavailable")
+                task.current_index += 1
+                self.save_task_state()
+                return
+
+            # Create embed from dict
+            embed = Embed(
+                title=task.embed_dict.get("title"),
+                description=task.embed_dict.get("description"),
+                color=discord.Color(task.embed_dict.get("color", discord.Color.purple().value))
+            )
+            if task.embed_dict.get("footer"):
+                embed.set_footer(text=task.embed_dict["footer"])
+            if task.embed_dict.get("image_url"):
+                embed.set_image(url=task.embed_dict["image_url"])
+
+            # Send DM
+            try:
+                send_file = File(io.BytesIO(task.image_data), filename="image.png") if task.image_data else None
+                await member.send(embed=embed, file=send_file)
+                task.success_count += 1
+                self.log_dm_sent()
+                log.info(f"DM sent to {member.name} ({task.current_index + 1}/{task.total})")
+            except discord.Forbidden:
+                task.fail_count += 1
+                task.failed_members.append(f"{member.name} ({member.id}) - Forbidden")
+                log.warning(f"Failed to DM {member.name}: DMs disabled")
+            except discord.HTTPException as e:
+                task.fail_count += 1
+                task.failed_members.append(f"{member.name} ({member.id}) - HTTPException")
+                log.warning(f"Failed to DM {member.name}: {e}")
+
+            task.current_index += 1
+
+            # Save state periodically
+            if task.current_index % SAVE_INTERVAL == 0:
+                self.save_task_state()
+                log.info(f"Progress saved: {task.current_index}/{task.total}")
+
+            # Update status embed every 5 DMs or on completion
+            if task.current_index % 5 == 0 or task.current_index == task.total:
+                await self.update_status_embed(guild)
+
+            # Recreate embed periodically
+            if task.channel_status_message_id and task.last_embed_recreate:
+                time_since_recreate = discord.utils.utcnow() - task.last_embed_recreate
+                if time_since_recreate.total_seconds() > (EMBED_RECREATE_HOURS * 3600):
+                    await self.recreate_status_embed(guild)
+
+            # Random delay between DMs
+            await asyncio.sleep(random.uniform(DM_DELAY_MIN, DM_DELAY_MAX))
+        except Exception as e:
+            await self.bot.error_reporter.report("DM", f"dm_sender_task: {e}")
 
     async def update_status_embed(self, guild: discord.Guild):
         """Update the status embed in the channel"""

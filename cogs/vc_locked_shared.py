@@ -10,7 +10,13 @@ import time
 DB_FILE = "vc_data.db"
 TRIGGER_NAME = "➕ Join to create locked vc"  # Locked VCs trigger
 TRIGGER_NAME_BASIC = "➕ Join to create vc"   # Basic VCs trigger
-BANNED_WORDS = ["badword1", "badword2", "naughty"] 
+TRIGGER_NAME_SPECTATOR = "➕ Join to create spectator vc"  # Spectator VCs trigger
+SPECTATOR_PREFIX = "🤫 "
+BANNED_WORDS = ["badword1", "badword2", "naughty"]
+
+# Issue #16 fix: Use constants instead of magic strings for verify_channel_exists results
+VERIFY_FORBIDDEN = "FORBIDDEN"
+VERIFY_ERROR = "ERROR"
 
 # --- LOGGING SETUP ---
 logger = logging.getLogger('VC_Cog')
@@ -22,18 +28,6 @@ logger.setLevel(logging.INFO)
 
 # --- DATABASE SETUP & HELPERS ---
 DB_SEMAPHORE = asyncio.Semaphore(10)
-
-# FIX: Connection pool for better performance
-_db_pool = None
-_db_pool_lock = asyncio.Lock()
-
-async def get_db_connection():
-    """Get a database connection with proper settings"""
-    conn = await aiosqlite.connect(DB_FILE)
-    conn.row_factory = aiosqlite.Row
-    await conn.execute("PRAGMA journal_mode=WAL")
-    await conn.execute("PRAGMA busy_timeout=5000")
-    return conn
 
 async def init_db():
     logger.info("Initializing database...")
@@ -105,6 +99,9 @@ async def init_db():
                     if 'created_at' not in columns:
                         logger.info("Migrating DB: Adding created_at column...")
                         await db.execute("ALTER TABLE active_vcs ADD COLUMN created_at REAL DEFAULT 0")
+                    if 'spectator' not in columns:
+                        logger.info("Migrating DB: Adding spectator column...")
+                        await db.execute("ALTER TABLE active_vcs ADD COLUMN spectator INTEGER DEFAULT 0")
             except Exception as e:
                 logger.error(f"Migration failed: {e}")
 
@@ -140,7 +137,7 @@ async def load_active_vcs():
     try:
         async with DB_SEMAPHORE:
             async with aiosqlite.connect(DB_FILE) as db:
-                async with db.execute("SELECT vc_id, owner_id, message_id, knock_mgmt_msg_id, thread_id, ghost, unlocked, bans, mute_knock_pings, guild_id, is_basic, last_seen_occupied, created_at FROM active_vcs") as cursor:
+                async with db.execute("SELECT vc_id, owner_id, message_id, knock_mgmt_msg_id, thread_id, ghost, unlocked, bans, mute_knock_pings, guild_id, is_basic, last_seen_occupied, created_at, spectator FROM active_vcs") as cursor:
                     rows = await cursor.fetchall()
                     result = {}
                     corrupted = []
@@ -173,7 +170,8 @@ async def load_active_vcs():
                                 'guild_id': int(row[9]) if len(row) > 9 and row[9] else None,
                                 'is_basic': bool(row[10]) if len(row) > 10 else False,
                                 'last_seen_occupied': float(row[11]) if len(row) > 11 and row[11] else time.time(),
-                                'created_at': float(row[12]) if len(row) > 12 and row[12] else time.time()
+                                'created_at': float(row[12]) if len(row) > 12 and row[12] else time.time(),
+                                'spectator': bool(row[13]) if len(row) > 13 else False
                             }
                         except (json.JSONDecodeError, TypeError, ValueError) as e:
                             logger.error(f"Corrupted data for VC {row[0]}: {e}")
@@ -215,7 +213,8 @@ async def save_multiple_vcs(vcs_dict):
                 bans_json,
                 int(data.get('mute_knock_pings', False)),
                 int(data['guild_id']) if data.get('guild_id') else None,
-                int(data.get('is_basic', False))
+                int(data.get('is_basic', False)),
+                int(data.get('spectator', False))
             ))
         if not data_list:
             return
@@ -225,8 +224,8 @@ async def save_multiple_vcs(vcs_dict):
                 try:
                     await db.execute("BEGIN TRANSACTION")
                     await db.executemany('''
-                        INSERT OR REPLACE INTO active_vcs (vc_id, owner_id, message_id, knock_mgmt_msg_id, thread_id, ghost, unlocked, bans, mute_knock_pings, guild_id, is_basic)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        INSERT OR REPLACE INTO active_vcs (vc_id, owner_id, message_id, knock_mgmt_msg_id, thread_id, ghost, unlocked, bans, mute_knock_pings, guild_id, is_basic, spectator)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ''', data_list)
                     await db.commit()
                 except Exception as e:
@@ -381,12 +380,24 @@ async def delete_preset(user_id, preset_name):
 # --- UTILS ---
 
 def contains_banned_word(text):
-    if not text: 
+    if not text:
         return False
-    normalized = ''.join(c.lower() for c in text if c.isalnum())
+    import unicodedata
+    # Issue #14 fix: Normalize unicode to catch homoglyphs (Cyrillic е -> e, etc.)
+    # NFKD decomposes characters to their base form + combining marks
+    decomposed = unicodedata.normalize('NFKD', text)
+    # Strip combining marks (accents, diacritics) and zero-width characters
+    normalized = ''.join(
+        c.lower() for c in decomposed
+        if unicodedata.category(c) not in ('Mn', 'Cf', 'Cc') and c.isalnum()
+    )
     for word in BANNED_WORDS:
-        normalized_word = ''.join(c.lower() for c in word if c.isalnum())
-        if normalized_word in normalized: 
+        word_decomposed = unicodedata.normalize('NFKD', word)
+        normalized_word = ''.join(
+            c.lower() for c in word_decomposed
+            if unicodedata.category(c) not in ('Mn', 'Cf', 'Cc') and c.isalnum()
+        )
+        if normalized_word in normalized:
             return True
     return False
 
@@ -426,16 +437,23 @@ def create_knock_management_embed(owner, pending_knocks, guild, vc_data=None):
         )
     else:
         if vc_data:
-            lock_status = "🔒 **LOCKED**" if not vc_data.get('unlocked', False) else "🔓 **UNLOCKED**"
-            ghost_status = "**ON**" if vc_data.get('ghost', False) else "**OFF**"
-            
-            embed.description = (
-                f"- **Lock status:** {lock_status}\n"
-                f"*(Unlocking your vc opens it up to the public for anyone to join)*\n\n"
-                f"- **Ghost mode:** {ghost_status}\n"
-                f"*(Enabling ghost mode will keep your vc locked but remove the knock ability from the public)*\n\n"
-                f"- To manually add users to your vc either @ them here or add them to the VIP list with the settings menu below"
-            )
+            if vc_data.get('spectator', False):
+                embed.description = (
+                    f"- **Mode:** 🤫 **SPECTATOR**\n"
+                    f"*(Everyone can join but only unmuted users can speak)*\n\n"
+                    f"- To unmute users either @ them here or use **Unmute Users** in the settings menu below"
+                )
+            else:
+                lock_status = "🔒 **LOCKED**" if not vc_data.get('unlocked', False) else "🔓 **UNLOCKED**"
+                ghost_status = "**ON**" if vc_data.get('ghost', False) else "**OFF**"
+
+                embed.description = (
+                    f"- **Lock status:** {lock_status}\n"
+                    f"*(Unlocking your vc opens it up to the public for anyone to join)*\n\n"
+                    f"- **Ghost mode:** {ghost_status}\n"
+                    f"*(Enabling ghost mode will keep your vc locked but remove the knock ability from the public)*\n\n"
+                    f"- To manually add users to your vc either @ them here or add them to the VIP list with the settings menu below"
+                )
         else:
             embed.description = (
                 f"Welcome {owner.mention}!\n\n"
@@ -578,12 +596,12 @@ async def verify_channel_exists(bot, guild, channel_id):
     Returns:
         (channel, member_count) - Channel exists with N members
         (None, 0) - Channel confirmed deleted (NotFound)
-        ("FORBIDDEN", -1) - Can't access but exists, don't cleanup
-        ("ERROR", -1) - API error, don't cleanup to be safe
+        (VERIFY_FORBIDDEN, -1) - Can't access but exists, don't cleanup
+        (VERIFY_ERROR, -1) - API error, don't cleanup to be safe
     """
     if not guild or not channel_id:
         logger.warning(f"VERIFY: Missing guild or channel_id for verification")
-        return "ERROR", -1
+        return VERIFY_ERROR, -1
 
     try:
         channel = await guild.fetch_channel(channel_id)
@@ -599,10 +617,10 @@ async def verify_channel_exists(bot, guild, channel_id):
         return None, 0
     except discord.Forbidden:
         logger.warning(f"VERIFY: Cannot access channel {channel_id} (Forbidden) - assuming exists, aborting cleanup")
-        return "FORBIDDEN", -1
+        return VERIFY_FORBIDDEN, -1
     except Exception as e:
         logger.error(f"VERIFY: Error fetching channel {channel_id}: {e} - aborting cleanup to be safe")
-        return "ERROR", -1
+        return VERIFY_ERROR, -1
 
 # --- MODALS ---
 
@@ -697,6 +715,11 @@ class ExclusionsModal(discord.ui.Modal, title="Set VC Exclusions"):
 
             await set_config(f'excluded_vc_names_{interaction.guild_id}', value)
 
+            # Issue #5 fix: Invalidate the exclusion cache after admin updates
+            cog = get_cog_safe(self.bot)
+            if cog:
+                cog.invalidate_exclusion_cache(interaction.guild_id)
+
             if value:
                 await interaction.response.send_message(
                     f"✅ Exclusions set! The following VC names will be ignored:\n`{value}`",
@@ -746,9 +769,18 @@ class AdminPanelView(discord.ui.View):
     def __init__(self, bot):
         super().__init__(timeout=None)
         self.bot = bot
-    
+
+    async def _check_admin(self, interaction: discord.Interaction) -> bool:
+        """Issue #4 fix: Verify the interacting user is a bot admin on every button click"""
+        if not self.bot.is_bot_admin(interaction.user):
+            await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True)
+            return False
+        return True
+
     @discord.ui.button(label="Set Category", style=discord.ButtonStyle.primary, emoji="📁", custom_id="admin_set_category")
     async def set_category(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check_admin(interaction):
+            return
         categories = [c for c in interaction.guild.categories if c.permissions_for(interaction.guild.me).manage_channels]
         if not categories: 
             return await interaction.response.send_message("❌ No categories with manage permissions.", ephemeral=True)
@@ -774,19 +806,27 @@ class AdminPanelView(discord.ui.View):
     
     @discord.ui.button(label="Set Info Content", style=discord.ButtonStyle.secondary, emoji="ℹ️", custom_id="admin_set_info")
     async def set_info(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check_admin(interaction):
+            return
         await interaction.response.send_modal(InfoContentModal(self.bot))
-    
+
     @discord.ui.button(label="Set Idle Name", style=discord.ButtonStyle.secondary, emoji="💤", custom_id="admin_idle_name")
     async def set_idle_name(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check_admin(interaction):
+            return
         await interaction.response.send_modal(IdleNameModal(self.bot))
-    
+
     @discord.ui.button(label="Post Rules", style=discord.ButtonStyle.success, emoji="📋", custom_id="admin_post_rules")
     async def post_rules(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check_admin(interaction):
+            return
         await interaction.response.send_modal(RulesEmbedModal(self.bot))
 
     @discord.ui.button(label="Set Exclusions", style=discord.ButtonStyle.secondary, emoji="🚫", custom_id="admin_set_exclusions")
     async def set_exclusions(self, interaction: discord.Interaction, button: discord.ui.Button):
         """Set VC names to exclude from the locked VC system"""
+        if not await self._check_admin(interaction):
+            return
         # Pre-populate the modal with current exclusions
         current_exclusions = await get_config(f'excluded_vc_names_{interaction.guild_id}', "")
         modal = ExclusionsModal(self.bot)
@@ -965,7 +1005,18 @@ class UserSelectView(discord.ui.View):
         self.action = action
         self.voice_channel = voice_channel
         self.cog_ref = cog_ref
-    
+        self._interaction_message = None  # Issue #7 fix: Track for timeout cleanup
+
+    async def on_timeout(self):
+        """Issue #7 fix: Disable components when the view times out"""
+        if self._interaction_message:
+            try:
+                for item in self.children:
+                    item.disabled = True
+                await self._interaction_message.edit(view=self)
+            except (discord.NotFound, discord.HTTPException):
+                pass
+
     @discord.ui.select(cls=discord.ui.UserSelect, placeholder="Select user(s)...", min_values=1, max_values=10)
     async def user_select(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
         await interaction.response.defer(ephemeral=True)
@@ -1081,10 +1132,11 @@ class UserSelectView(discord.ui.View):
             
             elif self.action == 'vip':
                 added, skipped, already_vip, failed = [], [], [], []
+                is_spectator = vc_data.get('spectator', False)
                 for user in select.values:
-                    if user.bot: 
+                    if user.bot:
                         continue
-                    
+
                     # FIX: Ensure user is a Member, not just a User
                     member = interaction.guild.get_member(user.id)
                     if not member:
@@ -1096,32 +1148,43 @@ class UserSelectView(discord.ui.View):
                         except discord.HTTPException:
                             failed.append(f"{user.mention} (fetch error)")
                             continue
-                    
-                    if member.id in vc_data.get('bans', []): 
+
+                    if member.id in vc_data.get('bans', []):
                         skipped.append(f"{member.mention} (banned)")
                         continue
-                    
-                    # FIX: Check if already has VIP access
+
+                    # FIX: For spectator VCs, check speak (not connect) since connect is open
                     current_perms = vc.overwrites_for(member)
-                    if current_perms.connect is True:
-                        already_vip.append(member.mention)
-                        continue
-                    
+                    if is_spectator:
+                        if current_perms.speak is True:
+                            already_vip.append(member.mention)
+                            continue
+                    else:
+                        if current_perms.connect is True:
+                            already_vip.append(member.mention)
+                            continue
+
                     # FIX: Better error handling for permission setting
                     try:
-                        if await self.cog_ref.safe_set_permissions(vc, member, connect=True, speak=True):
+                        if is_spectator:
+                            success = await self.cog_ref.safe_set_permissions(vc, member, speak=True)
+                        else:
+                            success = await self.cog_ref.safe_set_permissions(vc, member, connect=True, speak=True)
+                        if success:
                             added.append(member.mention)
                         else:
                             failed.append(f"{member.mention} (permission error)")
                     except Exception as e:
                         logger.error(f"Failed to add VIP {member.id}: {e}")
                         failed.append(f"{member.mention} (error)")
-                
+
                 msg = ""
                 if added:
-                    msg += f"⭐ **VIP Access:** {', '.join(added)}\n"
+                    label = "Unmuted" if is_spectator else "VIP Access"
+                    msg += f"⭐ **{label}:** {', '.join(added)}\n"
                 if already_vip:
-                    msg += f"ℹ️ **Already VIP:** {', '.join(already_vip)}\n"
+                    label = "Already unmuted" if is_spectator else "Already VIP"
+                    msg += f"ℹ️ **{label}:** {', '.join(already_vip)}\n"
                 if skipped:
                     msg += f"⚠️ **Skipped:** {', '.join(skipped)}\n"
                 if failed:
@@ -1235,15 +1298,16 @@ async def process_knock(bot, cog, interaction, voice_id):
     # Add to pending knocks
     cog.pending_knocks[voice_id].append(user.id)
 
-    # Update panel and send ping
+    # Issue #9 fix: Respond to user FIRST (guarantees they get feedback), then update panel
+    await interaction.response.send_message("✅ Knock sent! Wait for the owner to respond.", ephemeral=True)
+    logger.info(f"User {user.id} knocked on VC {voice_id}")
+
+    # Update panel and send ping (non-critical, errors won't affect user)
     try:
         await cog.update_knock_panel(voice_id)
         await cog.handle_knock_ping(voice_id)
     except Exception as e:
         logger.error(f"Error updating knock panel/ping for VC {voice_id}: {e}")
-
-    await interaction.response.send_message("✅ Knock sent! Wait for the owner to respond.", ephemeral=True)
-    logger.info(f"User {user.id} knocked on VC {voice_id}")
 
 
 def build_knock_hub_embed(knockable_vcs):
@@ -1363,12 +1427,13 @@ class HubEntryView(discord.ui.View):
         await process_knock(self.bot, cog, interaction, self.voice_id)
 
 class KnockManagementView(discord.ui.View):
-    def __init__(self, bot, cog_ref, owner_id, voice_id, show_knock_buttons=False):
+    def __init__(self, bot, cog_ref, owner_id, voice_id, show_knock_buttons=False, vc_type="locked"):
         super().__init__(timeout=None)
         self.bot = bot
         self.cog_ref = cog_ref
         self.owner_id = owner_id
         self.voice_id = voice_id
+        self.vc_type = vc_type
 
         self.accept_btn.custom_id = f"knock_accept:{voice_id}"
         self.deny_btn.custom_id = f"knock_deny:{voice_id}"
@@ -1379,6 +1444,30 @@ class KnockManagementView(discord.ui.View):
         if not show_knock_buttons:
             self.remove_item(self.accept_btn)
             self.remove_item(self.deny_btn)
+
+        # Set dropdown options based on VC type
+        if vc_type == "spectator":
+            self.settings_select.placeholder = "⚙️ Spectator Settings"
+            self.settings_select.options = [
+                discord.SelectOption(label="Remove Spectator Mode", description="Convert to normal VC", emoji="🔊"),
+                discord.SelectOption(label="Lock this VC", description="Convert to locked VC", emoji="🔒"),
+                discord.SelectOption(label="Unmute All", description="Unmute all users in VC", emoji="🔈"),
+                discord.SelectOption(label="Unmute Users", description="Unmute specific users", emoji="🤫"),
+                discord.SelectOption(label="Kick Users", description="Remove users from VC", emoji="👢"),
+                discord.SelectOption(label="Ban/Unban", description="Ban or unban users", emoji="⛔"),
+                discord.SelectOption(label="Transfer Ownership", description="Transfer VC to another user", emoji="👑"),
+            ]
+        else:
+            self.settings_select.options = [
+                discord.SelectOption(label="Unlock/Lock", description="Toggle VC lock status", emoji="🔓"),
+                discord.SelectOption(label="Ghost Mode", description="Toggle ghost mode", emoji="👻"),
+                discord.SelectOption(label="Mute Knock Pings", description="Toggle knock notifications", emoji="🔕"),
+                discord.SelectOption(label="Spectate Mode", description="Convert to spectator VC", emoji="🤫"),
+                discord.SelectOption(label="Transfer Ownership", description="Transfer VC to another user", emoji="👑"),
+                discord.SelectOption(label="Add VIPs", description="Grant access to specific users", emoji="⭐"),
+                discord.SelectOption(label="Kick Users", description="Remove users from VC", emoji="👢"),
+                discord.SelectOption(label="Ban/Unban", description="Ban or unban users", emoji="⛔"),
+            ]
     
     def _get_cog(self):
         """Get cog reference - ALWAYS get fresh from bot to handle reloads"""
@@ -1431,6 +1520,11 @@ class KnockManagementView(discord.ui.View):
         if error:
             return await interaction.response.send_message(error, ephemeral=True)
 
+        # Issue #18 fix: Check if a transfer is in progress for this VC
+        if hasattr(cog, '_transfer_locks') and self.voice_id in cog._transfer_locks:
+            if cog._transfer_locks[self.voice_id].locked():
+                return await interaction.response.send_message("⚠️ Ownership transfer in progress. Please wait.", ephemeral=True)
+
         pending = cog.pending_knocks.get(self.voice_id, [])
         if not pending:
             return await interaction.response.send_message("❌ No pending knocks.", ephemeral=True)
@@ -1441,7 +1535,7 @@ class KnockManagementView(discord.ui.View):
         if not vc:
             return await interaction.followup.send("❌ VC no longer exists.", ephemeral=True)
 
-        # FIX: Use lock to prevent race conditions when owner clicks rapidly
+        # Use lock to prevent race conditions when owner clicks rapidly
         knock_lock = cog.get_knock_accept_lock(self.voice_id)
         async with knock_lock:
             # Re-check pending after acquiring lock
@@ -1538,12 +1632,6 @@ class KnockManagementView(discord.ui.View):
         placeholder="⚙️ VC Settings",
         options=[
             discord.SelectOption(label="Unlock/Lock", description="Toggle VC lock status", emoji="🔓"),
-            discord.SelectOption(label="Ghost Mode", description="Toggle ghost mode", emoji="👻"),
-            discord.SelectOption(label="Mute Knock Pings", description="Toggle knock notifications", emoji="🔕"),
-            discord.SelectOption(label="Transfer Ownership", description="Transfer VC to another user", emoji="👑"),
-            discord.SelectOption(label="Add VIPs", description="Grant access to specific users", emoji="⭐"),
-            discord.SelectOption(label="Kick Users", description="Remove users from VC", emoji="👢"),
-            discord.SelectOption(label="Ban/Unban", description="Ban or unban users", emoji="⛔"),
         ],
         row=1
     )
@@ -1567,20 +1655,22 @@ class KnockManagementView(discord.ui.View):
             await interaction.response.defer(ephemeral=True)
             if vc_data.get('ghost', False) and not vc_data.get('unlocked', False):
                 return await interaction.followup.send("❌ Disable **Ghost Mode** before unlocking your VC.", ephemeral=True)
-            
+
             new_state = not vc_data.get('unlocked', False)
-            vc_data['unlocked'] = new_state
-            
-            # Save state before operations
-            await cog.save_state()
-            
             status = "UNLOCKED" if new_state else "LOCKED"
-            
+
+            # Issue #3 fix: Set permissions FIRST, only persist state if successful
             try:
-                await cog.safe_set_permissions(vc, interaction.guild.default_role, connect=new_state)
+                success = await cog.safe_set_permissions(vc, interaction.guild.default_role, connect=new_state)
+                if not success:
+                    return await interaction.followup.send("❌ Failed to update permissions. Please try again.", ephemeral=True)
             except Exception as e:
                 logger.error(f"Failed to set permissions: {e}")
-                return await interaction.followup.send(f"❌ Error updating permissions: {e}", ephemeral=True)
+                return await interaction.followup.send(f"❌ Error updating permissions.", ephemeral=True)
+
+            # Permission succeeded — NOW persist state
+            vc_data['unlocked'] = new_state
+            await cog.save_state()
             
             prefix = "🔒 "
             try:
@@ -1634,22 +1724,15 @@ class KnockManagementView(discord.ui.View):
                 return await interaction.followup.send("❌ You must **Lock** your VC before enabling Ghost Mode.", ephemeral=True)
 
             new_state = not vc_data.get('ghost', False)
-            vc_data['ghost'] = new_state
-            
-            # Save state before operations
-            await cog.save_state()
 
-            # FIX: Message operations now use internal locking to prevent races
+            # Issue #17 fix: Perform hub message operations FIRST, then persist state
             if new_state:
-                # Enabling ghost: delete hub message (delete_hub_message handles locking and clearing message_id)
+                # Enabling ghost: delete hub message first
                 await cog.delete_hub_message(vc.id)
                 logger.info(f"Deleted hub message when enabling ghost mode for VC {vc.id}")
             else:
                 # Disabling ghost: delete old message and create new one
                 await cog.delete_hub_message(vc.id)
-
-                # Create hub message (VC is locked since ghost requires locked state)
-                # FIX: Check if creation succeeded and notify user
                 success = await cog.create_hub_message(vc)
                 if success:
                     logger.info(f"Created hub message when disabling ghost mode for VC {vc.id}")
@@ -1658,12 +1741,16 @@ class KnockManagementView(discord.ui.View):
                     msg = "👻 **Ghost mode disabled** (⚠️ knock message creation failed)"
                     await interaction.followup.send(msg, ephemeral=True)
                     return
-            
+
+            # Operations succeeded — NOW persist state
+            vc_data['ghost'] = new_state
+            await cog.save_state()
+
             await cog.update_knock_panel(self.voice_id)
-            
+
             # Always force hub rename after ghost mode toggle
             await cog.update_hub_name(interaction.guild, force=True)
-            
+
             msg = "👻 **Ghost mode enabled**" if new_state else "👻 **Ghost mode disabled**"
             await interaction.followup.send(msg, ephemeral=True)
         
@@ -1676,16 +1763,97 @@ class KnockManagementView(discord.ui.View):
             await interaction.response.send_message(msg, ephemeral=True)
         
         elif choice == "Ban/Unban":
-            await interaction.response.send_message("Select to Ban/Unban:", view=UserSelectView('ban', vc, cog), ephemeral=True)
-        
+            view = UserSelectView('ban', vc, cog)
+            await interaction.response.send_message("Select to Ban/Unban:", view=view, ephemeral=True)
+            try:
+                view._interaction_message = await interaction.original_response()
+            except Exception:
+                pass
+
         elif choice == "Transfer Ownership":
-            await interaction.response.send_message("Select new Owner:", view=UserSelectView('transfer', vc, cog), ephemeral=True)
-        
+            view = UserSelectView('transfer', vc, cog)
+            await interaction.response.send_message("Select new Owner:", view=view, ephemeral=True)
+            try:
+                view._interaction_message = await interaction.original_response()
+            except Exception:
+                pass
+
         elif choice == "Add VIPs":
-            await interaction.response.send_message("Select VIPs:", view=UserSelectView('vip', vc, cog), ephemeral=True)
-        
+            view = UserSelectView('vip', vc, cog)
+            await interaction.response.send_message("Select VIPs:", view=view, ephemeral=True)
+            try:
+                view._interaction_message = await interaction.original_response()
+            except Exception:
+                pass
+
         elif choice == "Kick Users":
-            await interaction.response.send_message("Select to Kick:", view=UserSelectView('kick', vc, cog), ephemeral=True)
+            view = UserSelectView('kick', vc, cog)
+            await interaction.response.send_message("Select to Kick:", view=view, ephemeral=True)
+            try:
+                view._interaction_message = await interaction.original_response()
+            except Exception:
+                pass
+
+        elif choice == "Spectate Mode":
+            await interaction.response.defer(ephemeral=True)
+            try:
+                await cog.convert_to_spectator(vc, interaction)
+            except Exception as e:
+                logger.error(f"Failed to convert to spectator: {e}", exc_info=True)
+                await interaction.followup.send("❌ Failed to enable spectator mode.", ephemeral=True)
+
+        elif choice == "Remove Spectator Mode":
+            await interaction.response.defer(ephemeral=True)
+            try:
+                await cog.convert_spectator_to_basic(vc, interaction)
+            except Exception as e:
+                logger.error(f"Failed to remove spectator mode: {e}", exc_info=True)
+                await interaction.followup.send("❌ Failed to remove spectator mode.", ephemeral=True)
+
+        elif choice == "Lock this VC":
+            await interaction.response.defer(ephemeral=True)
+            try:
+                await cog.convert_spectator_to_locked(vc, interaction)
+            except Exception as e:
+                logger.error(f"Failed to lock spectator VC: {e}", exc_info=True)
+                await interaction.followup.send("❌ Failed to lock VC.", ephemeral=True)
+
+        elif choice == "Unmute All":
+            await interaction.response.defer(ephemeral=True)
+            unmuted = []
+            failed = []
+            for member in vc.members:
+                if member.bot or member.id == vc_data['owner_id']:
+                    continue
+                current_perms = vc.overwrites_for(member)
+                if current_perms.speak is True:
+                    continue
+                try:
+                    if await cog.safe_set_permissions(vc, member, speak=True):
+                        unmuted.append(member.mention)
+                    else:
+                        failed.append(member.mention)
+                except Exception as e:
+                    logger.debug(f"Failed to unmute {member.id}: {e}")
+                    failed.append(member.mention)
+                await asyncio.sleep(0.3)
+
+            msg = ""
+            if unmuted:
+                msg += f"🔊 **Unmuted:** {', '.join(unmuted)}\n"
+            if failed:
+                msg += f"❌ **Failed:** {', '.join(failed)}"
+            if not msg:
+                msg = "ℹ️ No users to unmute."
+            await interaction.followup.send(msg.strip(), ephemeral=True)
+
+        elif choice == "Unmute Users":
+            view = UserSelectView('vip', vc, cog)
+            await interaction.response.send_message("Select users to unmute:", view=view, ephemeral=True)
+            try:
+                view._interaction_message = await interaction.original_response()
+            except Exception:
+                pass
 
     @discord.ui.button(label="Reconnect VC", style=discord.ButtonStyle.secondary, emoji="🔄", row=2)
     async def reconnect_btn(self, interaction: discord.Interaction, button: discord.ui.Button):

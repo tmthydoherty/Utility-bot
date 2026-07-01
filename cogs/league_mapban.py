@@ -4061,14 +4061,17 @@ class MapBanCog(commands.Cog):
     @tasks.loop(seconds=TIMER_UPDATE_INTERVAL)
     async def timer_task(self):
         """Update timers and handle timeouts."""
-        async with self.timer_update_lock:
-            sessions_to_process = list(self.active_sessions.items())
-        
-        for session_id, session in sessions_to_process:
-            try:
-                await self._process_session_timer(session_id, session)
-            except Exception as e:
-                print(f"Error processing timer for {session_id}: {e}")
+        try:
+            async with self.timer_update_lock:
+                sessions_to_process = list(self.active_sessions.items())
+
+            for session_id, session in sessions_to_process:
+                try:
+                    await self._process_session_timer(session_id, session)
+                except Exception as e:
+                    logger.error(f"Error processing timer for {session_id}: {e}")
+        except Exception as e:
+            await self.bot.error_reporter.report("LeagueMapBan", f"timer_task: {e}")
     
     async def _process_session_timer(self, session_id: str, session: Dict):
         """Process timer for a single session."""
@@ -4341,46 +4344,49 @@ class MapBanCog(commands.Cog):
     @tasks.loop(minutes=30)
     async def cleanup_task(self):
         """Clean up old threads and session data."""
-        now = datetime.now(timezone.utc)
-        
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            
-            # Get completed sessions older than 3 hours for thread deletion
-            async with db.execute(
-                "SELECT * FROM sessions WHERE status = 'complete'"
-            ) as cursor:
-                sessions = await cursor.fetchall()
-                
-                for row in sessions:
-                    session = dict(row)
-                    complete_time = session.get("complete_time")
-                    
-                    if complete_time:
-                        if isinstance(complete_time, str):
-                            complete_time = datetime.fromisoformat(complete_time.replace("Z", "+00:00"))
-                        
-                        if (now - complete_time).total_seconds() > THREAD_AUTO_DELETE:
-                            # Delete threads
-                            guild = self.bot.get_guild(session["guild_id"])
-                            if guild:
-                                for thread_id in [session.get("thread1_id"), session.get("thread2_id")]:
-                                    if thread_id:
-                                        thread = await self._get_thread(guild, thread_id)
-                                        if thread:
-                                            try:
-                                                await thread.delete()
-                                            except Exception:
-                                                pass
-            
-            # Delete session data older than 1 week
-            cutoff = (now - timedelta(seconds=SESSION_DATA_RETENTION)).isoformat()
-            await db.execute(
-                "DELETE FROM sessions WHERE created_at < ? AND status = 'complete'",
-                (cutoff,)
-            )
-            
-            await db.commit()
+        try:
+            now = datetime.now(timezone.utc)
+
+            async with aiosqlite.connect(DATABASE_PATH) as db:
+                db.row_factory = aiosqlite.Row
+
+                # Get completed sessions older than 3 hours for thread deletion
+                async with db.execute(
+                    "SELECT * FROM sessions WHERE status = 'complete'"
+                ) as cursor:
+                    sessions = await cursor.fetchall()
+
+                    for row in sessions:
+                        session = dict(row)
+                        complete_time = session.get("complete_time")
+
+                        if complete_time:
+                            if isinstance(complete_time, str):
+                                complete_time = datetime.fromisoformat(complete_time.replace("Z", "+00:00"))
+
+                            if (now - complete_time).total_seconds() > THREAD_AUTO_DELETE:
+                                # Delete threads
+                                guild = self.bot.get_guild(session["guild_id"])
+                                if guild:
+                                    for thread_id in [session.get("thread1_id"), session.get("thread2_id")]:
+                                        if thread_id:
+                                            thread = await self._get_thread(guild, thread_id)
+                                            if thread:
+                                                try:
+                                                    await thread.delete()
+                                                except Exception:
+                                                    pass
+
+                # Delete session data older than 1 week
+                cutoff = (now - timedelta(seconds=SESSION_DATA_RETENTION)).isoformat()
+                await db.execute(
+                    "DELETE FROM sessions WHERE created_at < ? AND status = 'complete'",
+                    (cutoff,)
+                )
+
+                await db.commit()
+        except Exception as e:
+            await self.bot.error_reporter.report("LeagueMapBan", f"cleanup_task: {e}")
     
     @timer_task.before_loop
     @cleanup_task.before_loop

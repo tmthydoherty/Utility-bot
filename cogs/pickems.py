@@ -1401,18 +1401,21 @@ class Pickems(commands.Cog):
     @tasks.loop(seconds=30)
     async def auto_close_loop(self):
         """Background task that sweeps for expired timers and automatically closes them."""
-        matches = await db.get_matches_by_status('published')
-        current_time = int(time.time())
-        for match in matches:
-            if match['close_time'] and current_time >= match['close_time']:
-                await db.set_match_status(match['id'], 'closed')
-                await update_match_message(self.bot, match['id'])
-                logger.info(f"Auto-closed Pick'em match {match['id']}")
+        try:
+            matches = await db.get_matches_by_status('published')
+            current_time = int(time.time())
+            for match in matches:
+                if match['close_time'] and current_time >= match['close_time']:
+                    await db.set_match_status(match['id'], 'closed')
+                    await update_match_message(self.bot, match['id'])
+                    logger.info(f"Auto-closed Pick'em match {match['id']}")
 
-        # Prune idle vote locks to prevent unbounded memory growth
-        idle = [uid for uid, lock in vote_locks.items() if not lock.locked()]
-        for uid in idle:
-            vote_locks.pop(uid, None)
+            # Prune idle vote locks to prevent unbounded memory growth
+            idle = [uid for uid, lock in vote_locks.items() if not lock.locked()]
+            for uid in idle:
+                vote_locks.pop(uid, None)
+        except Exception as e:
+            await self.bot.error_reporter.report("Pickems", f"auto_close_loop: {e}")
 
     @auto_close_loop.before_loop
     async def before_auto_close(self):

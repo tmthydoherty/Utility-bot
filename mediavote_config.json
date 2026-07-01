@@ -1,0 +1,33 @@
+{
+    "1431565435010289778": {
+        "admin_channel_id": 1431565436713177204,
+        "admin_roles": [
+            1431565435819528302,
+            1431565435790164023
+        ],
+        "active_event": {
+            "name": "profile-art-contest",
+            "display_name": "Profile Art Contest",
+            "channel_id": 1518377684424724730,
+            "thread_id": 1520117309086367920,
+            "sticky_message_id": 1521586478738575442,
+            "sticky_text": null,
+            "submission_deadline": "2026-07-04T03:45:00+00:00",
+            "voting_deadline": "2026-07-05T04:45:00+00:00",
+            "phase": "submissions",
+            "entries": {
+                "1053227743040503878": {
+                    "thread_message_id": 1520779965862248669,
+                    "username": "\ua673\u2729  \u22c6 soggatron\u22c6 \u2729\ua673",
+                    "submitted_at": "2026-06-28T13:16:39.357348+00:00"
+                },
+                "356774449032331264": {
+                    "thread_message_id": 1520861171518013551,
+                    "username": "TD",
+                    "submitted_at": "2026-06-28T18:39:19.706167+00:00"
+                }
+            },
+            "votes": {}
+        }
+    }
+}

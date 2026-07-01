@@ -75,13 +75,13 @@ class TriviaImageGenerator:
 
             template = TRIVIA_RECAP_TEMPLATE_PATH.read_text(encoding='utf-8')
 
-            html = template.format(**data)
+            rendered_html = template.format(**data)
 
             page = await self.browser.new_page(
                 viewport={'width': 1080, 'height': data['dynamic_height']},
                 device_scale_factor=2
             )
-            await page.set_content(html)
+            await page.set_content(rendered_html)
             await page.wait_for_timeout(100)
 
             screenshot = await page.screenshot(type='png')
@@ -103,7 +103,7 @@ CACHE_MIN_SIZE = 10
 LEADERBOARD_LIMIT = 20
 EPHEMERAL_QUESTION_TIMEOUT = 20.0
 TRIVIA_TIMEZONE = ZoneInfo("America/New_York")
-POST_TIMES = [time(0, 0), time(12, 0), time(18, 0)]
+POST_TIMES = [time(0, 0), time(18, 0)]
 RESET_HOUR = 0
 STREAK_BONUS_MILESTONE = 5
 
@@ -135,7 +135,7 @@ A new trivia gateway is posted daily at **midnight EST**. It is then reposted at
 **Leaderboard & Ranks:**
 - Use `/trivia leaderboard` to see both monthly and all-time rankings.
 - Use `/trivia stats` to see your personal stats and rank progress!
-- If the trivia message ever seems stuck, use `/trivia bump` to fix it!
+- If the trivia message ever seems stuck, use the **Bump Message** button in `/trivia-panel` to fix it!
 - The 1st place winner at the end of the month receives a special role!
 - Scores reset on the first day of each month, but your all-time score and rank never reset.
 """
@@ -598,7 +598,14 @@ class DoubleOrNothingQuestionView(discord.ui.View):
                     global_data.setdefault("daily_don_answer_times", []).append({"user_id": str(interaction.user.id), "time": delta})
                 else:
                     log_trivia.warning(f"Missing DoN reveal timestamp for user {interaction.user.id} (likely bot restart); skipping answer-time recording.")
-            
+            else:
+                self.cog.don_reveal_timestamps.pop((interaction.guild.id, interaction.user.id), None)
+
+            # Record DoN interaction
+            global_data.setdefault("daily_don_interactions", []).append({
+                "user_id": str(interaction.user.id), "correct": is_correct
+            })
+
             self.cog.config_is_dirty = True
         
         for item in self.children:
@@ -939,15 +946,17 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.config = load_config_trivia()
-        self.session = aiohttp.ClientSession()
+        self.session = None
         self.config_lock = asyncio.Lock()
         self.config_is_dirty = False
         self.reveal_timestamps, self.don_reveal_timestamps, self.cheat_test_timestamps = {}, {}, {}
+        self._name_cache: dict[str, str] = {}  # user_id_str -> display_name cache
         self.image_generator = TriviaImageGenerator()
         self.bot.loop.create_task(self.setup_hook())
 
     async def setup_hook(self):
         await self.bot.wait_until_ready()
+        self.session = aiohttp.ClientSession()
         await self.image_generator.initialize()
         self.bot.add_view(DailyGatewayView(self))
 
@@ -959,8 +968,8 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
         log_trivia.info(f"DailyTrivia cog is ready. Config path: {CONFIG_FILE_TRIVIA}")
 
     async def cog_unload(self):
-        if self.config_is_dirty: save_config_trivia(self.config)
         self.trivia_loop.cancel(); self.cache_refill_loop.cancel(); self.backup_save_loop.cancel()
+        await self.save_config_now()
         if self.session and not self.session.closed:
             await self.session.close()
         await self.image_generator.close()
@@ -981,7 +990,7 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
         return {
             "channel_id": None, "enabled": False, "admin_role_id": None, "last_winner_announcement": None,
             "last_posted_date": None, "gateway_message_id": None,
-            "last_post_hour": -1, "yesterdays_recap_data": None, "winner_role_id": None, 
+            "last_post_hour": -1, "winner_role_id": None,
             "last_month_winner_id": None, "anti_cheat_results_channel_id": None
         }
 
@@ -1087,31 +1096,56 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
     # === Leaderboard & Formatting ===
             
     async def _get_formatted_name(self, guild: discord.Guild, user_id_str: str) -> str:
+        # Check in-memory cache first to avoid API rate limits on leaderboard renders
+        if user_id_str in self._name_cache:
+            return self._name_cache[user_id_str]
         try:
             # Try to get member from guild first (for display_name/nickname)
             member = guild.get_member(int(user_id_str)) or await guild.fetch_member(int(user_id_str))
+            self._name_cache[user_id_str] = member.display_name
             return member.display_name
         except (discord.NotFound, discord.Forbidden):
             # Fallback: fetch user globally (not guild-specific)
             try:
                 user = self.bot.get_user(int(user_id_str)) or await self.bot.fetch_user(int(user_id_str))
+                self._name_cache[user_id_str] = user.name
                 return user.name
             except (discord.NotFound, discord.Forbidden):
-                return f"User ({user_id_str[-4:]})"
+                name = f"User ({user_id_str[-4:]})"
+                self._name_cache[user_id_str] = name
+                return name
             
+    @staticmethod
+    def _safe_get_score(data, key="score") -> int:
+        """Safely extract a score from data that may be a dict or legacy int."""
+        if isinstance(data, int):
+            return data
+        if isinstance(data, dict):
+            return data.get(key, 0)
+        return 0
+
+    @staticmethod
+    def _safe_parse_timestamp(ts_value) -> float:
+        """Safely parse an ISO timestamp to epoch float, returning inf on failure."""
+        if not ts_value:
+            return float('inf')
+        try:
+            return datetime.fromisoformat(ts_value).timestamp()
+        except (ValueError, TypeError):
+            return float('inf')
+
     def _get_score_sort_key(self, item):
         """Sort key for monthly scores: by score desc, then by timestamp asc (earlier wins ties)"""
         _, data = item
-        score = data.get("score", 0) if isinstance(data, dict) else data
-        timestamp = datetime.fromisoformat(data["timestamp"]).timestamp() if isinstance(data, dict) and data.get("timestamp") else float('inf')
-        return (-score, timestamp)
-    
+        score = self._safe_get_score(data, "score")
+        ts = data.get("timestamp") if isinstance(data, dict) else None
+        return (-score, self._safe_parse_timestamp(ts))
+
     def _get_alltime_sort_key(self, item):
         """Sort key for all-time scores: by score desc, then by timestamp asc (earlier wins ties)"""
         _, data = item
-        score = data.get("all_time_score", 0)
-        timestamp = datetime.fromisoformat(data["all_time_timestamp"]).timestamp() if data.get("all_time_timestamp") else float('inf')
-        return (-score, timestamp)
+        score = self._safe_get_score(data, "all_time_score")
+        return (-score, self._safe_parse_timestamp(data.get("all_time_timestamp") if isinstance(data, dict) else None))
 
     async def _get_leaderboard_text(self, guild: discord.Guild, limit: int = 5) -> str:
         # Gets scores from global data
@@ -1128,8 +1162,8 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
             name = await self._get_formatted_name(guild, uid)
             name_formatted = f"***{name[:15]}***" if i < 3 else f"*{name[:15]}*"
             prefix = medals[i] if i < 3 else f'**{i+1}.**'
-            lines.append(f"{prefix} {name_formatted} - {dat.get('score', 0)} pts")
-        
+            lines.append(f"{prefix} {name_formatted} - {self._safe_get_score(dat)} pts")
+
         return "\n".join(lines)
 
     async def _get_gateway_leaderboard_text(self, guild: discord.Guild) -> str:
@@ -1156,7 +1190,7 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
                 name_formatted = f"{name[:15]}" # Not bold
                 prefix = f"{i+1}." # e.g., "4." or "5."
 
-            lines.append(f"> {prefix} {name_formatted} - {dat.get('score', 0)} pts")
+            lines.append(f"> {prefix} {name_formatted} - {self._safe_get_score(dat)} pts")
         return "\n".join(lines)
 
     async def _get_alltime_leaderboard_text(self, guild: discord.Guild) -> str:
@@ -1223,102 +1257,123 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
 
     @tasks.loop(minutes=1)
     async def trivia_loop(self):
-        now_est = datetime.now(TRIVIA_TIMEZONE)
-        if not any(now_est.hour == t.hour and now_est.minute == t.minute for t in POST_TIMES): return
+        try:
+            now_est = datetime.now(TRIVIA_TIMEZONE)
+            if not any(now_est.hour == t.hour and now_est.minute == t.minute for t in POST_TIMES): return
 
-        guild_settings_pool = self.config.get("guild_settings", {})
-        ran_monthly_reset = False
-        
-        for gid_str, cfg_settings in list(guild_settings_pool.items()):
-            if not cfg_settings.get("enabled") or not cfg_settings.get("channel_id"): continue
-            
-            try:
-                guild = self.bot.get_guild(int(gid_str))
-                if not guild or not guild.me: 
-                    log_trivia.warning(f"Could not find or access guild {gid_str}, skipping trivia loop.")
-                    continue
-                
-                if cfg_settings.get("last_post_hour") == now_est.hour and cfg_settings.get("last_posted_date") == now_est.date().isoformat(): continue
-                
-                log_trivia.info(f"Met time condition for guild {guild.id} at {now_est.hour}:00 EST.")
-                if now_est.hour == RESET_HOUR and cfg_settings.get("last_posted_date") != now_est.date().isoformat():
-                    # Check for 1st of month here
-                    if now_est.day == 1:
-                        await self._process_monthly_winners(guild)
-                        ran_monthly_reset = True
-                    await self._trigger_daily_reset_and_post(guild)
-                elif cfg_settings.get("last_posted_date") == now_est.date().isoformat():
-                    await self._bump_messages(guild)
+            guild_settings_pool = self.config.get("guild_settings", {})
+            today_iso = now_est.date().isoformat()
 
-            except TriviaPostingError as e:
-                log_trivia.error(f"Failed to post trivia in loop for guild {gid_str}: {e}")
-            except Exception as e:
-                log_trivia.error(f"Unexpected error in trivia loop for guild {gid_str}: {e}", exc_info=True)
+            # --- Monthly reset: process winners and clear scores BEFORE posting ---
+            if now_est.hour == RESET_HOUR and now_est.day == 1:
+                needs_monthly_reset = any(
+                    cfg.get("enabled") and cfg.get("channel_id")
+                    and cfg.get("last_posted_date") != today_iso
+                    for cfg in guild_settings_pool.values()
+                )
+                if needs_monthly_reset:
+                    for gid_str, cfg_settings in list(guild_settings_pool.items()):
+                        if not cfg_settings.get("enabled") or not cfg_settings.get("channel_id"): continue
+                        try:
+                            guild = self.bot.get_guild(int(gid_str))
+                            if guild and guild.me:
+                                await self._process_monthly_winners(guild)
+                        except Exception as e:
+                            log_trivia.error(f"Monthly winner processing failed for guild {gid_str}: {e}", exc_info=True)
+                    # Reset scores globally BEFORE any daily posts
+                    async with self.config_lock:
+                        scores = self.get_global_data().get("scores", {})
+                        if scores:
+                            self.get_global_data()["scores"] = {}
+                            self.config_is_dirty = True
+                            log_trivia.info("Global monthly scores have been reset.")
 
-        if ran_monthly_reset:
-            async with self.config_lock:
-                scores = self.get_global_data().get("scores", {})
-                if scores:
-                    self.get_global_data()["scores"] = {}
-                    self.config_is_dirty = True
-                    log_trivia.info("Global monthly scores have been reset.")
+            for gid_str, cfg_settings in list(guild_settings_pool.items()):
+                if not cfg_settings.get("enabled") or not cfg_settings.get("channel_id"): continue
+
+                try:
+                    guild = self.bot.get_guild(int(gid_str))
+                    if not guild or not guild.me:
+                        log_trivia.warning(f"Could not find or access guild {gid_str}, skipping trivia loop.")
+                        continue
+
+                    if cfg_settings.get("last_post_hour") == now_est.hour and cfg_settings.get("last_posted_date") == today_iso: continue
+
+                    log_trivia.info(f"Met time condition for guild {guild.id} at {now_est.hour}:00 EST.")
+
+                    if cfg_settings.get("last_posted_date") != today_iso:
+                        # Daily post hasn't happened yet today — do it now (handles missed midnight)
+                        await self._trigger_daily_reset_and_post(guild)
+                    else:
+                        # Already posted today, just bump
+                        await self._bump_messages(guild)
+
+                except TriviaPostingError as e:
+                    log_trivia.error(f"Failed to post trivia in loop for guild {gid_str}: {e}")
+                except Exception as e:
+                    log_trivia.error(f"Unexpected error in trivia loop for guild {gid_str}: {e}", exc_info=True)
+        except Exception as e:
+            await self.bot.error_reporter.report("Trivia", f"trivia_loop: {e}")
     
     @tasks.loop(minutes=15)
     async def cache_refill_loop(self):
-        # This loop is now global, doesn't iterate guilds
-        global_data = self.get_global_data()
-        if len(global_data.get("question_cache", [])) >= CACHE_MIN_SIZE:
-            return
-
         try:
-            log_trivia.info("Global cache is low, refilling with custom category distribution...")
-            
-            # Boosted Categories
-            # 15: Games, 12: Music, 31: Anime, 32: Cartoons, 11: Film, 14: TV, 10: Books
-            # 17: Science/Nature, 18: Computers, 30: Gadgets, 21: Sports, 16: Board Games
-            boosted = [15, 12, 31, 32, 11, 14, 10, 17, 18, 30, 21, 16]
-            
-            fetch_tasks = []
-            selected_boosted = random.sample(boosted, 5) # Pick 5 boosted categories
-            for cat in selected_boosted:
-                url = f"{TRIVIA_API_URL_BASE}?amount=7&category={cat}&type=multiple"
-                fetch_tasks.append(self.session.get(url, timeout=aiohttp.ClientTimeout(total=10)))
-                
-            # 15 random questions
-            url_random = f"{TRIVIA_API_URL_BASE}?amount=15&type=multiple"
-            fetch_tasks.append(self.session.get(url_random, timeout=aiohttp.ClientTimeout(total=10)))
-            
-            responses = await asyncio.gather(*fetch_tasks, return_exceptions=True)
-            
-            all_results = []
-            for resp in responses:
-                try:
-                    if isinstance(resp, Exception) or resp.status != 200:
-                        log_trivia.warning(f"API call failed during distributed cache refill: {resp}")
-                        continue
-                    
-                    data = await resp.json()
-                    if data.get("response_code") == 0:
-                        all_results.extend(data.get("results", []))
-                    else:
-                        log_trivia.info(f'OpenTDB API returned code {data.get("response_code")} for a difficulty fetch.')
-                except (aiohttp.ContentTypeError, json.JSONDecodeError) as e:
-                    log_trivia.warning(f"Failed to decode JSON from API response: {e}")
-                finally:
-                    if not isinstance(resp, Exception):
-                        resp.close()
+            # This loop is now global, doesn't iterate guilds
+            global_data = self.get_global_data()
+            if len(global_data.get("question_cache", [])) >= CACHE_MIN_SIZE:
+                return
 
-            if all_results:
-                new_q = [{"question": html.unescape(q["question"]), "answers": [html.unescape(a) for a in q["incorrect_answers"]] + [html.unescape(q["correct_answer"])], "correct": html.unescape(q["correct_answer"]), "category": html.unescape(q["category"])} for q in all_results]
-                random.shuffle(new_q)
-                async with self.config_lock:
-                    live_global_data = self.get_global_data()
-                    live_global_data["question_cache"].extend(new_q)
-                    self.config_is_dirty = True
-                log_trivia.info(f"Refilled global cache with {len(new_q)} questions from {len(all_results)} results.")
+            try:
+                log_trivia.info("Global cache is low, refilling with custom category distribution...")
 
+                # Boosted Categories
+                # 15: Games, 12: Music, 31: Anime, 32: Cartoons, 11: Film, 14: TV, 10: Books
+                # 17: Science/Nature, 18: Computers, 30: Gadgets, 21: Sports, 16: Board Games
+                boosted = [15, 12, 31, 11, 14, 10, 17, 18, 30, 21, 16]
+
+                fetch_tasks = []
+                selected_boosted = random.sample(boosted, 5) # Pick 5 boosted categories
+                for cat in selected_boosted:
+                    url = f"{TRIVIA_API_URL_BASE}?amount=7&category={cat}&type=multiple"
+                    fetch_tasks.append(self.session.get(url, timeout=aiohttp.ClientTimeout(total=10)))
+
+                # 15 random questions
+                url_random = f"{TRIVIA_API_URL_BASE}?amount=15&type=multiple"
+                fetch_tasks.append(self.session.get(url_random, timeout=aiohttp.ClientTimeout(total=10)))
+
+                responses = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+
+                all_results = []
+                for resp in responses:
+                    try:
+                        if isinstance(resp, Exception) or resp.status != 200:
+                            log_trivia.warning(f"API call failed during distributed cache refill: {resp}")
+                            continue
+
+                        data = await resp.json()
+                        if data.get("response_code") == 0:
+                            all_results.extend(data.get("results", []))
+                        else:
+                            log_trivia.info(f'OpenTDB API returned code {data.get("response_code")} for a difficulty fetch.')
+                    except (aiohttp.ContentTypeError, json.JSONDecodeError) as e:
+                        log_trivia.warning(f"Failed to decode JSON from API response: {e}")
+                    finally:
+                        if not isinstance(resp, Exception):
+                            resp.release()
+
+                if all_results:
+                    new_q = [{"question": html.unescape(q["question"]), "answers": [html.unescape(a) for a in q["incorrect_answers"]] + [html.unescape(q["correct_answer"])], "correct": html.unescape(q["correct_answer"]), "category": html.unescape(q["category"])} for q in all_results]
+                    random.shuffle(new_q)
+                    async with self.config_lock:
+                        live_global_data = self.get_global_data()
+                        live_global_data["question_cache"].extend(new_q)
+                        self.config_is_dirty = True
+                    log_trivia.info(f"Refilled global cache with {len(new_q)} questions from {len(all_results)} results.")
+
+            except Exception as e:
+                log_trivia.error(f"Unexpected error during global cache refill: {e}", exc_info=True)
         except Exception as e:
-            log_trivia.error(f"Unexpected error during global cache refill: {e}", exc_info=True)
+            await self.bot.error_reporter.report("Trivia", f"cache_refill_loop: {e}")
 
     async def _process_monthly_winners(self, guild: discord.Guild):
         now_est = datetime.now(TRIVIA_TIMEZONE)
@@ -1349,7 +1404,10 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
 
     @tasks.loop(seconds=60)
     async def backup_save_loop(self):
-        await self.save_config_now()
+        try:
+            await self.save_config_now()
+        except Exception as e:
+            await self.bot.error_reporter.report("Trivia", f"backup_save_loop: {e}")
 
     # === Core Gameplay Logic ===
 
@@ -1377,16 +1435,18 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
 
         new_winner_id = None
         if scores:
-            winner_id_str, _ = sorted(scores.items(), key=self._get_score_sort_key)[0]
-            new_winner_id = int(winner_id_str)
-            try:
-                member = await guild.fetch_member(new_winner_id)
-                # Added guild.me check
-                if guild.me and guild.me.top_role > reward_role: 
-                    await member.add_roles(reward_role, reason="Trivia monthly winner.")
-            except discord.HTTPException as e:
-                log_trivia.error(f"Failed to add winner role in guild {guild.id}: {e}")
-                new_winner_id = None
+            winner_id_str, winner_data = sorted(scores.items(), key=self._get_score_sort_key)[0]
+            if self._safe_get_score(winner_data) <= 0:
+                log_trivia.info(f"No monthly winner for guild {guild.id}: top score is 0 or negative.")
+            else:
+                new_winner_id = int(winner_id_str)
+                try:
+                    member = await guild.fetch_member(new_winner_id)
+                    if guild.me and guild.me.top_role > reward_role:
+                        await member.add_roles(reward_role, reason="Trivia monthly winner.")
+                except discord.HTTPException as e:
+                    log_trivia.error(f"Failed to add winner role in guild {guild.id}: {e}")
+                    new_winner_id = None
         
         # FIX: Added config_is_dirty = True after saving winner
         async with self.config_lock: 
@@ -1394,25 +1454,34 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
             self.config_is_dirty = True
 
     async def _build_daily_embed(self, guild: discord.Guild) -> discord.Embed:
-        # Gets settings from guild, data from global
-        global_data = self.get_global_data()
-        today_q = global_data.get("daily_question_data", {})
+        # Snapshot the data we need under lock to avoid inconsistent reads
+        async with self.config_lock:
+            global_data = self.get_global_data()
+            today_q = global_data.get("daily_question_data") or {}
+            answer_times = list(global_data.get("daily_answer_times", []))
+            interaction_count = len(global_data.get("daily_interactions", []))
+
         now_est = datetime.now(TRIVIA_TIMEZONE)
-        
         desc = f"**Category:** {today_q.get('category', 'Unknown')}"
         embed = discord.Embed(title=f"🎯 {now_est.strftime('%A')}'s Daily Trivia", description=desc, color=EMBED_COLOR_TRIVIA)
 
-        fastest_times_text = await self._format_podium_text(guild, global_data.get("daily_answer_times", []), "", format_type="gateway")
+        fastest_times_text = await self._format_podium_text(guild, answer_times, "", format_type="gateway")
         embed.add_field(name="⚡Fastest Times", value=fastest_times_text, inline=False)
-        
-        monthly_scores_text = await self._get_gateway_leaderboard_text(guild) # Fetches global data
+
+        monthly_scores_text = await self._get_gateway_leaderboard_text(guild)
         embed.add_field(name="🏆Monthly Top 5", value=monthly_scores_text, inline=False)
-        
-        embed.set_footer(text=f"{len(global_data.get('daily_interactions', []))} users have attempted.")
+
+        embed.set_footer(text=f"{interaction_count} users have attempted.")
         return embed
 
     async def _trigger_daily_reset_and_post(self, guild: discord.Guild):
-        self.reveal_timestamps.clear(); self.don_reveal_timestamps.clear(); self.cheat_test_timestamps.clear()
+        # Clear stale name cache on daily reset
+        self._name_cache.clear()
+        # Only clear timestamps for this guild, not all guilds
+        gid = guild.id
+        for key in [k for k in self.reveal_timestamps if k[0] == gid]: self.reveal_timestamps.pop(key, None)
+        for key in [k for k in self.don_reveal_timestamps if k[0] == gid]: self.don_reveal_timestamps.pop(key, None)
+        for key in [k for k in self.cheat_test_timestamps if k[0] == gid]: self.cheat_test_timestamps.pop(key, None)
         
         async with self.config_lock:
             global_data = self.get_global_data()
@@ -1479,6 +1548,16 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
             msg = await channel.send(embed=await self._build_daily_embed(guild), view=DailyGatewayView(self))
             async with self.config_lock: self.get_guild_settings(guild.id)["gateway_message_id"], self.config_is_dirty = msg.id, True
         except discord.HTTPException as e: raise TriviaPostingError(f"Failed to send message to {channel.mention}. Error: {e}")
+
+        try:
+            await msg.pin(reason="Daily trivia question")
+            # Delete the "pinned a message" system message
+            async for m in channel.history(limit=5, after=msg):
+                if m.type == discord.MessageType.pins_add:
+                    await m.delete()
+                    break
+        except discord.HTTPException as e:
+            log_trivia.warning(f"Could not pin trivia message in {channel.mention}: {e}")
 
     async def build_recap_image_data(self, guild: discord.Guild, data: dict, full_global_data: dict) -> dict:
         dq = data.get("daily_question", {})
@@ -1989,7 +2068,7 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
         
         embed.add_field(name="📊 Core Stats", value=f"**All-Time Score:** {score}\n**All-Time Rank:** {all_time_rank}\n**Accuracy:** {accuracy:.2f}%")
         embed.add_field(name="📈 Streaks", value=f"**Current:** 🔥 {stats_data.get('current_streak', 0)}\n**Longest:** 🌟 {stats_data.get('longest_streak', 0)}")
-        embed.add_field(name="🗓️ This Month", value=f"**Score:** {monthly_scores.get(str(target.id), {}).get('score', 0)}\n**Rank:** {monthly_rank}\n**Attempted:** {total}")
+        embed.add_field(name="🗓️ This Month", value=f"**Score:** {self._safe_get_score(monthly_scores.get(str(target.id), {}))}\n**Rank:** {monthly_rank}\n**Attempted:** {total}")
         embed.add_field(name="🎲 Double or Nothing", value=f"**Acceptance:** {don_acceptance_rate:.1f}%\n**Success Rate:** {don_win_rate:.1f}%")
         await interaction.followup.send(embed=embed)
 

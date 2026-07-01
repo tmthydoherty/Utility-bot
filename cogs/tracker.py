@@ -10,41 +10,25 @@ import typing
 import traceback
 import re
 import aiohttp
-from collections import defaultdict
 from contextlib import asynccontextmanager
-import functools
-import numpy as np
+from pathlib import Path
 
-# --- IMAGE GENERATION IMPORTS ---
-import matplotlib
-matplotlib.use('Agg') 
-from matplotlib.figure import Figure
-from matplotlib.backends.backend_agg import FigureCanvasAgg
-from matplotlib.projections.polar import PolarAxes
-from matplotlib.projections import register_projection
-from matplotlib.spines import Spine
-from matplotlib.transforms import Affine2D
-from PIL import Image, ImageDraw, ImageFont
+try:
+    from playwright.async_api import async_playwright
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    PLAYWRIGHT_AVAILABLE = False
 
 # --- CONFIGURATION ---
 TRACKING_DB = "tracking_data.db"
-CONVERSATION_WINDOW = 120
-CACHE_CLEANUP_INTERVAL = 120 
 DATA_RETENTION_DAYS = 365
-MSG_CACHE_TTL = 300 
-MAX_CACHE_SIZE = 10000
 EMOJI_PAGE_SIZE = 8
+FONT_PATH = "/usr/share/fonts/truetype/noto"
+TEMPLATE_DIR = Path(__file__).parent / "templates"
 
-# Colors
-COLOR_BG = "#0f1012"         
-COLOR_SURFACE = "#1e1f22"    
-COLOR_HEADER = "#2b2d31"     
-COLOR_TEXT_MAIN = "#ffffff"
-COLOR_TEXT_DIM = "#b5bac1"
-COLOR_ACCENT_PRIMARY = "#5865F2" 
-COLOR_ACCENT_GREEN = "#23a559"
-COLOR_ACCENT_RED = "#da373c"
-COLOR_BORDER = "#1e1f22"
+DONUT_COLORS = ['#5865F2', '#23a559', '#e8637a', '#f0b232', '#a78bfa', '#38bdf8', '#ef4444', '#06b6d4']
+
+NO_ICON = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='48' height='48'%3E%3Crect width='48' height='48' rx='12' fill='%23313338'/%3E%3Ctext x='24' y='30' text-anchor='middle' fill='%23949ba4' font-size='20' font-family='sans-serif'%3E?%3C/text%3E%3C/svg%3E"
 
 logger = logging.getLogger('betting_bot.tracker')
 if not logger.handlers:
@@ -53,43 +37,11 @@ if not logger.handlers:
     logger.addHandler(_h)
     logger.setLevel(logging.INFO)
 
-# --- RADAR CHART SETUP ---
-class RadarAxes(PolarAxes):
-    name = 'radar'
-    RESOLUTION = 1
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.set_theta_zero_location('N')
+# =========================================================================
+# DATABASE MANAGER
+# =========================================================================
 
-    def fill(self, *args, closed=True, **kwargs):
-        return super().fill(closed=closed, *args, **kwargs)
-
-    def plot(self, *args, **kwargs):
-        lines = super().plot(*args, **kwargs)
-        for line in lines:
-            self._close_line(line)
-
-    def _close_line(self, line):
-        x, y = line.get_data()
-        if x[0] != x[-1]:
-            x = np.append(x, x[0])
-            y = np.append(y, y[0])
-            line.set_data(x, y)
-
-    def set_varlabels(self, labels):
-        self.set_thetagrids(np.degrees(np.linspace(0, 2*np.pi, len(labels), endpoint=False)), labels)
-
-    def _gen_axes_patch(self):
-        return matplotlib.patches.Circle((0.5, 0.5), 0.5)
-
-    def _gen_axes_spines(self):
-        return super()._gen_axes_spines()
-
-if 'radar' not in matplotlib.projections.get_projection_names():
-    register_projection(RadarAxes)
-
-# --- DATABASE MANAGER ---
 class TrackingDB:
     def __init__(self):
         self.db_path = TRACKING_DB
@@ -98,10 +50,11 @@ class TrackingDB:
 
     async def connect(self):
         async with self._lock:
-            if self._db: return
+            if self._db:
+                return
             self._db = await aiosqlite.connect(self.db_path)
             self._db.row_factory = aiosqlite.Row
-            await self._db.execute("PRAGMA journal_mode=WAL;") 
+            await self._db.execute("PRAGMA journal_mode=WAL;")
             await self._init_tables()
             logger.info("Tracking Database connected.")
 
@@ -111,7 +64,8 @@ class TrackingDB:
             self._db = None
 
     async def _ensure_connected(self):
-        if not self._db: await self.connect()
+        if not self._db:
+            await self.connect()
 
     @asynccontextmanager
     async def transaction(self):
@@ -132,15 +86,19 @@ class TrackingDB:
         await self._db.execute("CREATE TABLE IF NOT EXISTS reaction_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, target_message_author_id INTEGER, guild_id INTEGER, emoji_name TEXT, timestamp INTEGER)")
         await self._db.execute("CREATE TABLE IF NOT EXISTS emoji_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER, user_id INTEGER, emoji_id INTEGER, emoji_name TEXT, timestamp INTEGER, usage_type TEXT)")
         await self._db.execute("CREATE TABLE IF NOT EXISTS guild_config (guild_id INTEGER PRIMARY KEY, vip_role_id INTEGER)")
-        
-        # INACTIVITY TABLES
+        await self._db.execute("CREATE TABLE IF NOT EXISTS member_events (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, guild_id INTEGER, event_type TEXT, timestamp INTEGER)")
+
+        # Inactivity tables (preserve existing)
         await self._db.execute("CREATE TABLE IF NOT EXISTS inactivity_config (guild_id INTEGER PRIMARY KEY, log_channel_id INTEGER, msg_threshold INTEGER DEFAULT 5, period_days INTEGER DEFAULT 30, highlight_role_id INTEGER)")
         await self._db.execute("CREATE TABLE IF NOT EXISTS user_inactivity_status (guild_id INTEGER, user_id INTEGER, status TEXT, snooze_until INTEGER, PRIMARY KEY (guild_id, user_id))")
 
+        # Indexes
         await self._db.execute("CREATE INDEX IF NOT EXISTS idx_msg_user_time ON message_logs(user_id, timestamp)")
         await self._db.execute("CREATE INDEX IF NOT EXISTS idx_msg_channel_time ON message_logs(channel_id, timestamp)")
+        await self._db.execute("CREATE INDEX IF NOT EXISTS idx_msg_guild_time ON message_logs(guild_id, timestamp)")
         await self._db.execute("CREATE INDEX IF NOT EXISTS idx_social_target ON social_interactions(target_user_id, guild_id)")
         await self._db.execute("CREATE INDEX IF NOT EXISTS idx_emoji_id ON emoji_logs(emoji_id, guild_id)")
+        await self._db.execute("CREATE INDEX IF NOT EXISTS idx_member_events_guild_time ON member_events(guild_id, timestamp)")
         await self._db.commit()
 
     async def fetch_one(self, sql, params=()):
@@ -152,13 +110,13 @@ class TrackingDB:
         await self._ensure_connected()
         async with self._db.execute(sql, params) as cursor:
             return await cursor.fetchall()
-            
+
     async def execute(self, sql, params=()):
         await self._ensure_connected()
         async with self._lock:
             await self._db.execute(sql, params)
             await self._db.commit()
-        
+
     async def prune_old_data(self, cutoff_timestamp: int):
         await self._ensure_connected()
         async with self._lock:
@@ -167,301 +125,189 @@ class TrackingDB:
             await self._db.execute("DELETE FROM reaction_logs WHERE timestamp < ?", (cutoff_timestamp,))
             await self._db.execute("DELETE FROM voice_sessions WHERE end_time < ?", (cutoff_timestamp,))
             await self._db.execute("DELETE FROM emoji_logs WHERE timestamp < ?", (cutoff_timestamp,))
+            await self._db.execute("DELETE FROM member_events WHERE timestamp < ?", (cutoff_timestamp,))
             await self._db.commit()
 
-# --- IMAGE GENERATOR ---
-class StatsImageGenerator:
+
+# =========================================================================
+# TRACKER CARD GENERATOR (Playwright)
+# =========================================================================
+
+class TrackerCardGenerator:
     def __init__(self):
+        self.browser = None
+        self.playwright = None
+        self._page_semaphore = asyncio.Semaphore(3)
+        self._templates: dict[str, str] = {}
+
+    async def initialize(self):
+        if not PLAYWRIGHT_AVAILABLE:
+            logger.warning("Playwright not available for tracker cards.")
+            return False
         try:
-            # BOLD FONTS FOR ALL TEXT SIZES
-            self.font_bold = ImageFont.truetype("/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf", 26)
-            self.font_reg = ImageFont.truetype("/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf", 22)
-            self.font_small = ImageFont.truetype("/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf", 18)
-            self.font_header = ImageFont.truetype("/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf", 40)
-            self.font_stat = ImageFont.truetype("/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf", 60)
-        except:
-            self.font_bold = ImageFont.load_default()
-            self.font_reg = ImageFont.load_default()
-            self.font_small = ImageFont.load_default()
-            self.font_header = ImageFont.load_default()
-            self.font_stat = ImageFont.load_default()
+            self.playwright = await async_playwright().start()
+            self.browser = await self.playwright.chromium.launch(
+                args=['--font-render-hinting=none', '--disable-lcd-text', '--enable-font-antialiasing']
+            )
+            for path in TEMPLATE_DIR.glob("tracker_*.html"):
+                self._templates[path.stem] = path.read_text(encoding='utf-8')
+            logger.info(f"Tracker card generator initialized ({len(self._templates)} templates).")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to initialize tracker card generator: {e}")
+            return False
 
-    def get_avg_color(self, img_bytes):
+    async def close(self):
+        if self.browser:
+            await self.browser.close()
+        if self.playwright:
+            await self.playwright.stop()
+
+    async def render(self, template_name: str, data: dict, width: int = 640) -> typing.Optional[io.BytesIO]:
+        template = self._templates.get(template_name)
+        if not template or not self.browser:
+            return None
         try:
-            img = Image.open(io.BytesIO(img_bytes)).convert("RGB").resize((1, 1))
-            return '#%02x%02x%02x' % img.getpixel((0, 0))
-        except: return COLOR_ACCENT_PRIMARY
+            html = template.format(**data, font_path=FONT_PATH)
+        except KeyError as e:
+            logger.error(f"Template placeholder missing: {e}")
+            return None
 
-    def draw_rounded_rect(self, draw, xy, color, rad=15):
-        draw.rounded_rectangle(xy, radius=rad, fill=color)
-
-    def _render_radar_chart(self, stats_dict, color_hex):
-        labels = list(stats_dict.keys())
-        values = list(stats_dict.values())
-        fig = Figure(figsize=(4, 4), dpi=100)
-        fig.patch.set_alpha(0.0)
-        ax = fig.add_subplot(111, projection='radar')
-        ax.patch.set_alpha(0.0)
-        theta = np.linspace(0, 2*np.pi, len(labels), endpoint=False)
-        ax.plot(theta, values, color=color_hex, linewidth=2)
-        ax.fill(theta, values, facecolor=color_hex, alpha=0.3)
-        ax.set_varlabels(labels)
-        ax.set_yticklabels([])
-        ax.spines['polar'].set_color(COLOR_TEXT_DIM)
-        ax.spines['polar'].set_alpha(0.3)
-        ax.tick_params(axis='x', colors=COLOR_TEXT_DIM)
-        canvas = FigureCanvasAgg(fig)
-        canvas.draw()
-        return Image.frombuffer("RGBA", canvas.get_width_height(), canvas.buffer_rgba(), "raw", "RGBA", 0, 1)
-
-    def generate_card(self, title, subtitle, icon_bytes, stats_top, list_left, list_right, radar_data=None):
-        W, H = 800, 1000
-        bg = Image.new("RGB", (W, H), COLOR_BG)
-        draw = ImageDraw.Draw(bg)
-        accent = self.get_avg_color(icon_bytes) if icon_bytes else COLOR_ACCENT_PRIMARY
-
-        self.draw_rounded_rect(draw, (20, 20, 780, 140), COLOR_HEADER)
-        if icon_bytes:
+        async with self._page_semaphore:
+            page = await self.browser.new_page(
+                viewport={'width': width, 'height': 500},
+                device_scale_factor=2
+            )
             try:
-                icon = Image.open(io.BytesIO(icon_bytes)).convert("RGBA").resize((80, 80))
-                mask = Image.new("L", (80, 80), 0)
-                ImageDraw.Draw(mask).ellipse((0, 0, 80, 80), fill=255)
-                bg.paste(icon, (40, 30), mask)
-            except: pass
-        
-        draw.text((140, 40), title, font=self.font_header, fill=COLOR_TEXT_MAIN)
-        draw.text((140, 95), subtitle, font=self.font_small, fill=COLOR_TEXT_DIM)
-        draw.rounded_rectangle((20, 20, 30, 140), radius=15, fill=accent)
-
-        for i, (label, val, growth, col) in enumerate(stats_top):
-            x = 20 + (i * 390)
-            y = 160
-            self.draw_rounded_rect(draw, (x, y, x+370, y+200), COLOR_SURFACE)
-            draw.text((x+25, y+25), label.upper(), font=self.font_small, fill=COLOR_TEXT_DIM)
-            draw.text((x+25, y+60), str(val), font=self.font_stat, fill=COLOR_TEXT_MAIN)
-            if growth is not None:
-                sym = "▲" if growth >= 0 else "▼"
-                g_col = COLOR_ACCENT_GREEN if growth >= 0 else COLOR_ACCENT_RED
-                draw.text((x+25, y+140), f"{sym} {abs(growth)}% vs prev", font=self.font_small, fill=g_col)
-            draw.rectangle((x, y+195, x+370, y+200), fill=col)
-
-        self.draw_rounded_rect(draw, (20, 380, 390, 920), COLOR_SURFACE)
-        draw.text((40, 400), list_left[0], font=self.font_bold, fill=COLOR_TEXT_MAIN)
-        y_item = 460
-        for idx, (name, val) in enumerate(list_left[1][:8]):
-            draw.text((40, y_item), f"#{idx+1}", font=self.font_reg, fill=COLOR_ACCENT_PRIMARY)
-            d_name = name[:14] + ".." if len(name) > 14 else name
-            draw.text((100, y_item), d_name, font=self.font_reg, fill=COLOR_TEXT_MAIN)
-            val_str = f"{val:,}"
-            w = draw.textbbox((0,0), val_str, font=self.font_reg)[2]
-            draw.text((370-w, y_item), val_str, font=self.font_reg, fill=COLOR_TEXT_DIM)
-            y_item += 55
-
-        self.draw_rounded_rect(draw, (410, 380, 780, 920), COLOR_SURFACE)
-        draw.text((430, 400), list_right[0], font=self.font_bold, fill=COLOR_TEXT_MAIN)
-
-        if radar_data:
-            radar_img = self._render_radar_chart(radar_data, accent)
-            bg.paste(radar_img, (400, 460), radar_img)
-            draw.text((480, 880), "Interaction Profile", font=self.font_small, fill=COLOR_TEXT_DIM)
-        else:
-            y_item = 460
-            for idx, (name, val) in enumerate(list_right[1][:8]):
-                draw.text((430, y_item), f"#{idx+1}", font=self.font_reg, fill=COLOR_ACCENT_PRIMARY)
-                d_name = name[:14] + ".." if len(name) > 14 else name
-                draw.text((490, y_item), d_name, font=self.font_reg, fill=COLOR_TEXT_MAIN)
-                val_str = f"{val:,}"
-                w = draw.textbbox((0,0), val_str, font=self.font_reg)[2]
-                draw.text((760-w, y_item), val_str, font=self.font_reg, fill=COLOR_TEXT_DIM)
-                y_item += 55
-
-        draw.text((300, 960), "Generated by Vibey", font=self.font_small, fill=COLOR_TEXT_DIM)
-        out = io.BytesIO()
-        bg.save(out, format='PNG')
-        out.seek(0)
-        return out
-
-    def generate_emoji_card(self, title, subtitle, icon_bytes, emoji_data, page_num, total_pages):
-        W, H = 800, 1000
-        bg = Image.new("RGB", (W, H), COLOR_BG)
-        draw = ImageDraw.Draw(bg)
-        accent = self.get_avg_color(icon_bytes) if icon_bytes else COLOR_ACCENT_PRIMARY
-
-        self.draw_rounded_rect(draw, (20, 20, 780, 140), COLOR_HEADER)
-        if icon_bytes:
-            try:
-                icon = Image.open(io.BytesIO(icon_bytes)).convert("RGBA").resize((80, 80))
-                mask = Image.new("L", (80, 80), 0)
-                ImageDraw.Draw(mask).ellipse((0, 0, 80, 80), fill=255)
-                bg.paste(icon, (40, 30), mask)
-            except: pass
-        
-        draw.text((140, 40), title, font=self.font_header, fill=COLOR_TEXT_MAIN)
-        draw.text((140, 95), subtitle, font=self.font_small, fill=COLOR_TEXT_DIM)
-        draw.rounded_rectangle((20, 20, 30, 140), radius=15, fill=accent)
-
-        y_start = 180
-        if not emoji_data:
-            draw.text((250, 500), "No Emoji Usage Data Yet", font=self.font_reg, fill=COLOR_TEXT_DIM)
-        
-        for i, (e_name, e_count, e_users, e_img_bytes) in enumerate(emoji_data):
-            y = y_start + (i * 95)
-            self.draw_rounded_rect(draw, (20, y, 780, y+85), COLOR_SURFACE)
-            rank = (page_num - 1) * 8 + (i + 1)
-            draw.text((40, y+30), f"#{rank}", font=self.font_bold, fill=COLOR_ACCENT_PRIMARY)
-            if e_img_bytes:
-                try:
-                    e_icon = Image.open(io.BytesIO(e_img_bytes)).convert("RGBA").resize((50, 50))
-                    bg.paste(e_icon, (100, y+17), e_icon)
-                except: pass
-            draw.text((170, y+30), e_name, font=self.font_reg, fill=COLOR_TEXT_MAIN)
-            stat_text = f"{e_count} uses • {e_users} users"
-            w = draw.textbbox((0,0), stat_text, font=self.font_small)[2]
-            draw.text((760-w, y+32), stat_text, font=self.font_small, fill=COLOR_TEXT_DIM)
-
-        draw.text((300, 960), f"Page {page_num}/{total_pages} • Vibey", font=self.font_small, fill=COLOR_TEXT_DIM)
-        out = io.BytesIO()
-        bg.save(out, format='PNG')
-        out.seek(0)
-        return out
-
-# --- PERSISTENT ALERT VIEWS (Inactivity) ---
-def _make_alert_view(user_id: int, state: str = "initial", current_decision: str = None):
-    """
-    Build persistent button views for inactivity alerts.
-    States:
-      initial       – Kick / Snooze / Forget
-      confirm_kick  – Confirm Kick / Don't Kick
-      decided       – gear button (unless kicked)
-      gear          – available options based on current_decision + cancel
-    """
-    view = ui.View(timeout=None)
-    if state == "initial":
-        view.add_item(ui.Button(label="Kick User", style=discord.ButtonStyle.danger, custom_id=f"inactivity:kick:{user_id}"))
-        view.add_item(ui.Button(label="Snooze (Reset)", style=discord.ButtonStyle.primary, custom_id=f"inactivity:snooze:{user_id}"))
-        view.add_item(ui.Button(label="Forget User", style=discord.ButtonStyle.secondary, custom_id=f"inactivity:forget:{user_id}"))
-    elif state == "confirm_kick":
-        view.add_item(ui.Button(label="Kick", style=discord.ButtonStyle.danger, custom_id=f"inactivity:confirmkick:{user_id}"))
-        view.add_item(ui.Button(label="Don't Kick", style=discord.ButtonStyle.secondary, custom_id=f"inactivity:nokick:{user_id}"))
-    elif state == "decided":
-        if current_decision != "kicked":
-            view.add_item(ui.Button(style=discord.ButtonStyle.secondary, emoji="\u2699\ufe0f", custom_id=f"inactivity:gear:{user_id}"))
-    elif state == "gear":
-        options = {"snoozed": ["kick", "forget"], "forgotten": ["kick", "snooze"]}.get(current_decision, ["kick", "snooze", "forget"])
-        labels = {"kick": ("Kick User", discord.ButtonStyle.danger), "snooze": ("Snooze (Reset)", discord.ButtonStyle.primary), "forget": ("Forget User", discord.ButtonStyle.secondary)}
-        for opt in options:
-            lbl, style = labels[opt]
-            cid = f"inactivity:{'kick' if opt == 'kick' else opt}:{user_id}"
-            view.add_item(ui.Button(label=lbl, style=style, custom_id=cid))
-        view.add_item(ui.Button(label="Cancel", style=discord.ButtonStyle.secondary, custom_id=f"inactivity:cancel:{user_id}"))
-    return view
+                await page.set_content(html)
+                await page.wait_for_timeout(150)
+                body_height = await page.evaluate('document.body.scrollHeight')
+                await page.set_viewport_size({'width': width, 'height': body_height + 20})
+                screenshot = await page.screenshot(type='png')
+            finally:
+                await page.close()
+        return io.BytesIO(screenshot)
 
 
-DECISION_LABELS = {
-    "snoozed": ("Snooze User", discord.Color.blurple()),
-    "forgotten": ("Forget User", discord.Color.dark_grey()),
-    "kicked": ("Kick User", discord.Color.red()),
-}
+# =========================================================================
+# DASHBOARD VIEW
+# =========================================================================
 
-def _stamp_embed_decision(embed: discord.Embed, decision: str, admin: discord.Member, extra: str = None):
-    """Update an existing alert embed to reflect the decision made."""
-    label, color = DECISION_LABELS.get(decision, (decision.title(), discord.Color.dark_grey()))
-    embed.color = color
-    footer_text = f"{label} - {admin.display_name}"
-    if extra:
-        footer_text += f" — {extra}"
-    embed.set_footer(text=footer_text)
-    return embed
-
-
-# --- DASHBOARD VIEW ---
 class DashboardView(ui.View):
-    def __init__(self, cog, guild, admin_id):
+    def __init__(self, cog, guild, user_id):
         super().__init__(timeout=600)
         self.cog = cog
         self.guild = guild
-        self.admin_id = admin_id
-        
+        self.user_id = user_id
         self.mode = "server"
         self.target_id = None
-        self.time_filter = "7d"
+        self.time_filter = "14d"
         self.emoji_page = 1
+        self.emoji_server_only = False
         self.showing_time_menu = False
-        
+        self.compare_target_1 = None
+        self.compare_target_2 = None
+        self.ch_compare_1 = None
+        self.ch_compare_2 = None
         self.update_components()
 
     def update_components(self):
         self.clear_items()
-        
-        # Time Menu
+
         if self.showing_time_menu:
             self.add_item(self.TimeOption("24 Hours", "1d"))
             self.add_item(self.TimeOption("7 Days", "7d"))
+            self.add_item(self.TimeOption("14 Days", "14d"))
             self.add_item(self.TimeOption("30 Days", "1mo"))
             self.add_item(self.TimeOption("All Time", "all"))
             self.add_item(self.BackButton())
             return
 
-        # Standard Dashboard
         self.add_item(self.ModeSelect(self.mode))
 
         if self.mode == "user":
             self.add_item(self.UserSelect())
         elif self.mode == "channel":
             self.add_item(self.ChannelSelect())
-        
-        self.add_item(self.ClockButton())
-        self.add_item(self.RefreshButton())
-        
+        elif self.mode == "compare":
+            self.add_item(self.CompareUserSelect1())
+            self.add_item(self.CompareUserSelect2())
+        elif self.mode == "ch_compare":
+            self.add_item(self.CompareChannelSelect1())
+            self.add_item(self.CompareChannelSelect2())
+
+        btn_row = 3 if self.mode in ("compare", "ch_compare") else 2
+        self.add_item(self.ClockButton(btn_row))
+
         if self.mode == "emoji":
+            self.add_item(self.ServerOnlyToggle(self.emoji_server_only))
             self.add_item(self.PagePrev())
             self.add_item(self.PageNext())
 
     async def refresh_embed(self, interaction):
         await interaction.response.defer()
         self.update_components()
-        
-        # HANDLE STATS MODES
-        days_map = {"1d": 1, "7d": 7, "1mo": 30, "all": 3650}
-        days = days_map.get(self.time_filter, 7)
+
+        days_map = {"1d": 1, "7d": 7, "14d": 14, "1mo": 30, "all": 3650}
+        days = days_map.get(self.time_filter, 14)
         img_file = None
-        
+
         try:
             if self.mode == "server":
                 img_file = await self.cog.gen_server_overview(self.guild, days)
             elif self.mode == "user":
                 target = self.guild.get_member(self.target_id) if self.target_id else interaction.user
-                if target:
-                    img_file = await self.cog.gen_user_overview(self.guild, target, days)
-                else:
-                    img_file = await self.cog.gen_user_overview(self.guild, interaction.user, days)
+                if not target:
+                    target = interaction.user
+                img_file = await self.cog.gen_user_overview(self.guild, target, days)
             elif self.mode == "channel":
                 cid = self.target_id if self.target_id else interaction.channel_id
-                channel = self.guild.get_channel(cid)
+                channel = self.guild.get_channel(cid) or self.guild.get_thread(cid)
                 if channel:
                     img_file = await self.cog.gen_channel_overview(self.guild, channel, days)
                 else:
                     return await interaction.followup.send("Channel not found.", ephemeral=True)
             elif self.mode == "emoji":
-                img_file = await self.cog.gen_emoji_overview(self.guild, days, self.emoji_page)
+                img_file = await self.cog.gen_emoji_overview(self.guild, days, self.emoji_page, server_only=self.emoji_server_only)
+            elif self.mode == "leaderboard":
+                img_file = await self.cog.gen_leaderboard(self.guild, days)
+            elif self.mode == "compare":
+                if not self.compare_target_1 or not self.compare_target_2:
+                    await interaction.edit_original_response(content="Select two users above to compare.", attachments=[], embed=None, view=self)
+                    return
+                u1 = self.guild.get_member(self.compare_target_1)
+                u2 = self.guild.get_member(self.compare_target_2)
+                if not u1 or not u2:
+                    return await interaction.followup.send("Could not find one of the selected users.", ephemeral=True)
+                if u1.id == u2.id:
+                    return await interaction.followup.send("Select two different users to compare.", ephemeral=True)
+                img_file = await self.cog.gen_comparison(self.guild, u1, u2, days)
+            elif self.mode == "ch_compare":
+                if not self.ch_compare_1 or not self.ch_compare_2:
+                    await interaction.edit_original_response(content="Select two channels above to compare.", attachments=[], embed=None, view=self)
+                    return
+                c1 = self.guild.get_channel(self.ch_compare_1) or self.guild.get_thread(self.ch_compare_1)
+                c2 = self.guild.get_channel(self.ch_compare_2) or self.guild.get_thread(self.ch_compare_2)
+                if not c1 or not c2:
+                    return await interaction.followup.send("Could not find one of the selected channels.", ephemeral=True)
+                if c1.id == c2.id:
+                    return await interaction.followup.send("Select two different channels to compare.", ephemeral=True)
+                img_file = await self.cog.gen_channel_comparison(self.guild, c1, c2, days)
 
             if img_file:
                 await interaction.edit_original_response(content="", embed=None, attachments=[img_file], view=self)
         except Exception as e:
             traceback.print_exc()
-            await interaction.followup.send(f"Error: {e}", ephemeral=True)
+            await interaction.followup.send(f"Error generating stats: {e}", ephemeral=True)
 
-    # --- MAIN BUTTONS ---
+    # --- BUTTONS ---
     class ClockButton(ui.Button):
-        def __init__(self): super().__init__(style=discord.ButtonStyle.secondary, emoji="🕒", row=2)
+        def __init__(self, row=2):
+            super().__init__(style=discord.ButtonStyle.secondary, emoji="🕒", row=row)
         async def callback(self, interaction):
             self.view.showing_time_menu = True
             self.view.update_components()
             await interaction.response.edit_message(view=self.view)
-
-    class RefreshButton(ui.Button):
-        def __init__(self): super().__init__(style=discord.ButtonStyle.secondary, emoji="🔄", row=2)
-        async def callback(self, interaction): await self.view.refresh_embed(interaction)
 
     class TimeOption(ui.Button):
         def __init__(self, label, val):
@@ -473,14 +319,26 @@ class DashboardView(ui.View):
             await self.view.refresh_embed(interaction)
 
     class BackButton(ui.Button):
-        def __init__(self): super().__init__(style=discord.ButtonStyle.danger, label="Cancel", row=1)
+        def __init__(self):
+            super().__init__(style=discord.ButtonStyle.danger, label="Cancel", row=1)
         async def callback(self, interaction):
             self.view.showing_time_menu = False
             self.view.update_components()
             await interaction.response.edit_message(view=self.view)
-            
+
+    class ServerOnlyToggle(ui.Button):
+        def __init__(self, active):
+            label = "Server Emojis" if active else "All Emojis"
+            style = discord.ButtonStyle.primary if active else discord.ButtonStyle.secondary
+            super().__init__(style=style, label=label, emoji="🏠", row=2)
+        async def callback(self, interaction):
+            self.view.emoji_server_only = not self.view.emoji_server_only
+            self.view.emoji_page = 1
+            await self.view.refresh_embed(interaction)
+
     class PagePrev(ui.Button):
-        def __init__(self): super().__init__(style=discord.ButtonStyle.secondary, emoji="⬅️", row=2)
+        def __init__(self):
+            super().__init__(style=discord.ButtonStyle.secondary, emoji="⬅️", row=2)
         async def callback(self, interaction):
             if self.view.emoji_page > 1:
                 self.view.emoji_page -= 1
@@ -489,19 +347,11 @@ class DashboardView(ui.View):
                 await interaction.response.defer()
 
     class PageNext(ui.Button):
-        def __init__(self): super().__init__(style=discord.ButtonStyle.secondary, emoji="➡️", row=2)
+        def __init__(self):
+            super().__init__(style=discord.ButtonStyle.secondary, emoji="➡️", row=2)
         async def callback(self, interaction):
-            days_map = {"1d": 1, "7d": 7, "1mo": 30, "all": 3650}
-            days = days_map.get(self.view.time_filter, 7)
-            cutoff = datetime.now(timezone.utc).timestamp() - (days * 86400)
-            row = await self.view.cog.db.fetch_one("SELECT count(distinct emoji_id) FROM emoji_logs WHERE guild_id = ? AND timestamp > ?", (self.view.guild.id, cutoff))
-            total = row[0] if row else 0
-            max_pages = max(1, (total + EMOJI_PAGE_SIZE - 1) // EMOJI_PAGE_SIZE)
-            if self.view.emoji_page < max_pages:
-                self.view.emoji_page += 1
-                await self.view.refresh_embed(interaction)
-            else:
-                await interaction.response.defer()
+            self.view.emoji_page += 1
+            await self.view.refresh_embed(interaction)
 
     class ModeSelect(ui.Select):
         def __init__(self, current_mode):
@@ -510,642 +360,1031 @@ class DashboardView(ui.View):
                 discord.SelectOption(label="User Overview", value="user"),
                 discord.SelectOption(label="Channel Overview", value="channel"),
                 discord.SelectOption(label="Emoji Overview", value="emoji"),
+                discord.SelectOption(label="Leaderboard", value="leaderboard"),
+                discord.SelectOption(label="Compare Users", value="compare"),
+                discord.SelectOption(label="Compare Channels", value="ch_compare"),
             ]
             for opt in options:
-                if opt.value == current_mode: opt.default = True
+                if opt.value == current_mode:
+                    opt.default = True
             super().__init__(placeholder="Select Dashboard Mode", options=options, row=0)
         async def callback(self, interaction):
             self.view.mode = self.values[0]
-            self.view.target_id = None 
+            self.view.target_id = None
             self.view.emoji_page = 1
+            self.view.compare_target_1 = None
+            self.view.compare_target_2 = None
+            self.view.ch_compare_1 = None
+            self.view.ch_compare_2 = None
             await self.view.refresh_embed(interaction)
 
     class UserSelect(ui.UserSelect):
-        def __init__(self): super().__init__(placeholder="Search User...", row=1)
+        def __init__(self):
+            super().__init__(placeholder="Search User...", row=1)
         async def callback(self, interaction):
             self.view.target_id = self.values[0].id
             await self.view.refresh_embed(interaction)
 
     class ChannelSelect(ui.ChannelSelect):
-        def __init__(self): 
+        def __init__(self):
             types = [discord.ChannelType.text, discord.ChannelType.voice, discord.ChannelType.public_thread, discord.ChannelType.forum]
             super().__init__(placeholder="Search Channel/Thread...", channel_types=types, row=1)
         async def callback(self, interaction):
             self.view.target_id = self.values[0].id
             await self.view.refresh_embed(interaction)
 
-
-# --- INACTIVITY PANEL VIEW ---
-class InactivityPanelView(ui.View):
-    def __init__(self, cog, guild):
-        super().__init__(timeout=600)
-        self.cog = cog
-        self.guild = guild
-        self.update_components()
-
-    def update_components(self):
-        self.clear_items()
-        self.add_item(self.ConfigChannelSelect())
-        self.add_item(self.ConfigRoleSelect())
-        self.add_item(self.ConfigButton("Set Threshold", "threshold", discord.ButtonStyle.primary))
-        self.add_item(self.ConfigButton("Set Period", "period", discord.ButtonStyle.secondary))
-        self.add_item(self.TestButton())
-        self.add_item(self.RepairButton())
-
-    async def build_embed(self):
-        row = await self.cog.db.fetch_one("SELECT * FROM inactivity_config WHERE guild_id = ?", (self.guild.id,))
-        desc = "### Inactivity Settings\n\n"
-        if row:
-            chan = self.guild.get_channel(row['log_channel_id'])
-            role = self.guild.get_role(row['highlight_role_id'])
-            desc += f"**Log Channel:** {chan.mention if chan else 'Not Set'}\n"
-            desc += f"**Highlight Role:** {role.mention if role else 'Not Set'}\n"
-            desc += f"**Msg Threshold:** {row['msg_threshold']} messages\n"
-            desc += f"**Time Period:** {row['period_days']} days\n"
-        else:
-            desc += "System not configured."
-        return discord.Embed(description=desc, color=discord.Color.dark_grey())
-
-    class ConfigChannelSelect(ui.ChannelSelect):
-        def __init__(self): super().__init__(placeholder="Set Log Channel", channel_types=[discord.ChannelType.text], row=0)
+    class CompareUserSelect1(ui.UserSelect):
+        def __init__(self):
+            super().__init__(placeholder="User 1...", row=1)
         async def callback(self, interaction):
-            await self.view.cog.db.execute("INSERT INTO inactivity_config (guild_id, log_channel_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET log_channel_id = ?", (interaction.guild.id, self.values[0].id, self.values[0].id))
-            await interaction.response.defer()
-            embed = await self.view.build_embed()
-            await interaction.edit_original_response(embed=embed, view=self.view)
+            self.view.compare_target_1 = self.values[0].id
+            if self.view.compare_target_2:
+                await self.view.refresh_embed(interaction)
+            else:
+                await interaction.response.defer()
 
-    class ConfigRoleSelect(ui.RoleSelect):
-        def __init__(self): super().__init__(placeholder="Set Highlight Role", row=1)
+    class CompareUserSelect2(ui.UserSelect):
+        def __init__(self):
+            super().__init__(placeholder="User 2...", row=2)
         async def callback(self, interaction):
-            await self.view.cog.db.execute("INSERT INTO inactivity_config (guild_id, highlight_role_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET highlight_role_id = ?", (interaction.guild.id, self.values[0].id, self.values[0].id))
-            await interaction.response.defer()
-            embed = await self.view.build_embed()
-            await interaction.edit_original_response(embed=embed, view=self.view)
+            self.view.compare_target_2 = self.values[0].id
+            if self.view.compare_target_1:
+                await self.view.refresh_embed(interaction)
+            else:
+                await interaction.response.defer()
 
-    class ConfigButton(ui.Button):
-        def __init__(self, label, mode, style):
-            super().__init__(label=label, style=style, row=2)
-            self.mode = mode
+    class CompareChannelSelect1(ui.ChannelSelect):
+        def __init__(self):
+            types = [discord.ChannelType.text, discord.ChannelType.voice, discord.ChannelType.public_thread, discord.ChannelType.forum]
+            super().__init__(placeholder="Channel 1...", channel_types=types, row=1)
         async def callback(self, interaction):
-            await interaction.response.send_modal(InactivityPanelView.ConfigModal(interaction.client.get_cog("UserTracker"), self.mode, self.view))
+            self.view.ch_compare_1 = self.values[0].id
+            if self.view.ch_compare_2:
+                await self.view.refresh_embed(interaction)
+            else:
+                await interaction.response.defer()
 
-    class TestButton(ui.Button):
-        def __init__(self): super().__init__(label="Test Alert", style=discord.ButtonStyle.success, row=2)
+    class CompareChannelSelect2(ui.ChannelSelect):
+        def __init__(self):
+            types = [discord.ChannelType.text, discord.ChannelType.voice, discord.ChannelType.public_thread, discord.ChannelType.forum]
+            super().__init__(placeholder="Channel 2...", channel_types=types, row=2)
         async def callback(self, interaction):
-            row = await self.view.cog.db.fetch_one("SELECT * FROM inactivity_config WHERE guild_id = ?", (interaction.guild.id,))
-            if not row or not row['log_channel_id']: return await interaction.response.send_message("Configure a Log Channel first.", ephemeral=True)
-            log_channel = interaction.guild.get_channel(row['log_channel_id'])
-            member = interaction.user
-            embed = discord.Embed(title="TEST: Inactivity Alert", description="**0** messages in the last **30** days (Threshold: 5)", color=discord.Color.orange())
-            embed.set_author(name=f"{member.display_name} ({member.name})", icon_url=member.display_avatar.url)
-            embed.set_thumbnail(url=member.display_avatar.url)
-            embed.add_field(name="Joined", value=member.joined_at.strftime("%Y-%m-%d") if member.joined_at else "Unknown", inline=True)
-            embed.add_field(name="User ID", value=str(member.id), inline=True)
-            try:
-                await log_channel.send(content=member.mention, embed=embed, view=_make_alert_view(member.id, "initial"))
-                await interaction.response.send_message(f"Sent test to {log_channel.mention}.", ephemeral=True)
-            except:
-                await interaction.response.send_message("Failed to send. Check bot permissions.", ephemeral=True)
+            self.view.ch_compare_2 = self.values[0].id
+            if self.view.ch_compare_1:
+                await self.view.refresh_embed(interaction)
+            else:
+                await interaction.response.defer()
 
-    class RepairButton(ui.Button):
-        def __init__(self): super().__init__(label="Repair Alerts", style=discord.ButtonStyle.secondary, emoji="\U0001f527", row=3)
-        async def callback(self, interaction):
-            try:
-                cog = self.view.cog
-                row = await cog.db.fetch_one("SELECT log_channel_id FROM inactivity_config WHERE guild_id = ?", (interaction.guild.id,))
-                if not row or not row['log_channel_id']:
-                    return await interaction.response.send_message("No log channel configured.", ephemeral=True)
-                log_channel = interaction.guild.get_channel(row['log_channel_id'])
-                if not log_channel:
-                    return await interaction.response.send_message("Log channel not found.", ephemeral=True)
-                await interaction.response.defer(ephemeral=True)
-                # Collect old alerts first, then delete + resend (avoids old-message edit rate limits)
-                to_repair = []
-                async for message in log_channel.history(limit=500):
-                    if message.author.id != cog.bot.user.id:
-                        continue
-                    if not message.embeds:
-                        continue
-                    embed = message.embeds[0]
-                    if embed.title not in ("Inactivity Alert", "VIP Inactivity Alert", "TEST: Inactivity Alert"):
-                        continue
-                    user_id = None
-                    for source in [message.content or "", embed.description or ""]:
-                        match = re.search(r'<@!?(\d+)>', source)
-                        if match:
-                            user_id = int(match.group(1))
-                            break
-                    if not user_id:
-                        for field in embed.fields:
-                            if field.name == "User ID":
-                                try: user_id = int(field.value)
-                                except: pass
-                    if not user_id:
-                        continue
-                    to_repair.append((message, embed, user_id))
-                repaired = 0
-                for message, embed, user_id in to_repair:
-                    status_row = await cog.db.fetch_one("SELECT status FROM user_inactivity_status WHERE guild_id = ? AND user_id = ?", (interaction.guild.id, user_id))
-                    if status_row and status_row['status'] in ('snoozed', 'forgotten', 'kicked'):
-                        view = _make_alert_view(user_id, "decided", status_row['status'])
-                    else:
-                        view = _make_alert_view(user_id, "initial")
-                    try:
-                        content = f"<@{user_id}>"
-                        await message.delete()
-                        await log_channel.send(content=content, embed=embed, view=view)
-                        repaired += 1
-                        await asyncio.sleep(1.5)
-                    except Exception as e:
-                        logger.warning(f"[RepairAlerts] Failed to repair message {message.id}: {e}")
-                await interaction.followup.send(f"Repaired **{repaired}** alert(s).", ephemeral=True)
-            except Exception as e:
-                logger.exception(f"[RepairAlerts] Button callback error: {e}")
-                try:
-                    await interaction.followup.send(f"Error: {e}", ephemeral=True)
-                except:
-                    pass
 
-    class ConfigModal(ui.Modal):
-        def __init__(self, cog, mode, parent_view):
-            super().__init__(title=f"Set {mode.capitalize()}")
-            self.cog = cog
-            self.mode = mode
-            self.parent_view = parent_view
-            self.val = ui.TextInput(label="Value (Integer)", style=discord.TextStyle.short)
-            self.add_item(self.val)
-
-        async def on_submit(self, interaction):
-            try:
-                val = int(self.val.value)
-                col = "msg_threshold" if self.mode == "threshold" else "period_days"
-                await self.cog.db.execute(f"INSERT INTO inactivity_config (guild_id, {col}) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET {col} = ?", (interaction.guild.id, val, val))
-                embed = await self.parent_view.build_embed()
-                await interaction.response.edit_message(embed=embed, view=self.parent_view)
-            except ValueError:
-                await interaction.response.send_message("Please enter a valid number.", ephemeral=True)
-
-# --- MAIN COG ---
-INACTIVITY_INVITE_LINK = "https://discord.gg/bettervibes"
-DM_RATE_LIMIT_DELAY = 2.0  # seconds between DMs to stay safe
+# =========================================================================
+# MAIN COG
+# =========================================================================
 
 class UserTracker(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.db = TrackingDB()
-        self.img_gen = StatsImageGenerator()
+        self.card_gen = TrackerCardGenerator()
         self.session = None
-        self.dm_queue: asyncio.Queue = asyncio.Queue()
-        self._dm_worker_task = None
+        self._voice_join_times: dict[tuple[int, int], tuple[int, int]] = {}
 
     async def cog_load(self):
         self.session = aiohttp.ClientSession()
-        self._dm_worker_task = self.bot.loop.create_task(self._dm_worker())
         self.bot.loop.create_task(self._async_setup())
 
     async def _async_setup(self):
         await self.bot.wait_until_ready()
         await self.db.connect()
+        await self.card_gen.initialize()
+        await self._reseed_voice_sessions()
         self.data_retention_task.start()
-        self.check_inactivity_task.start()
+        self.voice_checkpoint_task.start()
 
     async def cog_unload(self):
-        if self.session: await self.session.close()
-        if self._dm_worker_task: self._dm_worker_task.cancel()
+        if self.session:
+            await self.session.close()
         self.data_retention_task.cancel()
-        self.check_inactivity_task.cancel()
+        self.voice_checkpoint_task.cancel()
+        await self._flush_voice_sessions()
+        await self.card_gen.close()
         await self.db.close()
 
-    async def _dm_worker(self):
-        """Background worker that drains the DM queue with rate-limit-safe delays."""
-        while True:
-            try:
-                user_id, guild_name = await self.dm_queue.get()
-                try:
-                    user = self.bot.get_user(user_id) or await self.bot.fetch_user(user_id)
-                    if user:
-                        msg = (
-                            f"Hey! You've been removed from **{guild_name}** due to extended inactivity. "
-                            f"No hard feelings — you're welcome back anytime!\n\n"
-                            f"{INACTIVITY_INVITE_LINK}"
-                        )
-                        await user.send(msg)
-                except discord.Forbidden:
-                    logger.warning(f"[DM Queue] Cannot DM user {user_id} (DMs disabled).")
-                except discord.HTTPException as e:
-                    logger.warning(f"[DM Queue] Failed to DM user {user_id}: {e}")
-                except Exception as e:
-                    logger.exception(f"[DM Queue] Unexpected error DMing user {user_id}: {e}")
-                finally:
-                    self.dm_queue.task_done()
-                    await asyncio.sleep(DM_RATE_LIMIT_DELAY)
-            except asyncio.CancelledError:
-                break
-            except Exception:
-                await asyncio.sleep(5)
+    # --- VOICE SESSION HELPERS ---
+
+    async def _reseed_voice_sessions(self):
+        """Record join times for members already in voice when bot starts."""
+        now = int(datetime.now(timezone.utc).timestamp())
+        for guild in self.bot.guilds:
+            for vc in guild.voice_channels + guild.stage_channels:
+                for member in vc.members:
+                    if not member.bot:
+                        self._voice_join_times[(member.id, guild.id)] = (now, vc.id)
+        if self._voice_join_times:
+            logger.info(f"Reseeded {len(self._voice_join_times)} voice sessions.")
+
+    async def _flush_voice_sessions(self):
+        """Save all active voice sessions on shutdown."""
+        now = int(datetime.now(timezone.utc).timestamp())
+        for (uid, gid), (join_ts, cid) in self._voice_join_times.items():
+            duration = now - join_ts
+            if duration > 5:
+                await self.db.execute(
+                    "INSERT INTO voice_sessions (user_id, channel_id, guild_id, start_time, end_time, duration) VALUES (?,?,?,?,?,?)",
+                    (uid, cid, gid, join_ts, now, duration)
+                )
+        self._voice_join_times.clear()
 
     # --- HELPERS ---
+
     def get_channel_safe(self, guild, cid):
         c = guild.get_channel(cid)
-        if c: return c
+        if c:
+            return c
         c = guild.get_thread(cid)
-        if c: return c
+        if c:
+            return c
         for thread in guild.threads:
-            if thread.id == cid: return thread
+            if thread.id == cid:
+                return thread
         return None
 
-    # --- DATA FETCHERS ---
-    async def get_stats(self, guild_id, days, user_id=None, channel_id=None):
-        now = datetime.now(timezone.utc).timestamp()
-        cutoff = now - (days * 86400)
-        prev_cutoff = now - (days * 2 * 86400)
-        where_clauses = ["guild_id = ?", "timestamp > ?"]
-        params = [guild_id, cutoff]
-        if user_id: where_clauses.append("user_id = ?"); params.append(user_id)
-        if channel_id: where_clauses.append("channel_id = ?"); params.append(channel_id)
-        where_sql = " AND ".join(where_clauses)
-        row = await self.db.fetch_one(f"SELECT count(*) FROM message_logs WHERE {where_sql}", tuple(params))
-        msgs = row[0] or 0
-        prev_sql = where_sql.replace("timestamp > ?", "timestamp BETWEEN ? AND ?")
-        prev_params = [guild_id, prev_cutoff, cutoff]
-        if user_id: prev_params.append(user_id)
-        if channel_id: prev_params.append(channel_id)
-        p_row = await self.db.fetch_one(f"SELECT count(*) FROM message_logs WHERE {prev_sql}", tuple(prev_params))
-        p_msgs = p_row[0] or 0
-        growth = int(((msgs - p_msgs) / p_msgs) * 100) if p_msgs > 0 else 100 if msgs > 0 else 0
-        return msgs, growth
+    @staticmethod
+    def _fmt_voice(seconds):
+        """Format seconds into a readable voice time string."""
+        if not seconds or seconds <= 0:
+            return "0 hours"
+        hours = seconds // 3600
+        mins = (seconds % 3600) // 60
+        if hours > 0:
+            return f"{hours}h {mins}m" if mins > 0 else f"{hours} hours"
+        return f"{mins} min"
 
-    async def get_radar_data(self, guild, user, days):
-        cutoff = datetime.now(timezone.utc).timestamp() - (days * 86400)
-        max_msgs = (await self.db.fetch_one("SELECT count(*) as c FROM message_logs WHERE guild_id = ? AND timestamp > ? GROUP BY user_id ORDER BY c DESC LIMIT 1", (guild.id, cutoff)))
-        max_msgs = max_msgs[0] if max_msgs and max_msgs[0] > 0 else 1
-        max_voice = (await self.db.fetch_one("SELECT sum(duration) as c FROM voice_sessions WHERE guild_id = ? AND start_time > ? GROUP BY user_id ORDER BY c DESC LIMIT 1", (guild.id, cutoff)))
-        max_voice = max_voice[0] if max_voice and max_voice[0] > 0 else 1
-        max_social = (await self.db.fetch_one("SELECT count(*) as c FROM social_interactions WHERE guild_id = ? AND timestamp > ? GROUP BY user_id ORDER BY c DESC LIMIT 1", (guild.id, cutoff)))
-        max_social = max_social[0] if max_social and max_social[0] > 0 else 1
-        max_impact = (await self.db.fetch_one("SELECT count(*) as c FROM reaction_logs WHERE guild_id = ? AND timestamp > ? GROUP BY target_message_author_id ORDER BY c DESC LIMIT 1", (guild.id, cutoff)))
-        max_impact = max_impact[0] if max_impact and max_impact[0] > 0 else 1
-        u_msgs = (await self.db.fetch_one("SELECT count(*) FROM message_logs WHERE guild_id = ? AND user_id = ? AND timestamp > ?", (guild.id, user.id, cutoff)))[0] or 0
-        u_voice = (await self.db.fetch_one("SELECT sum(duration) FROM voice_sessions WHERE guild_id = ? AND user_id = ? AND start_time > ?", (guild.id, user.id, cutoff)))[0] or 0
-        u_social = (await self.db.fetch_one("SELECT count(*) FROM social_interactions WHERE guild_id = ? AND user_id = ? AND timestamp > ?", (guild.id, user.id, cutoff)))[0] or 0
-        u_impact = (await self.db.fetch_one("SELECT count(*) FROM reaction_logs WHERE guild_id = ? AND target_message_author_id = ? AND timestamp > ?", (guild.id, user.id, cutoff)))[0] or 0
-        return {
-            "Activity": min(u_msgs / max_msgs, 1.0),
-            "Voice": min(u_voice / max_voice, 1.0),
-            "Social": min(u_social / max_social, 1.0),
-            "Impact": min(u_impact / max_impact, 1.0),
-            "Loyalty": 1.0 
-        }
+    @staticmethod
+    def _icon_url(guild):
+        return str(guild.icon.url) if guild.icon else NO_ICON
 
-    # --- GENERATORS & COMMANDS ---
+    @staticmethod
+    def _fill_daily(rows, days):
+        """Fill in missing days with 0s. rows = [(date_str, msgs, [contribs]), ...]"""
+        now = datetime.now(timezone.utc)
+        lookup = {}
+        for r in rows:
+            try:
+                lookup[r[0]] = (r[1], r[2])
+            except (IndexError, KeyError):
+                lookup[r[0]] = (r[1], 0)
+        result = []
+        for i in range(days):
+            d = (now - timedelta(days=days - 1 - i)).strftime('%Y-%m-%d')
+            msgs, contribs = lookup.get(d, (0, 0))
+            result.append((d, msgs, contribs))
+        return result
+
+    @staticmethod
+    def _build_bars_html(daily_data, key_idx=1):
+        """Build CSS bar chart HTML from daily data."""
+        values = [d[key_idx] for d in daily_data]
+        max_val = max(values) if values else 1
+        if max_val == 0:
+            max_val = 1
+        bars = []
+        for v in values:
+            pct = max(int((v / max_val) * 100), 2)
+            bars.append(f'<div class="bar-wrapper"><div class="bar bar-msg" style="height: {pct}%"></div></div>')
+        return "\n".join(bars)
+
+    @staticmethod
+    def _build_svg_line(daily_data, key_idx=1, svg_width=600, svg_height=150, forced_max=None):
+        """Build SVG polyline points from daily data."""
+        values = [d[key_idx] for d in daily_data]
+        if not values:
+            return ""
+        max_val = forced_max if forced_max else max(values)
+        if not max_val or max_val == 0:
+            max_val = 1
+        n = len(values)
+        points = []
+        for i, v in enumerate(values):
+            x = int(i / max(n - 1, 1) * svg_width)
+            y = int(svg_height - (v / max_val * (svg_height - 10)))
+            points.append(f"{x},{y}")
+        return " ".join(points)
+
+    @staticmethod
+    def _build_chart_labels(daily_data, max_labels=7):
+        """Build date labels for chart x-axis."""
+        n = len(daily_data)
+        if n == 0:
+            return ""
+        step = max(1, n // max_labels)
+        labels = []
+        for i, (date_str, _, *_rest) in enumerate(daily_data):
+            if i % step == 0 or i == n - 1:
+                try:
+                    dt = datetime.strptime(date_str, '%Y-%m-%d')
+                    label = dt.strftime('%-m/%-d')
+                except ValueError:
+                    label = date_str
+                labels.append(f'<span class="chart-label">{label}</span>')
+            else:
+                labels.append('<span class="chart-label"></span>')
+        return "\n".join(labels)
+
+    @staticmethod
+    def _reduce_data(daily_data, max_points=60):
+        """Reduce data points by grouping consecutive entries."""
+        if len(daily_data) <= max_points:
+            return daily_data
+        bucket_size = max(1, len(daily_data) // max_points)
+        result = []
+        for i in range(0, len(daily_data), bucket_size):
+            bucket = daily_data[i:i + bucket_size]
+            label = bucket[-1][0]
+            total_v1 = sum(d[1] for d in bucket)
+            if len(bucket[0]) > 2:
+                total_v2 = sum(d[2] for d in bucket)
+                result.append((label, total_v1, total_v2))
+            else:
+                result.append((label, total_v1))
+        return result
+
+    # --- GENERATORS ---
+
     async def gen_server_overview(self, guild, days):
-        msgs, growth = await self.get_stats(guild.id, days)
-        cutoff = datetime.now(timezone.utc).timestamp() - (days * 86400)
+        now_dt = datetime.now(timezone.utc)
+        if days >= 3650:
+            cutoff = 0
+        else:
+            cutoff = int((now_dt - timedelta(days=days)).timestamp())
+        prev_cutoff = int((now_dt - timedelta(days=days * 2)).timestamp()) if days < 3650 else 0
+
+        # Totals
+        row = await self.db.fetch_one("SELECT count(*) FROM message_logs WHERE guild_id = ? AND timestamp > ?", (guild.id, cutoff))
+        total_msgs = row[0] or 0
+
+        prev_row = await self.db.fetch_one("SELECT count(*) FROM message_logs WHERE guild_id = ? AND timestamp BETWEEN ? AND ?", (guild.id, prev_cutoff, cutoff))
+        prev_msgs = prev_row[0] or 0
+        if prev_msgs > 0:
+            growth = int(((total_msgs - prev_msgs) / prev_msgs) * 100)
+        else:
+            growth = 100 if total_msgs > 0 else 0
+
         active_row = await self.db.fetch_one("SELECT count(distinct user_id) FROM message_logs WHERE guild_id = ? AND timestamp > ?", (guild.id, cutoff))
         active_users = active_row[0] or 0
-        u_rows = await self.db.fetch_all("SELECT user_id, count(*) as c FROM message_logs WHERE guild_id = ? AND timestamp > ? GROUP BY user_id ORDER BY c DESC LIMIT 10", (guild.id, cutoff))
-        user_list = []
-        for r in u_rows:
+
+        new_row = await self.db.fetch_one("SELECT count(*) FROM member_events WHERE guild_id = ? AND event_type = 'join' AND timestamp > ?", (guild.id, cutoff))
+        new_members = new_row[0] or 0
+
+        voice_row = await self.db.fetch_one("SELECT coalesce(sum(duration), 0) FROM voice_sessions WHERE guild_id = ? AND start_time > ?", (guild.id, cutoff))
+        voice_secs = voice_row[0] or 0
+        # Add in-progress voice sessions from memory
+        for (uid, gid), (join_ts, cid) in self._voice_join_times.items():
+            if gid == guild.id and join_ts > cutoff:
+                voice_secs += int(datetime.now(timezone.utc).timestamp()) - join_ts
+
+        # Daily chart data
+        daily_rows = await self.db.fetch_all(
+            "SELECT date(timestamp, 'unixepoch') as day, count(*) as msgs, count(distinct user_id) as contribs FROM message_logs WHERE guild_id = ? AND timestamp > ? GROUP BY day ORDER BY day",
+            (guild.id, cutoff)
+        )
+        if days >= 3650 and daily_rows:
+            first_date = datetime.strptime(daily_rows[0][0], '%Y-%m-%d').replace(tzinfo=timezone.utc)
+            chart_days = max(1, (now_dt - first_date).days + 1)
+        elif days >= 3650:
+            chart_days = 30
+        else:
+            chart_days = days
+        daily = self._fill_daily(daily_rows, chart_days)
+        daily = self._reduce_data(daily, max_points=60)
+
+        # Top members
+        u_rows = await self.db.fetch_all("SELECT user_id, count(*) as c FROM message_logs WHERE guild_id = ? AND timestamp > ? GROUP BY user_id ORDER BY c DESC LIMIT 5", (guild.id, cutoff))
+        members_html = ""
+        for i, r in enumerate(u_rows):
             u = guild.get_member(r[0])
-            user_list.append((u.name if u else "Unknown", r[1]))
-        c_rows = await self.db.fetch_all("SELECT channel_id, count(*) as c FROM message_logs WHERE guild_id = ? AND timestamp > ? GROUP BY channel_id ORDER BY c DESC LIMIT 10", (guild.id, cutoff))
-        chan_list = []
-        for r in c_rows:
-            c = self.get_channel_safe(guild, r[0])
-            name = f"#{c.name}" if c else "deleted-channel"
-            if c and isinstance(c, (discord.Thread, discord.ForumChannel)): name = f"# {c.name}"
-            chan_list.append((name, r[1]))
-        stats_top = [("Total Messages", msgs, growth, COLOR_ACCENT_PRIMARY), ("Active Users", active_users, None, COLOR_ACCENT_GREEN)]
-        list_left = ("Top Members", user_list)
-        list_right = ("Top Channels", chan_list)
-        icon = await guild.icon.read() if guild.icon else None
-        buf = await asyncio.to_thread(self.img_gen.generate_card, guild.name, f"Server Overview ({days}d)", icon, stats_top, list_left, list_right)
-        return discord.File(buf, filename="server.png")
+            name = u.display_name if u else "Unknown"
+            if len(name) > 16:
+                name = name[:14] + ".."
+            members_html += f'<div class="list-item"><span class="rank">#{i+1}</span><span class="item-name">{name}</span><span class="item-value">{r[1]:,}</span></div>\n'
+
+        # Top channels
+        c_rows = await self.db.fetch_all("SELECT channel_id, count(*) as c FROM message_logs WHERE guild_id = ? AND timestamp > ? GROUP BY channel_id ORDER BY c DESC LIMIT 5", (guild.id, cutoff))
+        channels_html = ""
+        for i, r in enumerate(c_rows):
+            ch = self.get_channel_safe(guild, r[0])
+            name = ch.name if ch else "deleted-channel"
+            if len(name) > 16:
+                name = name[:14] + ".."
+            channels_html += f'<div class="list-item"><span class="rank">#{i+1}</span><span class="item-name"><span class="channel-hash">#</span> {name}</span><span class="item-value">{r[1]:,}</span></div>\n'
+
+        growth_class = "positive" if growth >= 0 else "negative"
+        growth_sym = "+" if growth >= 0 else ""
+        growth_text = f"{growth_sym}{growth}% vs prev" if prev_msgs > 0 else ""
+
+        period_label = f"Last {days} days" if days < 3650 else "All Time"
+        svg_w = max(len(daily) * 20, 100)
+
+        data = {
+            'server_icon_url': self._icon_url(guild),
+            'server_name': guild.name,
+            'total_msgs': f"{total_msgs:,}",
+            'growth_class': growth_class,
+            'growth_text': growth_text,
+            'active_users': f"{active_users:,}",
+            'new_members': f"+{new_members}" if new_members > 0 else "0",
+            'voice_hours': self._fmt_voice(voice_secs),
+            'bars_html': self._build_bars_html(daily),
+            'svg_width': svg_w,
+            'svg_points': self._build_svg_line(daily, key_idx=2, svg_width=svg_w),
+            'chart_labels_html': self._build_chart_labels(daily),
+            'members_html': members_html if members_html else '<div class="list-item"><span class="item-name" style="color:#6d6f78">No data yet</span></div>',
+            'channels_html': channels_html if channels_html else '<div class="list-item"><span class="item-name" style="color:#6d6f78">No data yet</span></div>',
+            'period_label': period_label,
+        }
+        buf = await self.card_gen.render('tracker_server_card', data, width=640)
+        if buf:
+            return discord.File(buf, filename="server_overview.png")
+        return None
 
     async def gen_user_overview(self, guild, user, days):
-        msgs, growth = await self.get_stats(guild.id, days, user_id=user.id)
-        cutoff = datetime.now(timezone.utc).timestamp() - (days * 86400)
-        co_rows = await self.db.fetch_all("SELECT target_user_id, count(*) as c FROM social_interactions WHERE guild_id = ? AND user_id = ? AND timestamp > ? GROUP BY target_user_id ORDER BY c DESC LIMIT 8", (guild.id, user.id, cutoff))
-        connections_list = []
-        for r in co_rows:
-            u = guild.get_member(r[0])
-            connections_list.append((u.name if u else "Unknown", r[1]))
-        c_rows = await self.db.fetch_all("SELECT channel_id, count(*) as c FROM message_logs WHERE guild_id = ? AND user_id = ? AND timestamp > ? GROUP BY channel_id ORDER BY c DESC LIMIT 8", (guild.id, user.id, cutoff))
-        chan_list = []
-        for r in c_rows:
-            c = self.get_channel_safe(guild, r[0])
-            name = f"#{c.name}" if c else "deleted"
-            if c and isinstance(c, (discord.Thread, discord.ForumChannel)): name = f"# {c.name}"
-            chan_list.append((name, r[1]))
-        radar_data = await self.get_radar_data(guild, user, days)
-        stats_top = [("Messages", msgs, growth, COLOR_ACCENT_PRIMARY), ("Interactions", sum(x[1] for x in connections_list), None, COLOR_ACCENT_GREEN)]
-        list_left = ("Top Channels", chan_list)
-        list_right = ("Radar", radar_data)
-        icon = await user.display_avatar.read()
-        buf = await asyncio.to_thread(self.img_gen.generate_card, user.display_name, f"User Overview ({days}d)", icon, stats_top, list_left, list_right, radar_data=radar_data)
-        return discord.File(buf, filename="user.png")
+        now_dt = datetime.now(timezone.utc)
+        now_ts = int(now_dt.timestamp())
+        if days >= 3650:
+            cutoff = 0
+        else:
+            cutoff = int((now_dt - timedelta(days=days)).timestamp())
+
+        # Message counts for 1d/7d/14d/30d
+        msg_counts = {}
+        for period, d in [('1d', 1), ('7d', 7), ('14d', 14), ('30d', 30)]:
+            c = now_ts - d * 86400
+            row = await self.db.fetch_one("SELECT count(*) FROM message_logs WHERE guild_id = ? AND user_id = ? AND timestamp > ?", (guild.id, user.id, c))
+            msg_counts[period] = row[0] or 0
+        # All-time message count
+        all_msg_row = await self.db.fetch_one("SELECT count(*) FROM message_logs WHERE guild_id = ? AND user_id = ?", (guild.id, user.id))
+        msg_counts['all'] = all_msg_row[0] or 0
+
+        # Voice time for 1d/7d/14d/30d (include in-progress session from memory)
+        active_voice = self._voice_join_times.get((user.id, guild.id))
+        active_dur = (now_ts - active_voice[0]) if active_voice else 0
+        voice_times = {}
+        for period, d in [('1d', 1), ('7d', 7), ('14d', 14), ('30d', 30)]:
+            c = now_ts - d * 86400
+            row = await self.db.fetch_one("SELECT coalesce(sum(duration), 0) FROM voice_sessions WHERE guild_id = ? AND user_id = ? AND start_time > ?", (guild.id, user.id, c))
+            v = row[0] or 0
+            if active_voice and active_voice[0] > c:
+                v += active_dur
+            voice_times[period] = v
+        # All-time voice time
+        all_voice_row = await self.db.fetch_one("SELECT coalesce(sum(duration), 0) FROM voice_sessions WHERE guild_id = ? AND user_id = ?", (guild.id, user.id))
+        voice_times['all'] = (all_voice_row[0] or 0) + active_dur
+
+        # Message rank
+        rank_row = await self.db.fetch_one(
+            "SELECT rank FROM (SELECT user_id, ROW_NUMBER() OVER (ORDER BY count(*) DESC) as rank FROM message_logs WHERE guild_id = ? AND timestamp > ? GROUP BY user_id) WHERE user_id = ?",
+            (guild.id, cutoff, user.id)
+        )
+        msg_rank = f"#{rank_row[0]}" if rank_row else "N/A"
+
+        # Voice rank (merge DB + in-progress sessions)
+        all_voice = await self.db.fetch_all(
+            "SELECT user_id, sum(duration) as total FROM voice_sessions WHERE guild_id = ? AND start_time > ? GROUP BY user_id",
+            (guild.id, cutoff)
+        )
+        voice_totals = {r[0]: r[1] for r in all_voice}
+        for (uid, gid), (jts, _) in self._voice_join_times.items():
+            if gid == guild.id and jts > cutoff:
+                voice_totals[uid] = voice_totals.get(uid, 0) + (now_ts - jts)
+        if voice_totals:
+            sorted_voice = sorted(voice_totals.items(), key=lambda x: x[1], reverse=True)
+            voice_rank_num = next((i + 1 for i, (uid, _) in enumerate(sorted_voice) if uid == user.id), None)
+            voice_rank = f"#{voice_rank_num}" if voice_rank_num else "No Data"
+            voice_rank_class = "" if voice_rank_num else "no-data"
+        else:
+            voice_rank = "No Data"
+            voice_rank_class = "no-data"
+
+        # Top channels
+        ch_rows = await self.db.fetch_all("SELECT channel_id, count(*) as c FROM message_logs WHERE guild_id = ? AND user_id = ? AND timestamp > ? GROUP BY channel_id ORDER BY c DESC LIMIT 6", (guild.id, user.id, cutoff))
+        channels_html = ""
+        for r in ch_rows:
+            ch = self.get_channel_safe(guild, r[0])
+            name = ch.name if ch else "deleted"
+            if len(name) > 18:
+                name = name[:16] + ".."
+            channels_html += f'<div class="channel-item"><span class="channel-hash">#</span><span class="channel-name">{name}</span><span class="channel-count">{r[1]:,}</span></div>\n'
+        if not channels_html:
+            channels_html = '<div style="color:#6d6f78;font-size:13px;padding:8px 0;">No data yet</div>'
+
+        # Activity sparkline (daily messages + voice for the period)
+        daily_rows = await self.db.fetch_all(
+            "SELECT date(timestamp, 'unixepoch') as day, count(*) as msgs FROM message_logs WHERE guild_id = ? AND user_id = ? AND timestamp > ? GROUP BY day ORDER BY day",
+            (guild.id, user.id, cutoff)
+        )
+        voice_daily_rows = await self.db.fetch_all(
+            "SELECT date(start_time, 'unixepoch') as day, coalesce(sum(duration), 0) as secs FROM voice_sessions WHERE guild_id = ? AND user_id = ? AND start_time > ? GROUP BY day ORDER BY day",
+            (guild.id, user.id, cutoff)
+        )
+        # Determine chart range
+        if days >= 3650 and daily_rows:
+            first_date = datetime.strptime(daily_rows[0][0], '%Y-%m-%d').replace(tzinfo=timezone.utc)
+            chart_days = max(1, (now_dt - first_date).days + 1)
+        elif days >= 3650:
+            chart_days = 30
+        else:
+            chart_days = days
+        # Fill daily data
+        msg_daily = self._fill_daily(daily_rows, chart_days)
+        voice_lookup = {r[0]: r[1] for r in voice_daily_rows}
+        # Add in-progress voice session to today's total
+        today_str = now_dt.strftime('%Y-%m-%d')
+        if active_voice:
+            voice_lookup[today_str] = voice_lookup.get(today_str, 0) + active_dur
+        voice_daily = []
+        for i in range(chart_days):
+            d = (now_dt - timedelta(days=chart_days - 1 - i)).strftime('%Y-%m-%d')
+            voice_daily.append((d, voice_lookup.get(d, 0)))
+        # Reduce data points if needed
+        msg_daily = self._reduce_data(msg_daily, max_points=60)
+        voice_daily = self._reduce_data(voice_daily, max_points=60)
+
+        chart_w = max(len(msg_daily) * 10, 100)
+        msg_points = self._build_svg_line(msg_daily, key_idx=1, svg_width=chart_w, svg_height=80)
+        voice_points = self._build_svg_line(voice_daily, key_idx=1, svg_width=chart_w, svg_height=80)
+
+        # Axis labels
+        msg_max_val = max((d[1] for d in msg_daily), default=0)
+        voice_max_secs = max((d[1] for d in voice_daily), default=0)
+        msg_max = str(msg_max_val) if msg_max_val > 0 else "0"
+        voice_max = self._fmt_voice(voice_max_secs) if voice_max_secs > 0 else "0"
+
+        chart_date_start = (now_dt - timedelta(days=chart_days - 1)).strftime('%-m/%-d')
+        chart_date_end = now_dt.strftime('%-m/%-d')
+
+        created = user.created_at.strftime('%b %d, %Y')
+        joined = user.joined_at.strftime('%b %d, %Y') if user.joined_at else "Unknown"
+        period_label = f"Last {days} days" if days < 3650 else "All Time"
+
+        data = {
+            'avatar_url': str(user.display_avatar.url),
+            'display_name': user.display_name,
+            'username': str(user),
+            'created_date': created,
+            'joined_date': joined,
+            'msg_rank': msg_rank,
+            'voice_rank': voice_rank,
+            'voice_rank_class': voice_rank_class,
+            'msgs_1d': msg_counts['1d'],
+            'msgs_7d': msg_counts['7d'],
+            'msgs_14d': msg_counts['14d'],
+            'msgs_30d': msg_counts['30d'],
+            'msgs_all': f"{msg_counts['all']:,}",
+            'voice_1d': self._fmt_voice(voice_times['1d']),
+            'voice_7d': self._fmt_voice(voice_times['7d']),
+            'voice_14d': self._fmt_voice(voice_times['14d']),
+            'voice_30d': self._fmt_voice(voice_times['30d']),
+            'voice_all': self._fmt_voice(voice_times['all']),
+            'channels_html': channels_html,
+            'chart_width': chart_w,
+            'msg_chart_points': msg_points,
+            'voice_chart_points': voice_points,
+            'msg_max': msg_max,
+            'voice_max': voice_max,
+            'chart_date_start': chart_date_start,
+            'chart_date_end': chart_date_end,
+            'period_label': period_label,
+        }
+        buf = await self.card_gen.render('tracker_user_card', data, width=640)
+        if buf:
+            return discord.File(buf, filename="user_overview.png")
+        return None
 
     async def gen_channel_overview(self, guild, channel, days):
-        msgs, growth = await self.get_stats(guild.id, days, channel_id=channel.id)
-        cutoff = datetime.now(timezone.utc).timestamp() - (days * 86400)
-        u_rows = await self.db.fetch_all("SELECT user_id, count(*) as c FROM message_logs WHERE guild_id = ? AND channel_id = ? AND timestamp > ? GROUP BY user_id ORDER BY c DESC LIMIT 8", (guild.id, channel.id, cutoff))
-        user_list = []
-        for r in u_rows:
-            u = guild.get_member(r[0])
-            user_list.append((u.name if u else "Unknown", r[1]))
-        unique = len(u_rows)
-        title = f"#{channel.name}"
-        if isinstance(channel, (discord.Thread, discord.ForumChannel)): title = f"# {channel.name}"
-        stats_top = [("Messages", msgs, growth, COLOR_ACCENT_PRIMARY), ("Chatters", unique, None, COLOR_ACCENT_GREEN)]
-        list_left = ("Top Contributors", user_list)
-        list_right = ("Top Contributors", []) 
-        icon = await guild.icon.read() if guild.icon else None
-        buf = await asyncio.to_thread(self.img_gen.generate_card, title, f"Channel Overview ({days}d)", icon, stats_top, list_left, list_right)
-        return discord.File(buf, filename="channel.png")
+        cutoff = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp())
 
-    async def gen_emoji_overview(self, guild, days, page):
-        cutoff = datetime.now(timezone.utc).timestamp() - (days * 86400)
-        rows = await self.db.fetch_all("SELECT emoji_id, emoji_name, count(*) as uses, count(distinct user_id) as users FROM emoji_logs WHERE guild_id = ? AND timestamp > ? GROUP BY emoji_id ORDER BY uses DESC", (guild.id, cutoff))
+        row = await self.db.fetch_one("SELECT count(*) FROM message_logs WHERE guild_id = ? AND channel_id = ? AND timestamp > ?", (guild.id, channel.id, cutoff))
+        total_msgs = row[0] or 0
+
+        contrib_row = await self.db.fetch_one("SELECT count(distinct user_id) FROM message_logs WHERE guild_id = ? AND channel_id = ? AND timestamp > ?", (guild.id, channel.id, cutoff))
+        contributors = contrib_row[0] or 0
+
+        # Daily chart
+        daily_rows = await self.db.fetch_all(
+            "SELECT date(timestamp, 'unixepoch') as day, count(*) as msgs FROM message_logs WHERE guild_id = ? AND channel_id = ? AND timestamp > ? GROUP BY day ORDER BY day",
+            (guild.id, channel.id, cutoff)
+        )
+        daily = self._fill_daily(daily_rows, days)
+
+        # Top contributors
+        u_rows = await self.db.fetch_all("SELECT user_id, count(*) as c FROM message_logs WHERE guild_id = ? AND channel_id = ? AND timestamp > ? GROUP BY user_id ORDER BY c DESC LIMIT 8", (guild.id, channel.id, cutoff))
+        max_c = u_rows[0][1] if u_rows else 1
+        contributors_html = ""
+        for i, r in enumerate(u_rows):
+            u = guild.get_member(r[0])
+            name = u.display_name if u else "Unknown"
+            if len(name) > 18:
+                name = name[:16] + ".."
+            bar_pct = max(int((r[1] / max_c) * 100), 3) if max_c > 0 else 3
+            contributors_html += f'''<div class="contributor-item">
+                <span class="rank">#{i+1}</span>
+                <span class="contrib-name">{name}</span>
+                <div class="contrib-bar-wrap"><div class="contrib-bar" style="width:{bar_pct}%"></div></div>
+                <span class="contrib-value">{r[1]:,}</span>
+            </div>\n'''
+        if not contributors_html:
+            contributors_html = '<div style="color:#6d6f78;font-size:13px;padding:8px 0;">No data yet</div>'
+
+        ch_name = channel.name
+        period_label = f"Last {days} days" if days < 3650 else "All Time"
+
+        data = {
+            'channel_name': ch_name,
+            'period_label': period_label,
+            'total_msgs': f"{total_msgs:,}",
+            'contributors': f"{contributors:,}",
+            'bars_html': self._build_bars_html(daily),
+            'chart_labels_html': self._build_chart_labels(daily),
+            'contributors_html': contributors_html,
+        }
+        buf = await self.card_gen.render('tracker_channel_card', data, width=580)
+        if buf:
+            return discord.File(buf, filename="channel_overview.png")
+        return None
+
+    async def gen_emoji_overview(self, guild, days, page, server_only=False):
+        cutoff = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp())
+
+        if server_only:
+            guild_emoji_ids = [e.id for e in guild.emojis]
+            if not guild_emoji_ids:
+                rows = []
+            else:
+                placeholders = ','.join('?' for _ in guild_emoji_ids)
+                rows = await self.db.fetch_all(
+                    f"SELECT emoji_id, emoji_name, count(*) as uses, count(distinct user_id) as users FROM emoji_logs WHERE guild_id = ? AND timestamp > ? AND emoji_id IN ({placeholders}) GROUP BY emoji_id ORDER BY uses DESC",
+                    (guild.id, cutoff, *guild_emoji_ids)
+                )
+        else:
+            rows = await self.db.fetch_all(
+                "SELECT emoji_id, emoji_name, count(*) as uses, count(distinct user_id) as users FROM emoji_logs WHERE guild_id = ? AND timestamp > ? GROUP BY emoji_id ORDER BY uses DESC",
+                (guild.id, cutoff)
+            )
+
         total_pages = max(1, (len(rows) + EMOJI_PAGE_SIZE - 1) // EMOJI_PAGE_SIZE)
-        if page > total_pages: page = 1
+        if page > total_pages:
+            page = 1
         start = (page - 1) * EMOJI_PAGE_SIZE
-        page_rows = rows[start:start+EMOJI_PAGE_SIZE]
-        emoji_data = []
-        if self.session:
-            for r in page_rows:
-                eid, ename, count, users = r
-                img_bytes = None
-                emoji_obj = discord.utils.get(guild.emojis, id=eid)
-                url = None
-                if emoji_obj:
-                    url = str(emoji_obj.url)
-                else:
-                    url = f"https://cdn.discordapp.com/emojis/{eid}.png"
-                if url:
-                    try:
-                        async with self.session.get(url) as resp:
-                            if resp.status == 200: img_bytes = await resp.read()
-                    except: pass
-                emoji_data.append((ename, count, users, img_bytes))
-        icon = await guild.icon.read() if guild.icon else None
-        buf = await asyncio.to_thread(self.img_gen.generate_emoji_card, guild.name, f"Emoji Overview ({days}d)", icon, emoji_data, page, total_pages)
-        return discord.File(buf, filename="emojis.png")
+        page_rows = rows[start:start + EMOJI_PAGE_SIZE]
+
+        # Donut chart for top 5 (normalized to fill the whole circle)
+        top5 = rows[:5]
+        total_uses = sum(r[2] for r in rows) if rows else 0
+        top5_total = sum(r[2] for r in top5) if top5 else 0
+        if top5 and top5_total > 0:
+            cumulative = 0
+            stops = []
+            for i, r in enumerate(top5):
+                pct = r[2] / top5_total * 100
+                color = DONUT_COLORS[i % len(DONUT_COLORS)]
+                stops.append(f"{color} {cumulative:.1f}% {cumulative + pct:.1f}%")
+                cumulative += pct
+            donut_gradient = f"conic-gradient({', '.join(stops)})"
+        else:
+            donut_gradient = "conic-gradient(#3a3c4e 0% 100%)"
+
+        # Legend
+        legend_html = ""
+        for i, r in enumerate(top5):
+            color = DONUT_COLORS[i % len(DONUT_COLORS)]
+            name = r[1] if len(r[1]) <= 16 else r[1][:14] + ".."
+            legend_html += f'<div class="legend-item"><div class="legend-color" style="background:{color}"></div><span class="legend-name">:{name}:</span><span class="legend-count">{r[2]:,}</span></div>\n'
+
+        # Emoji list
+        emoji_list_html = ""
+        if not page_rows:
+            emoji_list_html = '<div class="no-data">No emoji usage data yet</div>'
+        else:
+            for i, r in enumerate(page_rows):
+                rank = start + i + 1
+                eid, ename, count, users = r[0], r[1], r[2], r[3]
+                emoji_url = f"https://cdn.discordapp.com/emojis/{eid}.png?size=64"
+                emoji_list_html += f'''<div class="emoji-item">
+                    <span class="emoji-rank">#{rank}</span>
+                    <img class="emoji-img" src="{emoji_url}" alt="">
+                    <span class="emoji-name">:{ename}:</span>
+                    <div class="emoji-stats"><div class="emoji-uses">{count:,} uses</div><div class="emoji-users">{users} users</div></div>
+                </div>\n'''
+
+        filter_label = "Server Emojis" if server_only else "Emoji Overview"
+        period_label = f"Last {days} days" if days < 3650 else "All Time"
+
+        data = {
+            'server_icon_url': self._icon_url(guild),
+            'server_name': guild.name,
+            'filter_label': filter_label,
+            'period_label': period_label,
+            'donut_gradient': donut_gradient,
+            'total_uses': f"{total_uses:,}",
+            'legend_html': legend_html,
+            'emoji_list_html': emoji_list_html,
+            'page_num': page,
+            'total_pages': total_pages,
+        }
+        buf = await self.card_gen.render('tracker_emoji_card', data, width=580)
+        if buf:
+            return discord.File(buf, filename="emoji_overview.png")
+        return None
+
+    async def gen_leaderboard(self, guild, days):
+        cutoff = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp())
+
+        # Message leaderboard
+        msg_rows = await self.db.fetch_all(
+            "SELECT user_id, count(*) as c FROM message_logs WHERE guild_id = ? AND timestamp > ? GROUP BY user_id ORDER BY c DESC LIMIT 10",
+            (guild.id, cutoff)
+        )
+        max_msgs = msg_rows[0][1] if msg_rows else 1
+        msg_lb_html = ""
+        for i, r in enumerate(msg_rows):
+            u = guild.get_member(r[0])
+            name = u.display_name if u else "Unknown"
+            if len(name) > 16:
+                name = name[:14] + ".."
+            avatar_url = str(u.display_avatar.url) if u else NO_ICON
+            rank_class = ['gold', 'silver', 'bronze'][i] if i < 3 else 'normal'
+            top_class = f' top-{i+1}' if i < 3 else ''
+            bar_pct = max(int((r[1] / max_msgs) * 100), 3) if max_msgs > 0 else 3
+            msg_lb_html += f'''<div class="lb-item{top_class}">
+                <span class="lb-rank {rank_class}">#{i+1}</span>
+                <img class="lb-avatar" src="{avatar_url}" alt="">
+                <span class="lb-name">{name}</span>
+                <div class="lb-bar-wrap"><div class="lb-bar msg" style="width:{bar_pct}%"></div></div>
+                <span class="lb-value">{r[1]:,}</span>
+            </div>\n'''
+        if not msg_lb_html:
+            msg_lb_html = '<div class="no-data">No message data yet</div>'
+
+        # Voice leaderboard (merge DB + in-progress sessions)
+        voice_rows_raw = await self.db.fetch_all(
+            "SELECT user_id, sum(duration) as total FROM voice_sessions WHERE guild_id = ? AND start_time > ? GROUP BY user_id ORDER BY total DESC",
+            (guild.id, cutoff)
+        )
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        voice_totals = {r[0]: r[1] for r in voice_rows_raw}
+        for (uid, gid), (join_ts, cid) in self._voice_join_times.items():
+            if gid == guild.id and join_ts > cutoff:
+                voice_totals[uid] = voice_totals.get(uid, 0) + (now_ts - join_ts)
+        voice_sorted = sorted(voice_totals.items(), key=lambda x: x[1], reverse=True)[:10]
+        max_voice = voice_sorted[0][1] if voice_sorted else 1
+        voice_lb_html = ""
+        for i, (uid, total) in enumerate(voice_sorted):
+            u = guild.get_member(uid)
+            name = u.display_name if u else "Unknown"
+            if len(name) > 16:
+                name = name[:14] + ".."
+            avatar_url = str(u.display_avatar.url) if u else NO_ICON
+            rank_class = ['gold', 'silver', 'bronze'][i] if i < 3 else 'normal'
+            top_class = f' top-{i+1}' if i < 3 else ''
+            bar_pct = max(int((total / max_voice) * 100), 3) if max_voice > 0 else 3
+            voice_lb_html += f'''<div class="lb-item{top_class}">
+                <span class="lb-rank {rank_class}">#{i+1}</span>
+                <img class="lb-avatar" src="{avatar_url}" alt="">
+                <span class="lb-name">{name}</span>
+                <div class="lb-bar-wrap"><div class="lb-bar voice" style="width:{bar_pct}%"></div></div>
+                <span class="lb-value">{self._fmt_voice(total)}</span>
+            </div>\n'''
+        if not voice_lb_html:
+            voice_lb_html = '<div class="no-data">No voice data yet</div>'
+
+        period_label = f"Last {days} days" if days < 3650 else "All Time"
+
+        data = {
+            'server_icon_url': self._icon_url(guild),
+            'server_name': guild.name,
+            'period_label': period_label,
+            'msg_leaderboard_html': msg_lb_html,
+            'voice_leaderboard_html': voice_lb_html,
+        }
+        buf = await self.card_gen.render('tracker_leaderboard_card', data, width=700)
+        if buf:
+            return discord.File(buf, filename="leaderboard.png")
+        return None
+
+    async def gen_comparison(self, guild, user1, user2, days):
+        cutoff = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp())
+        now_dt = datetime.now(timezone.utc)
+
+        async def _user_stats(uid):
+            msg_row = await self.db.fetch_one("SELECT count(*) FROM message_logs WHERE guild_id = ? AND user_id = ? AND timestamp > ?", (guild.id, uid, cutoff))
+            msgs = msg_row[0] or 0
+            voice_row = await self.db.fetch_one("SELECT coalesce(sum(duration), 0) FROM voice_sessions WHERE guild_id = ? AND user_id = ? AND start_time > ?", (guild.id, uid, cutoff))
+            voice_secs = voice_row[0] or 0
+            # Include in-progress voice session
+            active = self._voice_join_times.get((uid, guild.id))
+            if active and active[0] > cutoff:
+                voice_secs += int(now_dt.timestamp()) - active[0]
+            rank_row = await self.db.fetch_one("SELECT rank FROM (SELECT user_id, ROW_NUMBER() OVER (ORDER BY count(*) DESC) as rank FROM message_logs WHERE guild_id = ? AND timestamp > ? GROUP BY user_id) WHERE user_id = ?", (guild.id, cutoff, uid))
+            rank = rank_row[0] if rank_row else None
+            react_row = await self.db.fetch_one("SELECT count(*) FROM reaction_logs WHERE guild_id = ? AND target_message_author_id = ? AND timestamp > ?", (guild.id, uid, cutoff))
+            reacts = react_row[0] or 0
+            daily_rows = await self.db.fetch_all("SELECT date(timestamp, 'unixepoch') as day, count(*) as msgs FROM message_logs WHERE guild_id = ? AND user_id = ? AND timestamp > ? GROUP BY day ORDER BY day", (guild.id, uid, cutoff))
+            daily = self._fill_daily(daily_rows, days)
+            ch_rows = await self.db.fetch_all("SELECT channel_id, count(*) as c FROM message_logs WHERE guild_id = ? AND user_id = ? AND timestamp > ? GROUP BY channel_id ORDER BY c DESC LIMIT 4", (guild.id, uid, cutoff))
+            return {'msgs': msgs, 'voice_secs': voice_secs, 'rank': rank, 'reacts': reacts, 'daily': daily, 'channels': ch_rows}
+
+        s1 = await _user_stats(user1.id)
+        s2 = await _user_stats(user2.id)
+
+        # Build stat rows
+        stat_defs = [
+            ("Messages", f"{s1['msgs']:,}", f"{s2['msgs']:,}", s1['msgs'] > s2['msgs'], s1['msgs'] < s2['msgs']),
+            ("Voice Time", self._fmt_voice(s1['voice_secs']), self._fmt_voice(s2['voice_secs']), s1['voice_secs'] > s2['voice_secs'], s1['voice_secs'] < s2['voice_secs']),
+            ("Msg Rank", f"#{s1['rank']}" if s1['rank'] else "N/A", f"#{s2['rank']}" if s2['rank'] else "N/A", (s1['rank'] or 999) < (s2['rank'] or 999), (s2['rank'] or 999) < (s1['rank'] or 999)),
+            ("Reactions Received", f"{s1['reacts']:,}", f"{s2['reacts']:,}", s1['reacts'] > s2['reacts'], s1['reacts'] < s2['reacts']),
+        ]
+        stats_rows_html = ""
+        for label, v1, v2, w1, w2 in stat_defs:
+            c1 = ' winner' if w1 else ''
+            c2 = ' winner' if w2 else ''
+            stats_rows_html += f'''<div class="stat-row">
+                <div class="stat-cell left"><div class="stat-value{c1}">{v1}</div></div>
+                <div class="stat-cell center"><div class="stat-label">{label}</div><div class="stat-divider"></div></div>
+                <div class="stat-cell right"><div class="stat-value{c2}">{v2}</div></div>
+            </div>\n'''
+
+        # Chart lines — normalize both to same max for fair visual comparison
+        chart_w = max(days * 15, 100)
+        shared_max = max(max((d[1] for d in s1['daily']), default=0), max((d[1] for d in s2['daily']), default=0))
+        line_1 = self._build_svg_line(s1['daily'], key_idx=1, svg_width=chart_w, svg_height=100, forced_max=shared_max)
+        line_2 = self._build_svg_line(s2['daily'], key_idx=1, svg_width=chart_w, svg_height=100, forced_max=shared_max)
+
+        chart_date_start = (now_dt - timedelta(days=days - 1)).strftime('%-m/%-d')
+        chart_date_end = now_dt.strftime('%-m/%-d')
+
+        # Channel lists
+        def _build_ch_html(ch_rows):
+            html = ""
+            for r in ch_rows:
+                ch = self.get_channel_safe(guild, r[0])
+                name = ch.name if ch else "deleted"
+                if len(name) > 16:
+                    name = name[:14] + ".."
+                html += f'<div class="ch-item"><span class="ch-hash">#</span><span class="ch-name">{name}</span><span class="ch-count">{r[1]:,}</span></div>\n'
+            return html or '<div style="color:#6d6f78;font-size:13px;">No data</div>'
+
+        n1 = user1.display_name
+        n2 = user2.display_name
+        period_label = f"Last {days} days" if days < 3650 else "All Time"
+
+        data = {
+            'period_label': period_label,
+            'avatar_1': str(user1.display_avatar.url),
+            'name_1': n1[:16] if len(n1) > 16 else n1,
+            'tag_1': str(user1),
+            'avatar_2': str(user2.display_avatar.url),
+            'name_2': n2[:16] if len(n2) > 16 else n2,
+            'tag_2': str(user2),
+            'stats_rows_html': stats_rows_html,
+            'chart_width': chart_w,
+            'line_1_points': line_1,
+            'line_2_points': line_2,
+            'chart_date_start': chart_date_start,
+            'chart_date_end': chart_date_end,
+            'channels_1_html': _build_ch_html(s1['channels']),
+            'channels_2_html': _build_ch_html(s2['channels']),
+        }
+        buf = await self.card_gen.render('tracker_compare_card', data, width=700)
+        if buf:
+            return discord.File(buf, filename="compare.png")
+        return None
+
+    async def gen_channel_comparison(self, guild, ch1, ch2, days):
+        cutoff = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp())
+        now_dt = datetime.now(timezone.utc)
+
+        async def _ch_stats(cid):
+            msg_row = await self.db.fetch_one("SELECT count(*) FROM message_logs WHERE guild_id = ? AND channel_id = ? AND timestamp > ?", (guild.id, cid, cutoff))
+            msgs = msg_row[0] or 0
+            contrib_row = await self.db.fetch_one("SELECT count(distinct user_id) FROM message_logs WHERE guild_id = ? AND channel_id = ? AND timestamp > ?", (guild.id, cid, cutoff))
+            contribs = contrib_row[0] or 0
+            avg_day = round(msgs / max(days, 1), 1)
+            daily_rows = await self.db.fetch_all("SELECT date(timestamp, 'unixepoch') as day, count(*) as msgs FROM message_logs WHERE guild_id = ? AND channel_id = ? AND timestamp > ? GROUP BY day ORDER BY day", (guild.id, cid, cutoff))
+            daily = self._fill_daily(daily_rows, days)
+            top_rows = await self.db.fetch_all("SELECT user_id, count(*) as c FROM message_logs WHERE guild_id = ? AND channel_id = ? AND timestamp > ? GROUP BY user_id ORDER BY c DESC LIMIT 4", (guild.id, cid, cutoff))
+            return {'msgs': msgs, 'contribs': contribs, 'avg_day': avg_day, 'daily': daily, 'top': top_rows}
+
+        s1 = await _ch_stats(ch1.id)
+        s2 = await _ch_stats(ch2.id)
+
+        stat_defs = [
+            ("Messages", f"{s1['msgs']:,}", f"{s2['msgs']:,}", s1['msgs'] > s2['msgs'], s1['msgs'] < s2['msgs']),
+            ("Contributors", f"{s1['contribs']:,}", f"{s2['contribs']:,}", s1['contribs'] > s2['contribs'], s1['contribs'] < s2['contribs']),
+            ("Avg/Day", f"{s1['avg_day']}", f"{s2['avg_day']}", s1['avg_day'] > s2['avg_day'], s1['avg_day'] < s2['avg_day']),
+        ]
+        stats_rows_html = ""
+        for label, v1, v2, w1, w2 in stat_defs:
+            c1 = ' winner' if w1 else ''
+            c2 = ' winner' if w2 else ''
+            stats_rows_html += f'''<div class="stat-row">
+                <div class="stat-cell left"><div class="stat-value{c1}">{v1}</div></div>
+                <div class="stat-cell center"><div class="stat-label">{label}</div><div class="stat-divider"></div></div>
+                <div class="stat-cell right"><div class="stat-value{c2}">{v2}</div></div>
+            </div>\n'''
+
+        chart_w = max(days * 15, 100)
+        shared_max = max(max((d[1] for d in s1['daily']), default=0), max((d[1] for d in s2['daily']), default=0))
+        line_1 = self._build_svg_line(s1['daily'], key_idx=1, svg_width=chart_w, svg_height=100, forced_max=shared_max)
+        line_2 = self._build_svg_line(s2['daily'], key_idx=1, svg_width=chart_w, svg_height=100, forced_max=shared_max)
+
+        chart_date_start = (now_dt - timedelta(days=days - 1)).strftime('%-m/%-d')
+        chart_date_end = now_dt.strftime('%-m/%-d')
+
+        def _build_contrib_html(top_rows):
+            html = ""
+            for i, r in enumerate(top_rows):
+                u = guild.get_member(r[0])
+                name = u.display_name if u else "Unknown"
+                if len(name) > 16:
+                    name = name[:14] + ".."
+                html += f'<div class="contrib-item"><span class="contrib-rank">#{i+1}</span><span class="contrib-name">{name}</span><span class="contrib-count">{r[1]:,}</span></div>\n'
+            return html or '<div style="color:#6d6f78;font-size:13px;">No data</div>'
+
+        def _ch_type(ch):
+            if isinstance(ch, discord.Thread):
+                return "Thread"
+            if isinstance(ch, discord.VoiceChannel):
+                return "Voice Channel"
+            return "Text Channel"
+
+        n1 = ch1.name if len(ch1.name) <= 20 else ch1.name[:18] + ".."
+        n2 = ch2.name if len(ch2.name) <= 20 else ch2.name[:18] + ".."
+        period_label = f"Last {days} days" if days < 3650 else "All Time"
+
+        data = {
+            'period_label': period_label,
+            'name_1': n1, 'type_1': _ch_type(ch1),
+            'name_2': n2, 'type_2': _ch_type(ch2),
+            'stats_rows_html': stats_rows_html,
+            'chart_width': chart_w,
+            'line_1_points': line_1, 'line_2_points': line_2,
+            'chart_date_start': chart_date_start, 'chart_date_end': chart_date_end,
+            'contribs_1_html': _build_contrib_html(s1['top']),
+            'contribs_2_html': _build_contrib_html(s2['top']),
+        }
+        buf = await self.card_gen.render('tracker_ch_compare_card', data, width=700)
+        if buf:
+            return discord.File(buf, filename="ch_compare.png")
+        return None
+
+    # --- COMMAND ---
 
     @app_commands.command(name="tracker", description="Open the Analytics Dashboard.")
     async def tracker_cmd(self, interaction: discord.Interaction):
-        if not self.bot.is_bot_admin(interaction.user):
-            return await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True)
         await interaction.response.defer()
-        img = await self.gen_server_overview(interaction.guild, 7)
+        img = await self.gen_server_overview(interaction.guild, 14)
         view = DashboardView(self, interaction.guild, interaction.user.id)
-        await interaction.followup.send(file=img, view=view)
-
-    @app_commands.command(name="inactivity_panel", description="Open the Inactivity Settings panel.")
-    async def inactivity_panel_cmd(self, interaction: discord.Interaction):
-        if not self.bot.is_bot_admin(interaction.user):
-            return await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True)
-        await interaction.response.defer()
-        view = InactivityPanelView(self, interaction.guild)
-        embed = await view.build_embed()
-        await interaction.followup.send(embed=embed, view=view)
-
-    @app_commands.command(name="repair_alerts", description="Delete and resend old inactivity alert embeds with working buttons.")
-    async def repair_alerts_cmd(self, interaction: discord.Interaction):
-        if not self.bot.is_bot_admin(interaction.user):
-            return await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True)
-        await interaction.response.defer(ephemeral=True)
-        row = await self.db.fetch_one("SELECT log_channel_id FROM inactivity_config WHERE guild_id = ?", (interaction.guild.id,))
-        if not row or not row['log_channel_id']:
-            return await interaction.followup.send("No log channel configured.", ephemeral=True)
-        log_channel = interaction.guild.get_channel(row['log_channel_id'])
-        if not log_channel:
-            return await interaction.followup.send("Log channel not found.", ephemeral=True)
-
-        to_repair = []
-        async for message in log_channel.history(limit=500):
-            if message.author.id != self.bot.user.id:
-                continue
-            if not message.embeds:
-                continue
-            embed = message.embeds[0]
-            if embed.title not in ("Inactivity Alert", "VIP Inactivity Alert", "TEST: Inactivity Alert"):
-                continue
-            user_id = None
-            for source in [message.content or "", embed.description or ""]:
-                match = re.search(r'<@!?(\d+)>', source)
-                if match:
-                    user_id = int(match.group(1))
-                    break
-            if not user_id:
-                for field in embed.fields:
-                    if field.name == "User ID":
-                        try: user_id = int(field.value)
-                        except: pass
-            if not user_id:
-                continue
-            to_repair.append((message, embed, user_id))
-
-        repaired = 0
-        for message, embed, user_id in to_repair:
-            status_row = await self.db.fetch_one("SELECT status FROM user_inactivity_status WHERE guild_id = ? AND user_id = ?", (interaction.guild.id, user_id))
-            if status_row and status_row['status'] in ('snoozed', 'forgotten', 'kicked'):
-                view = _make_alert_view(user_id, "decided", status_row['status'])
-            else:
-                view = _make_alert_view(user_id, "initial")
-            try:
-                await message.delete()
-                await log_channel.send(content=f"<@{user_id}>", embed=embed, view=view)
-                repaired += 1
-                await asyncio.sleep(1.5)
-            except Exception as e:
-                logger.warning(f"[RepairAlerts] Failed to repair message {message.id}: {e}")
-
-        await interaction.followup.send(f"Repaired **{repaired}** alert(s).", ephemeral=True)
-
-    @commands.Cog.listener()
-    async def on_interaction(self, interaction: discord.Interaction):
-        """Handle all persistent inactivity alert button presses."""
-        if interaction.type != discord.InteractionType.component:
-            return
-        custom_id = interaction.data.get("custom_id", "")
-        if not custom_id.startswith("inactivity:"):
-            return
-        parts = custom_id.split(":")
-        if len(parts) != 3:
-            return
-        action, user_id_str = parts[1], parts[2]
-        try:
-            user_id = int(user_id_str)
-        except ValueError:
-            return
-
-        # Admin check
-        if not self.bot.is_bot_admin(interaction.user):
-            return await interaction.response.send_message("❌ Only administrators can use these controls.", ephemeral=True)
-
-        embed = interaction.message.embeds[0] if interaction.message.embeds else None
-        if not embed:
-            return
-
-        # --- KICK (shows confirmation first) ---
-        if action == "kick":
-            view = _make_alert_view(user_id, "confirm_kick")
-            return await interaction.response.edit_message(view=view)
-
-        # --- CONFIRM KICK ---
-        if action == "confirmkick":
-            member = interaction.guild.get_member(user_id)
-            if member:
-                try:
-                    await member.kick(reason="Inactivity Monitor Auto-Kick")
-                    self.dm_queue.put_nowait((user_id, interaction.guild.name))
-                except Exception as e:
-                    return await interaction.response.send_message(f"❌ Failed to kick: {e}", ephemeral=True)
-            await self.db.execute("INSERT OR REPLACE INTO user_inactivity_status (guild_id, user_id, status, snooze_until) VALUES (?, ?, 'kicked', 0)", (interaction.guild.id, user_id))
-            updated = _stamp_embed_decision(embed, "kicked", interaction.user)
-            view = _make_alert_view(user_id, "decided", "kicked")
-            return await interaction.response.edit_message(embed=updated, view=view)
-
-        # --- DON'T KICK (cancel confirmation, back to initial) ---
-        if action == "nokick":
-            # Check if there's already a decision (came from gear) or fresh alert
-            status_row = await self.db.fetch_one("SELECT status FROM user_inactivity_status WHERE guild_id = ? AND user_id = ?", (interaction.guild.id, user_id))
-            if status_row and status_row['status'] in ('snoozed', 'forgotten'):
-                view = _make_alert_view(user_id, "decided", status_row['status'])
-            else:
-                view = _make_alert_view(user_id, "initial")
-            return await interaction.response.edit_message(view=view)
-
-        # --- SNOOZE ---
-        if action == "snooze":
-            row = await self.db.fetch_one("SELECT period_days FROM inactivity_config WHERE guild_id = ?", (interaction.guild.id,))
-            days = row['period_days'] if row else 30
-            snooze_until = int((datetime.now(timezone.utc) + timedelta(days=days)).timestamp())
-            await self.db.execute("INSERT OR REPLACE INTO user_inactivity_status (guild_id, user_id, status, snooze_until) VALUES (?, ?, 'snoozed', ?)", (interaction.guild.id, user_id, snooze_until))
-            updated = _stamp_embed_decision(embed, "snoozed", interaction.user, extra=f"reset for {days} days")
-            view = _make_alert_view(user_id, "decided", "snoozed")
-            return await interaction.response.edit_message(embed=updated, view=view)
-
-        # --- FORGET ---
-        if action == "forget":
-            await self.db.execute("INSERT OR REPLACE INTO user_inactivity_status (guild_id, user_id, status, snooze_until) VALUES (?, ?, 'forgotten', 0)", (interaction.guild.id, user_id))
-            updated = _stamp_embed_decision(embed, "forgotten", interaction.user)
-            view = _make_alert_view(user_id, "decided", "forgotten")
-            return await interaction.response.edit_message(embed=updated, view=view)
-
-        # --- GEAR (expand options) ---
-        if action == "gear":
-            status_row = await self.db.fetch_one("SELECT status FROM user_inactivity_status WHERE guild_id = ? AND user_id = ?", (interaction.guild.id, user_id))
-            current = status_row['status'] if status_row else "alerted"
-            view = _make_alert_view(user_id, "gear", current)
-            return await interaction.response.edit_message(view=view)
-
-        # --- CANCEL (back to decided state with gear) ---
-        if action == "cancel":
-            status_row = await self.db.fetch_one("SELECT status FROM user_inactivity_status WHERE guild_id = ? AND user_id = ?", (interaction.guild.id, user_id))
-            current = status_row['status'] if status_row else "alerted"
-            view = _make_alert_view(user_id, "decided", current)
-            return await interaction.response.edit_message(view=view)
+        if img:
+            await interaction.followup.send(file=img, view=view)
+        else:
+            await interaction.followup.send("Failed to generate stats card. Playwright may not be available.", ephemeral=True)
 
     # --- LISTENERS ---
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if not message.guild or message.author.bot: return
+        if not message.guild or message.author.bot:
+            return
         ts = int(message.created_at.timestamp())
+
+        # Calculate reply latency if this is a reply
+        reply_latency = None
+        if message.reference and message.reference.resolved and isinstance(message.reference.resolved, discord.Message):
+            delta = (message.created_at - message.reference.resolved.created_at).total_seconds()
+            reply_latency = int(delta) if delta > 0 else None
+
         async with self.db.transaction() as conn:
-            await conn.execute("INSERT INTO message_logs (user_id, channel_id, guild_id, timestamp, has_attachment, is_reply, length) VALUES (?, ?, ?, ?, ?, ?, ?)", (message.author.id, message.channel.id, message.guild.id, ts, bool(message.attachments), message.reference is not None, len(message.content)))
+            await conn.execute(
+                "INSERT INTO message_logs (user_id, channel_id, guild_id, timestamp, has_attachment, is_reply, reply_latency, length) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (message.author.id, message.channel.id, message.guild.id, ts, bool(message.attachments), message.reference is not None, reply_latency, len(message.content))
+            )
+            # Social interactions (mentions)
             if message.mentions:
                 for mention in message.mentions:
                     if not mention.bot and mention.id != message.author.id:
-                        await conn.execute("INSERT INTO social_interactions (user_id, target_user_id, guild_id, channel_id, timestamp, interaction_type) VALUES (?, ?, ?, ?, ?, ?)", (message.author.id, mention.id, message.guild.id, message.channel.id, ts, "mention"))
+                        await conn.execute(
+                            "INSERT INTO social_interactions (user_id, target_user_id, guild_id, channel_id, timestamp, interaction_type) VALUES (?, ?, ?, ?, ?, ?)",
+                            (message.author.id, mention.id, message.guild.id, message.channel.id, ts, "mention")
+                        )
+            # Custom emoji tracking
             custom_emojis = re.findall(r'<a?:([\w-]+):(\d+)>', message.content)
             for name, eid in custom_emojis:
-                await conn.execute("INSERT INTO emoji_logs (guild_id, user_id, emoji_id, emoji_name, timestamp, usage_type) VALUES (?, ?, ?, ?, ?, ?)", (message.guild.id, message.author.id, int(eid), name, ts, "text"))
+                await conn.execute(
+                    "INSERT INTO emoji_logs (guild_id, user_id, emoji_id, emoji_name, timestamp, usage_type) VALUES (?, ?, ?, ?, ?, ?)",
+                    (message.guild.id, message.author.id, int(eid), name, ts, "text")
+                )
 
     @commands.Cog.listener()
     async def on_reaction_add(self, reaction, user):
-        if not reaction.message.guild or user.bot: return
+        if not reaction.message.guild or user.bot:
+            return
         ts = int(datetime.now(timezone.utc).timestamp())
-        if isinstance(reaction.emoji, discord.Emoji):
-             async with self.db.transaction() as conn:
-                 await conn.execute("INSERT INTO emoji_logs (guild_id, user_id, emoji_id, emoji_name, timestamp, usage_type) VALUES (?, ?, ?, ?, ?, ?)", (reaction.message.guild.id, user.id, reaction.emoji.id, reaction.emoji.name, ts, "reaction"))
+        guild_id = reaction.message.guild.id
+        author_id = reaction.message.author.id
+
+        # Log ALL reactions in reaction_logs for social impact tracking
+        emoji_name = str(reaction.emoji) if isinstance(reaction.emoji, str) else reaction.emoji.name
+        await self.db.execute(
+            "INSERT INTO reaction_logs (user_id, target_message_author_id, guild_id, emoji_name, timestamp) VALUES (?, ?, ?, ?, ?)",
+            (user.id, author_id, guild_id, emoji_name, ts)
+        )
+
+        # Log custom emojis in emoji_logs for emoji overview
+        if isinstance(reaction.emoji, (discord.Emoji, discord.PartialEmoji)) and reaction.emoji.id:
+            await self.db.execute(
+                "INSERT INTO emoji_logs (guild_id, user_id, emoji_id, emoji_name, timestamp, usage_type) VALUES (?, ?, ?, ?, ?, ?)",
+                (guild_id, user.id, reaction.emoji.id, reaction.emoji.name, ts, "reaction")
+            )
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+        if member.bot or not member.guild:
+            return
+        key = (member.id, member.guild.id)
+        now = int(datetime.now(timezone.utc).timestamp())
+
+        # Left or moved from a channel — end that session
+        if before.channel and (not after.channel or before.channel.id != after.channel.id):
+            prev = self._voice_join_times.pop(key, None)
+            if prev:
+                join_ts, channel_id = prev
+                duration = now - join_ts
+                if duration > 5:
+                    await self.db.execute(
+                        "INSERT INTO voice_sessions (user_id, channel_id, guild_id, start_time, end_time, duration) VALUES (?,?,?,?,?,?)",
+                        (member.id, channel_id, member.guild.id, join_ts, now, duration)
+                    )
+                    logger.info(f"Voice session saved: user={member.id} dur={duration}s ({duration//60}m) ch={channel_id}")
+            else:
+                # User left VC but we had no join record — they were in VC before bot started and weren't reseeded, or a restart lost it
+                logger.warning(f"Voice leave with no join record: user={member.id} ch={before.channel.id}")
+
+        # Joined or moved to a channel — start new session
+        if after.channel and (not before.channel or before.channel.id != after.channel.id):
+            self._voice_join_times[key] = (now, after.channel.id)
+            logger.info(f"Voice join tracked: user={member.id} ch={after.channel.id}")
+
+    @commands.Cog.listener()
+    async def on_member_join(self, member: discord.Member):
+        if member.bot:
+            return
+        ts = int(datetime.now(timezone.utc).timestamp())
+        await self.db.execute(
+            "INSERT INTO member_events (user_id, guild_id, event_type, timestamp) VALUES (?,?,?,?)",
+            (member.id, member.guild.id, 'join', ts)
+        )
+
+    @commands.Cog.listener()
+    async def on_member_remove(self, member: discord.Member):
+        if member.bot:
+            return
+        ts = int(datetime.now(timezone.utc).timestamp())
+        await self.db.execute(
+            "INSERT INTO member_events (user_id, guild_id, event_type, timestamp) VALUES (?,?,?,?)",
+            (member.id, member.guild.id, 'leave', ts)
+        )
+
+    # --- TASKS ---
 
     @tasks.loop(hours=24)
     async def data_retention_task(self):
-        cutoff = int((datetime.now(timezone.utc) - timedelta(days=DATA_RETENTION_DAYS)).timestamp())
-        await self.db.prune_old_data(cutoff)
+        try:
+            cutoff = int((datetime.now(timezone.utc) - timedelta(days=DATA_RETENTION_DAYS)).timestamp())
+            await self.db.prune_old_data(cutoff)
+        except Exception as e:
+            await self.bot.error_reporter.report("Tracker", f"data_retention_task: {e}")
 
-    @tasks.loop(hours=24)
-    async def check_inactivity_task(self):
-        await self.bot.wait_until_ready()
-        logger.info("Inactivity check task started.")
-        for guild in self.bot.guilds:
-            try:
-                row = await self.db.fetch_one("SELECT * FROM inactivity_config WHERE guild_id = ?", (guild.id,))
-                if not row or not row['log_channel_id']:
-                    logger.info(f"[Inactivity] Guild '{guild.name}': no config, skipping.")
+    @tasks.loop(minutes=5)
+    async def voice_checkpoint_task(self):
+        """Periodically save active voice sessions to DB so data survives crashes."""
+        try:
+            now = int(datetime.now(timezone.utc).timestamp())
+            saved = 0
+            for (uid, gid), (join_ts, cid) in list(self._voice_join_times.items()):
+                duration = now - join_ts
+                if duration < 30:
                     continue
-                log_channel = guild.get_channel(row['log_channel_id'])
-                if not log_channel:
-                    logger.warning(f"[Inactivity] Guild '{guild.name}': log channel {row['log_channel_id']} not found.")
-                    continue
-                highlight_role = guild.get_role(row['highlight_role_id']) if row['highlight_role_id'] else None
-                cutoff_ts = int((datetime.now(timezone.utc) - timedelta(days=row['period_days'])).timestamp())
-                status_rows = await self.db.fetch_all("SELECT user_id, status, snooze_until FROM user_inactivity_status WHERE guild_id = ?", (guild.id,))
-                statuses = {r['user_id']: {'status': r['status'], 'snooze_until': r['snooze_until']} for r in status_rows}
-                count_rows = await self.db.fetch_all("SELECT user_id, count(*) as c FROM message_logs WHERE guild_id = ? AND timestamp > ? GROUP BY user_id", (guild.id, cutoff_ts))
-                msg_counts = {r['user_id']: r['c'] for r in count_rows}
-                updates_to_clear = []
-                alerts_to_send = []
-                logger.info(f"[Inactivity] Guild '{guild.name}': checking {len(guild.members)} members (threshold={row['msg_threshold']}, period={row['period_days']}d).")
-                skip_too_new = skip_threshold = skip_status = 0
-                for member in guild.members:
-                    if member.bot: continue
-                    if not member.joined_at: continue
-                    count = msg_counts.get(member.id, 0)
-                    if count >= row['msg_threshold']:
-                        if member.id in statuses and statuses[member.id]['status'] in ('alerted', 'snoozed'):
-                            updates_to_clear.append(member.id)
-                        skip_threshold += 1
-                        continue
-                    join_ts = int(member.joined_at.timestamp())
-                    if join_ts > cutoff_ts:
-                        skip_too_new += 1
-                        continue
-                    status_info = statuses.get(member.id)
-                    if status_info:
-                        if status_info['status'] in ('forgotten', 'kicked'):
-                            skip_status += 1
-                            continue
-                        if status_info['status'] == 'snoozed' and datetime.now(timezone.utc).timestamp() < status_info['snooze_until']:
-                            skip_status += 1
-                            continue
-                        if status_info['status'] == 'alerted':
-                            skip_status += 1
-                            continue
-                    alerts_to_send.append((member, count))
-                logger.info(f"[Inactivity] Guild '{guild.name}': skipped {skip_threshold} (met threshold), {skip_too_new} (joined too recently), {skip_status} (status).")
-                if updates_to_clear:
-                    async with self.db.transaction() as conn:
-                        for uid in updates_to_clear:
-                            await conn.execute("DELETE FROM user_inactivity_status WHERE guild_id = ? AND user_id = ?", (guild.id, uid))
-                logger.info(f"[Inactivity] Guild '{guild.name}': {len(alerts_to_send)} alerts to send, {len(updates_to_clear)} statuses to clear.")
-                for member, count in alerts_to_send:
-                    color = discord.Color.red() if (highlight_role and highlight_role in member.roles) else discord.Color.orange()
-                    title = "VIP Inactivity Alert" if (highlight_role and highlight_role in member.roles) else "Inactivity Alert"
-                    embed = discord.Embed(title=title, description=f"**{count}** messages in the last **{row['period_days']}** days (Threshold: {row['msg_threshold']})", color=color)
-                    embed.set_author(name=f"{member.display_name} ({member.name})", icon_url=member.display_avatar.url)
-                    embed.set_thumbnail(url=member.display_avatar.url)
-                    embed.add_field(name="Joined", value=member.joined_at.strftime("%Y-%m-%d"), inline=True)
-                    embed.add_field(name="User ID", value=str(member.id), inline=True)
-                    await log_channel.send(content=member.mention, embed=embed, view=_make_alert_view(member.id, "initial"))
-                    await self.db.execute("INSERT OR REPLACE INTO user_inactivity_status (guild_id, user_id, status, snooze_until) VALUES (?, ?, 'alerted', 0)", (guild.id, member.id))
-                    await asyncio.sleep(2)
-            except Exception as e:
-                logger.exception(f"[Inactivity] Guild '{guild.name}' check failed: {e}")
-            await asyncio.sleep(1)
+                # Write a session up to now, then reset the join time to now
+                await self.db.execute(
+                    "INSERT INTO voice_sessions (user_id, channel_id, guild_id, start_time, end_time, duration) VALUES (?,?,?,?,?,?)",
+                    (uid, cid, gid, join_ts, now, duration)
+                )
+                self._voice_join_times[(uid, gid)] = (now, cid)
+                saved += 1
+            if saved:
+                logger.info(f"Voice checkpoint: saved {saved} active sessions.")
+        except Exception as e:
+            await self.bot.error_reporter.report("Tracker", f"voice_checkpoint_task: {e}")
+
 
 async def setup(bot):
     await bot.add_cog(UserTracker(bot))
-
-

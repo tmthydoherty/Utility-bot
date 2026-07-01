@@ -1,0 +1,71 @@
+{
+    "guild_settings": {
+        "1145811316364292246": {
+            "enabled": false,
+            "channel_id": null,
+            "post_time": "12:00",
+            "timezone": "America/Chicago",
+            "reveal_stages": 3,
+            "reveal_interval_hours": 4,
+            "fuzzy_threshold": 80,
+            "guesses_per_stage": 3,
+            "active_game": null
+        },
+        "1378533495286268078": {
+            "enabled": false,
+            "channel_id": null,
+            "post_time": "12:00",
+            "timezone": "America/Chicago",
+            "reveal_stages": 3,
+            "reveal_interval_hours": 4,
+            "fuzzy_threshold": 80,
+            "guesses_per_stage": 3,
+            "active_game": null
+        },
+        "1431565435010289778": {
+            "enabled": false,
+            "channel_id": 1484394129927438428,
+            "post_time": "12:00",
+            "timezone": "America/Chicago",
+            "reveal_stages": 5,
+            "reveal_interval_hours": 1,
+            "fuzzy_threshold": 80,
+            "guesses_per_stage": 3,
+            "active_game": null,
+            "last_posted_date": "2026-06-21",
+            "reveal_interval_mins": 30,
+            "pending_thread_cleanup": [
+                {
+                    "thread_id": 1517937091915546766,
+                    "delete_after": "2026-06-22T14:04:06.273680-05:00"
+                },
+                {
+                    "thread_id": 1518299528254455890,
+                    "delete_after": "2026-06-23T14:04:20.865307-05:00"
+                }
+            ]
+        },
+        "1444936379414089905": {
+            "enabled": false,
+            "channel_id": null,
+            "post_time": "12:00",
+            "timezone": "America/Chicago",
+            "reveal_stages": 3,
+            "reveal_interval_hours": 4,
+            "fuzzy_threshold": 80,
+            "guesses_per_stage": 3,
+            "active_game": null
+        },
+        "1490565175202283673": {
+            "enabled": false,
+            "channel_id": null,
+            "post_time": "12:00",
+            "timezone": "America/Chicago",
+            "reveal_stages": 3,
+            "reveal_interval_hours": 4,
+            "fuzzy_threshold": 80,
+            "guesses_per_stage": 3,
+            "active_game": null
+        }
+    }
+}

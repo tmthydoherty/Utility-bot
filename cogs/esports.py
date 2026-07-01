@@ -69,8 +69,9 @@ class GeminiMapClient:
     API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
     def __init__(self, api_key: Optional[str] = None):
-        self.api_key = api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-        self._semaphore = asyncio.Semaphore(2)
+        self.api_key = api_key or os.environ.get("GEMINI_API_KEY_ESPORTS") or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        self._semaphore = asyncio.Semaphore(1)
+        self._rate_limited_until: float = 0.0  # monotonic time
         if self.api_key:
             logger.info(f"GeminiMapClient: initialized with {self.MODEL_NAME} (REST API)")
         else:
@@ -165,6 +166,16 @@ class GeminiMapClient:
 
     async def _call_gemini(self, prompt: str, use_grounding: bool = True) -> str:
         """Call Gemini API via REST with optional Google Search grounding."""
+        import time as _time
+
+        # If we're in a rate-limit cooldown, skip immediately so the esports
+        # background loop doesn't keep burning retries against a dry quota.
+        now = _time.monotonic()
+        if now < self._rate_limited_until:
+            remaining = int(self._rate_limited_until - now)
+            logger.debug(f"GeminiMapClient: skipping call, rate-limited for {remaining}s more")
+            return ""
+
         url = f"{self.API_BASE}/models/{self.MODEL_NAME}:generateContent"
 
         body = {
@@ -182,6 +193,14 @@ class GeminiMapClient:
                     async with session.post(
                         url, json=body, params={"key": self.api_key}
                     ) as resp:
+                        if resp.status == 429:
+                            # Back off for 5 minutes so scoreboard OCR gets
+                            # priority on the shared free-tier quota.
+                            self._rate_limited_until = _time.monotonic() + 300
+                            logger.warning(
+                                "GeminiMapClient: 429 rate limited — backing off 5 min"
+                            )
+                            return ""
                         if resp.status != 200:
                             error_text = await resp.text()
                             logger.warning(
@@ -771,56 +790,21 @@ class Esports(commands.Cog):
         self.max_cache_size = MAX_IMAGE_CACHE_SIZE
         
         self.emoji_map_cache = {}
-        self.error_queue = []
         self.gemini_maps = GeminiMapClient()
 
         ensure_data_file()
         self._update_emoji_cache()
         self.match_tracker.start()
         self.map_data_fetcher.start()
-        self.error_reporting_loop.start()
-        self.upcoming_embed_bumper.start()
         self.result_lifecycle_checker.start()
 
     def cog_unload(self):
         self.match_tracker.cancel()
         self.map_data_fetcher.cancel()
-        self.error_reporting_loop.cancel()
-        self.upcoming_embed_bumper.cancel()
         self.result_lifecycle_checker.cancel()
 
-    # --- ERROR HANDLING ---
     async def report_error(self, error_msg):
-        timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        tb_str = traceback.format_exc()
-        full_msg = f"[{timestamp}] {error_msg}\n{tb_str}"
-        self.error_queue.append(full_msg)
-        if len(self.error_queue) > 50: self.error_queue = self.error_queue[-50:]
-        logger.error(f"Queued error: {error_msg}")
-
-    @tasks.loop(hours=2)
-    async def error_reporting_loop(self):
-        if not self.error_queue: return
-        try:
-            if not self.bot.owner_id:
-                app_info = await self.bot.application_info()
-                self.bot.owner_id = app_info.team.owner_id if app_info.team else app_info.owner.id
-
-            owner = await self.bot.fetch_user(self.bot.owner_id)
-            if owner:
-                report_content = "\n".join(self.error_queue)
-                self.error_queue.clear()
-                if len(report_content) > 1900:
-                    file_data = BytesIO(report_content.encode('utf-8'))
-                    await owner.send("⚠️ **eSports Cog Error Report**", file=discord.File(file_data, filename="error_report.txt"))
-                else:
-                    await owner.send(f"⚠️ **eSports Cog Error Report**\n```\n{report_content}\n```")
-        except Exception as e:
-            logger.error(f"Failed error report loop: {e}")
-
-    @error_reporting_loop.before_loop
-    async def before_error_loop(self):
-        await self.bot.wait_until_ready()
+        await self.bot.error_reporter.report("Esports", error_msg)
 
     # --- DATA & API HELPERS ---
     def _update_emoji_cache(self):
@@ -1257,6 +1241,11 @@ class Esports(commands.Cog):
         return ":globe_with_meridians:"
 
     @staticmethod
+    def get_team_short_name(team_data):
+        """Return short display name for a team (acronym if available, else full name)."""
+        return team_data.get('acronym') or team_data.get('name', '???')
+
+    @staticmethod
     def _liquipedia_team_url(team_name: str, game_slug: str) -> str:
         """Build a Liquipedia URL for a team page."""
         wiki = LIQUIPEDIA_GAME_SLUGS.get(game_slug, 'commons')
@@ -1606,17 +1595,33 @@ class Esports(commands.Cog):
 
     async def generate_banner(self, url_a, url_b, url_game, game_slug, is_result=False):
         t_ph = GAME_PLACEHOLDERS.get(game_slug, DEFAULT_GAME_ICON_FALLBACK)
-        
+
+        # Download the three primary images in parallel
         async with aiohttp.ClientSession() as session:
-            imgs = await asyncio.gather(
-                self.download_image(session, url_a or t_ph),
-                self.download_image(session, url_b or t_ph),
-                self.download_image(session, url_game or DEFAULT_GAME_ICON_FALLBACK),
-                self.download_image(session, t_ph),
-                self.download_image(session, DEFAULT_GAME_ICON_FALLBACK)
+            img_a, img_b, img_g = await asyncio.gather(
+                self.download_image(session, url_a),
+                self.download_image(session, url_b),
+                self.download_image(session, url_game),
             )
-        
-        return await asyncio.to_thread(stitch_images, imgs[0], imgs[1], imgs[2], imgs[3], imgs[4], is_result, game_slug)
+            # Only download placeholders if a primary image failed
+            img_team_p = None
+            img_game_p = None
+            needs = []
+            if not img_a or not img_b:
+                needs.append(('team', t_ph))
+            if not img_g:
+                needs.append(('game', DEFAULT_GAME_ICON_FALLBACK))
+            if needs:
+                results = await asyncio.gather(
+                    *(self.download_image(session, url) for _, url in needs)
+                )
+                for (kind, _), result in zip(needs, results):
+                    if kind == 'team':
+                        img_team_p = result
+                    else:
+                        img_game_p = result
+
+        return await asyncio.to_thread(stitch_images, img_a, img_b, img_g, img_team_p, img_game_p, is_result, game_slug)
 
     async def manage_team_emojis(self, interaction: discord.Interaction) -> int:
         data = load_data_sync()
@@ -1923,29 +1928,21 @@ class Esports(commands.Cog):
         live_data: list of (mid, match_details, team_a, team_b) — running matches
         """
         desc_parts = []
+        game_short = GAME_SHORT_NAMES.get(game_slug, game_slug)
 
-        if upcoming_data:
-            desc_parts.append("### 🔔 Upcoming")
-            desc_parts.append("")
-            for mid, m, t_a, t_b in upcoming_data:
-                f_a = self.get_team_display(t_a)
-                f_b = self.get_team_display(t_b)
-                link_a = self._liquipedia_team_url(t_a['name'], game_slug)
-                link_b = self._liquipedia_team_url(t_b['name'], game_slug)
-                dt = safe_parse_datetime(m.get('begin_at'))
-                time_str = f"(<t:{int(dt.timestamp())}:R>)" if dt else ""
-                desc_parts.append(f"> **{f_a} [{t_a['name']}]({link_a}) vs.**")
-                desc_parts.append(f"> **{f_b} [{t_b['name']}]({link_b})**")
-                if time_str:
-                    desc_parts.append(f"> {time_str}")
-                desc_parts.append("")
-
+        # Title reflects the primary state
         if live_data:
-            desc_parts.append("### 🔴 Live")
-            desc_parts.append("")
+            title = f"🔴 {game_short} Live"
+        else:
+            title = f"🔔 {game_short} Upcoming"
+
+        # Live matches first (most important)
+        if live_data:
             for mid, m, t_a, t_b in live_data:
                 f_a = self.get_team_display(t_a)
                 f_b = self.get_team_display(t_b)
+                n_a = self.get_team_short_name(t_a)
+                n_b = self.get_team_short_name(t_b)
                 link_a = self._liquipedia_team_url(t_a['name'], game_slug)
                 link_b = self._liquipedia_team_url(t_b['name'], game_slug)
                 results = m.get('results', [])
@@ -1954,13 +1951,31 @@ class Esports(commands.Cog):
                     for r in results:
                         if r.get('team_id') == t_a.get('id'): s_a = r.get('score', 0)
                         elif r.get('team_id') == t_b.get('id'): s_b = r.get('score', 0)
-                desc_parts.append(f"> **{f_a} [{t_a['name']}]({link_a})({s_a}) vs.**")
-                desc_parts.append(f"> **{f_b} [{t_b['name']}]({link_b})({s_b})**")
+                desc_parts.append(f"> **{f_a} [{n_a}]({link_a})({s_a}) vs.{f_b} [{n_b}]({link_b})({s_b})**")
+                desc_parts.append("")
+
+        # Upcoming matches
+        if upcoming_data:
+            if live_data:
+                desc_parts.append("### 🔔 Upcoming")
+                desc_parts.append("")
+            for mid, m, t_a, t_b in upcoming_data:
+                f_a = self.get_team_display(t_a)
+                f_b = self.get_team_display(t_b)
+                n_a = self.get_team_short_name(t_a)
+                n_b = self.get_team_short_name(t_b)
+                link_a = self._liquipedia_team_url(t_a['name'], game_slug)
+                link_b = self._liquipedia_team_url(t_b['name'], game_slug)
+                dt = safe_parse_datetime(m.get('begin_at'))
+                time_str = f"(<t:{int(dt.timestamp())}:R>)" if dt else ""
+                desc_parts.append(f"> **{f_a} [{n_a}]({link_a}) vs.{f_b} [{n_b}]({link_b})**")
+                if time_str:
+                    desc_parts.append(f"> {time_str}")
                 desc_parts.append("")
 
         color = discord.Color.red() if live_data else discord.Color.green()
         embed = discord.Embed(description="\n".join(desc_parts), color=color)
-        embed.set_author(name=GAMES.get(game_slug, game_slug), icon_url=GAME_LOGOS.get(game_slug))
+        embed.set_author(name=title, icon_url=GAME_LOGOS.get(game_slug))
         embed.set_thumbnail(url=GAME_LOGOS.get(game_slug))
 
         # Event info — common prefix across all matches
@@ -2031,18 +2046,21 @@ class Esports(commands.Cog):
 
             f_a = self.get_team_display(t_a)
             f_b = self.get_team_display(t_b)
+            n_a = self.get_team_short_name(t_a)
+            n_b = self.get_team_short_name(t_b)
 
             num_games = md.get('number_of_games')
             bo_str = f" (Bo{num_games})" if num_games else ""
 
-            desc_parts.append(f"> {f_a} {t_a['name']} vs. {f_b} {t_b['name']}{bo_str}")
+            desc_parts.append(f"> {f_a} {n_a} vs. {f_b} {n_b}{bo_str}")
 
             # Spoilered winner announcement
             winner = t_a if w_idx == 0 else t_b
+            w_short = self.get_team_short_name(winner)
             w_score = s_a if w_idx == 0 else s_b
             l_score = s_b if w_idx == 0 else s_a
-            verb = "Win" if winner['name'].rstrip().endswith('s') else "Wins"
-            desc_parts.append(f"> ||{winner['name']} {verb} {w_score}-{l_score}!||")
+            verb = "Win" if w_short.rstrip().endswith('s') else "Wins"
+            desc_parts.append(f"> ||{w_short} {verb} {w_score}-{l_score}!||")
 
             # Correct predictors
             if is_test:
@@ -2108,7 +2126,7 @@ class Esports(commands.Cog):
         bo_str = f" (Bo{num_games})" if num_games else ""
 
         desc = [f"{f_a} [{team_a_data['name']}]({link_a}) vs. {f_b} [{team_b_data['name']}]({link_b}){bo_str}", ""]
-        
+
         event_parts = []
         if match_details.get('league', {}).get('name'):
             event_parts.append(match_details['league']['name'])
@@ -2120,11 +2138,11 @@ class Esports(commands.Cog):
             tourn_name = match_details['tournament']['name']
             if not event_parts or tourn_name.lower() not in event_parts[-1].lower():
                 event_parts.append(tourn_name)
-        
+
         if event_parts:
             desc.append(f"**{' - '.join(event_parts)}**")
         desc.append(timestamp)
-        
+
         embed = discord.Embed(title=title, description="\n".join(desc), color=color)
         if stream_url: embed.url = stream_url
         embed.set_author(name=game_name, icon_url=GAME_LOGOS.get(game_slug))
@@ -2167,9 +2185,12 @@ class Esports(commands.Cog):
         winner_score, loser_score = (s1, s2) if winner_idx == 0 else (s2, s1)
         f_a = self.get_team_display(team_a)
         f_b = self.get_team_display(team_b)
+        n_a = self.get_team_short_name(team_a)
+        n_b = self.get_team_short_name(team_b)
+        w_short = self.get_team_short_name(winner)
         desc = [
-            f"||**{winner['name']} Wins {winner_score}-{loser_score}!**||", "",
-            f"{f_a} {team_a['name']} vs. {f_b} {team_b['name']}{bo_str}"
+            f"||**{w_short} Wins {winner_score}-{loser_score}!**||", "",
+            f"{f_a} {n_a} vs. {f_b} {n_b}{bo_str}"
         ]
         embed.description = "\n".join(desc)
 
@@ -2218,11 +2239,14 @@ class Esports(commands.Cog):
         winner_score, loser_score = (s1, s2) if winner_idx == 0 else (s2, s1)
         f_a = self.get_team_display(team_a)
         f_b = self.get_team_display(team_b)
+        n_a = self.get_team_short_name(team_a)
+        n_b = self.get_team_short_name(team_b)
+        w_short = self.get_team_short_name(winner)
         link_a = self._liquipedia_team_url(team_a['name'], game_slug)
         link_b = self._liquipedia_team_url(team_b['name'], game_slug)
         desc = [
-            f"**{winner['name']} Wins {winner_score}-{loser_score}!**", "",
-            f"{f_a} [{team_a['name']}]({link_a}) vs. {f_b} [{team_b['name']}]({link_b}){bo_str}", ""
+            f"**{w_short} Wins {winner_score}-{loser_score}!**", "",
+            f"{f_a} [{n_a}]({link_a}) vs. {f_b} [{n_b}]({link_b}){bo_str}", ""
         ]
 
         event_parts = []
@@ -2435,7 +2459,7 @@ class Esports(commands.Cog):
             try:
                 old_msg = await channel.fetch_message(existing_msg_id)
                 await old_msg.delete()
-            except (discord.NotFound, discord.HTTPException):
+            except (discord.NotFound, discord.HTTPException, aiohttp.ClientError):
                 pass
 
         result_msg = None
@@ -2443,9 +2467,9 @@ class Esports(commands.Cog):
             try:
                 result_msg = await channel.send(embed=embed, view=view)
                 break
-            except (asyncio.TimeoutError, TimeoutError) as e:
+            except (asyncio.TimeoutError, TimeoutError, aiohttp.ClientError) as e:
                 if attempt < 2:
-                    logger.warning(f"Timeout sending result for match {match_id}, retrying ({attempt+1}/3): {e}")
+                    logger.warning(f"Network error sending result for match {match_id}, retrying ({attempt+1}/3): {e}")
                     await asyncio.sleep(5)
                 else:
                     logger.error(f"Failed to send result for match {match_id} after 3 attempts: {e}")
@@ -2473,6 +2497,10 @@ class Esports(commands.Cog):
                     "match_added_at": match_added_at
                 }
                 save_data_sync(data)
+
+            # Immediately clean up any orphaned result embeds for this game
+            # (catches cases where the old message delete failed above)
+            await self._cleanup_game_result_orphans(channel, game_slug, result_msg.id)
 
     # --- CORE LOOPS ---
     def embeds_are_different(self, old, new):
@@ -2508,10 +2536,10 @@ class Esports(commands.Cog):
                     msg = await channel.fetch_message(msg_id)
                     try:
                         await msg.unpin()
-                    except discord.HTTPException:
+                    except (discord.HTTPException, aiohttp.ClientError):
                         pass
                     await msg.delete()
-                except (discord.NotFound, discord.HTTPException):
+                except (discord.NotFound, discord.HTTPException, aiohttp.ClientError):
                     pass
                 async with self.data_lock:
                     d = load_data_sync()
@@ -2594,10 +2622,10 @@ class Esports(commands.Cog):
                     old_msg = await channel.fetch_message(msg_id)
                     try:
                         await old_msg.unpin()
-                    except discord.HTTPException:
+                    except (discord.HTTPException, aiohttp.ClientError):
                         pass
                     await old_msg.delete()
-                except (discord.NotFound, discord.HTTPException):
+                except (discord.NotFound, discord.HTTPException, aiohttp.ClientError):
                     pass
                 async with self.data_lock:
                     d = load_data_sync()
@@ -3050,7 +3078,7 @@ class Esports(commands.Cog):
                         try:
                             await msg.edit(embed=new_embed, view=view)
                             edits += 1
-                        except (discord.HTTPException, asyncio.TimeoutError) as e:
+                        except (discord.HTTPException, asyncio.TimeoutError, aiohttp.ClientError) as e:
                             logger.debug(f"Migration edit failed for msg {msg.id}: {e}")
                         await asyncio.sleep(1)  # rate limit
 
@@ -3123,8 +3151,97 @@ class Esports(commands.Cog):
         for mid, mh in data.get("match_history", {}).items():
             self.bot.add_view(ResultDetailsView(mid, mh.get('game_slug', '')))
 
-        # Cleanup orphaned upcoming embeds (caused by past HTTPException fallthrough)
+        # Cleanup orphaned embeds (caused by past HTTPException fallthrough / crashes)
         await self._cleanup_orphaned_upcoming_embeds(data)
+        await self._cleanup_orphaned_result_embeds(data)
+
+        # One-time retro update: rebuild all active embeds with short team names
+        if not data.get("_migrated_short_names_v3"):
+            await self._retro_short_name_migration(data)
+
+    async def _retro_short_name_migration(self, data):
+        """One-time migration: rebuild all active upcoming/result embeds with short team names."""
+        try:
+            chan_id = data.get("channel_id")
+            if not chan_id:
+                return
+            channel = self.bot.get_channel(chan_id)
+            if not channel:
+                return
+
+            edits = 0
+
+            # 1. Rebuild all unified upcoming embeds
+            for game_slug in list(data.get("upcoming_messages", {}).keys()):
+                try:
+                    await self._rebuild_upcoming_embed(channel, game_slug)
+                    edits += 1
+                except Exception as e:
+                    logger.error(f"Short name migration: upcoming rebuild failed for {game_slug}: {e}")
+                await asyncio.sleep(1)
+
+            # 2. Rebuild daily result embeds from match_history data
+            history = data.get("match_history", {})
+            for game_slug, daily_info in data.get("daily_result_messages", {}).items():
+                msg_id = daily_info.get("message_id")
+                if not msg_id:
+                    continue
+                match_ids = daily_info.get("match_ids", [])
+                showcased_ids = daily_info.get("showcased_ids", match_ids[:3])
+
+                results_list = []
+                for mid in showcased_ids:
+                    mh = history.get(mid)
+                    if not mh or len(mh.get("teams", [])) < 2:
+                        continue
+                    extra = mh.get("match_details_extra", {})
+                    md = {
+                        "results": mh.get("results", []),
+                        "number_of_games": extra.get("number_of_games"),
+                    }
+                    results_list.append({
+                        "match_details": md,
+                        "team_a": {"name": mh["teams"][0]["name"], "id": mh["teams"][0].get("id"),
+                                   "flag": mh["teams"][0].get("flag"), "acronym": mh["teams"][0].get("acronym")},
+                        "team_b": {"name": mh["teams"][1]["name"], "id": mh["teams"][1].get("id"),
+                                   "flag": mh["teams"][1].get("flag"), "acronym": mh["teams"][1].get("acronym")},
+                        "winner_idx": mh.get("winner_idx", 0),
+                        "votes": mh.get("votes", {})
+                    })
+
+                if not results_list:
+                    continue
+
+                try:
+                    new_embed = await self.build_unified_result_embed(channel, game_slug, results_list)
+                    msg = await channel.fetch_message(msg_id)
+
+                    # Preserve the existing view (dropdown)
+                    result_date = daily_info.get("date", "")
+                    dropdown_options = []
+                    for mid in match_ids:
+                        mh = history.get(mid)
+                        if mh and len(mh.get("teams", [])) >= 2:
+                            teams = mh["teams"]
+                            dropdown_options.append((mid, f"{teams[0]['name']} vs {teams[1]['name']}"))
+                    view = UnifiedResultView(game_slug, result_date, match_options=dropdown_options)
+
+                    await msg.edit(embed=new_embed, view=view)
+                    edits += 1
+                except (discord.NotFound, discord.HTTPException, aiohttp.ClientError) as e:
+                    logger.debug(f"Short name migration: result embed {game_slug} edit failed: {e}")
+                await asyncio.sleep(1)
+
+            # Mark migration complete
+            async with self.data_lock:
+                d = load_data_sync()
+                d["_migrated_short_names_v3"] = True
+                save_data_sync(d)
+
+            logger.info(f"Short name migration complete: {edits} embeds updated")
+
+        except Exception as e:
+            logger.error(f"Short name migration failed: {e}")
 
     async def _cleanup_orphaned_upcoming_embeds(self, data):
         """Delete any upcoming-style embeds in the channel that aren't tracked in upcoming_messages.
@@ -3144,9 +3261,6 @@ class Esports(commands.Cog):
             msg_id = info.get("message_id")
             if msg_id:
                 tracked_ids.add(msg_id)
-
-        if not tracked_ids:
-            return
 
         # Scan recent history for bot messages with upcoming-embed characteristics
         try:
@@ -3184,6 +3298,125 @@ class Esports(commands.Cog):
                 logger.info(f"Startup cleanup: deleted {orphans_deleted} orphaned upcoming embed(s)")
         except Exception as e:
             logger.warning(f"Orphan cleanup failed: {e}")
+
+    async def _cleanup_orphaned_result_embeds(self, data=None):
+        """Delete any result-style embeds in the channel that aren't tracked in daily_result_messages.
+
+        Orphans occur when:
+          - The old result message fails to delete (HTTPException / rate limit)
+          - The bot restarts between sending a new message and saving its ID
+          - Any other edge case that leaves an untracked result embed in the channel
+
+        Identifies result embeds by their component custom_ids (result_dropdown_*)
+        or embed author name containing 'RESULTS'.
+        """
+        if data is None:
+            async with self.data_lock:
+                data = load_data_sync()
+
+        chan_id = data.get("channel_id")
+        if not chan_id:
+            return
+        channel = self.bot.get_channel(chan_id)
+        if not channel:
+            return
+
+        # Collect all currently tracked result message IDs
+        tracked_ids = set()
+        for game_slug, info in data.get("daily_result_messages", {}).items():
+            msg_id = info.get("message_id")
+            if msg_id:
+                tracked_ids.add(msg_id)
+
+        # Scan recent history for bot messages with result-embed characteristics
+        try:
+            orphans_deleted = 0
+            async for msg in channel.history(limit=200):
+                if msg.author.id != self.bot.user.id:
+                    continue
+                if msg.id in tracked_ids:
+                    continue
+                if not msg.embeds:
+                    continue
+
+                # Check components for result dropdown custom_id
+                is_result_embed = False
+                for component in (msg.components or []):
+                    for child in getattr(component, 'children', []):
+                        cid = getattr(child, 'custom_id', '') or ''
+                        if cid.startswith('result_dropdown_'):
+                            is_result_embed = True
+                            break
+                    if is_result_embed:
+                        break
+
+                # Also check embed author for "RESULTS" (catches edge cases)
+                if not is_result_embed:
+                    author_name = msg.embeds[0].author.name if msg.embeds[0].author else ""
+                    if "RESULTS" in author_name:
+                        is_result_embed = True
+
+                if is_result_embed:
+                    try:
+                        await msg.delete()
+                        orphans_deleted += 1
+                        logger.info(f"Deleted orphaned result embed: message {msg.id}")
+                    except discord.HTTPException:
+                        pass
+
+            if orphans_deleted:
+                logger.info(f"Result cleanup: deleted {orphans_deleted} orphaned result embed(s)")
+        except Exception as e:
+            logger.warning(f"Result orphan cleanup failed: {e}")
+
+    async def _cleanup_game_result_orphans(self, channel, game_slug: str, keep_msg_id: int):
+        """Quick targeted cleanup: delete any result embeds for a specific game except keep_msg_id.
+
+        Called right after posting a new result to immediately catch any orphans for that game,
+        rather than waiting for the periodic full-channel scan.
+        """
+        try:
+            orphans_deleted = 0
+            async for msg in channel.history(limit=50):
+                if msg.author.id != self.bot.user.id:
+                    continue
+                if msg.id == keep_msg_id:
+                    continue
+                if not msg.embeds:
+                    continue
+
+                # Check if this is a result embed for the same game
+                is_same_game_result = False
+
+                # Check component custom_ids for result_dropdown_{game_slug}_
+                for component in (msg.components or []):
+                    for child in getattr(component, 'children', []):
+                        cid = getattr(child, 'custom_id', '') or ''
+                        if cid.startswith(f'result_dropdown_{game_slug}_'):
+                            is_same_game_result = True
+                            break
+                    if is_same_game_result:
+                        break
+
+                # Also check embed author name
+                if not is_same_game_result and msg.embeds:
+                    author_name = msg.embeds[0].author.name if msg.embeds[0].author else ""
+                    game_name = GAMES.get(game_slug, "").upper()
+                    if game_name and game_name in author_name and "RESULTS" in author_name:
+                        is_same_game_result = True
+
+                if is_same_game_result:
+                    try:
+                        await msg.delete()
+                        orphans_deleted += 1
+                        logger.info(f"Deleted orphaned {game_slug} result embed: message {msg.id}")
+                    except discord.HTTPException:
+                        pass
+
+            if orphans_deleted:
+                logger.info(f"Targeted cleanup for {game_slug}: deleted {orphans_deleted} orphan(s)")
+        except Exception as e:
+            logger.warning(f"Targeted result cleanup for {game_slug} failed: {e}")
 
     @staticmethod
     def _get_retry_interval_seconds(age_seconds: float) -> int:
@@ -3298,79 +3531,6 @@ class Esports(commands.Cog):
     async def before_map_data_fetcher(self):
         await self.bot.wait_until_ready()
 
-    # --- UPCOMING EMBED BUMPER (11 PM LOCAL) ---
-
-    @tasks.loop(time=datetime.time(hour=23, minute=0, tzinfo=zoneinfo.ZoneInfo("America/Chicago")))
-    async def upcoming_embed_bumper(self):
-        """Bump all active upcoming match embeds at 11pm local time.
-
-        Deletes the old embed and resends it so it appears at the bottom of the
-        channel, making sure upcoming matches stay visible even if they get buried.
-        The new embed is re-pinned automatically by _rebuild_upcoming_embed.
-        """
-        try:
-            async with self.data_lock:
-                data = load_data_sync()
-                chan_id = data.get("channel_id")
-                upcoming_messages = data.get("upcoming_messages", {}).copy()
-
-            if not chan_id:
-                return
-            channel = self.bot.get_channel(chan_id)
-            if not channel:
-                return
-
-            bumped = []
-            for game_slug, info in upcoming_messages.items():
-                msg_id = info.get("message_id")
-                if not msg_id:
-                    continue
-
-                # Check if there are active non-test matches for this game
-                has_active = any(
-                    m_info.get('game_slug') == game_slug and not m_info.get('is_test')
-                    for m_info in data.get("active_matches", {}).values()
-                )
-                if not has_active:
-                    continue
-
-                # Delete old message (unpin happens implicitly on delete)
-                try:
-                    old_msg = await channel.fetch_message(msg_id)
-                    try:
-                        await old_msg.unpin()
-                    except discord.HTTPException:
-                        pass
-                    await old_msg.delete()
-                except (discord.NotFound, discord.HTTPException):
-                    pass
-
-                # Clear the stored message_id so rebuild sends a fresh message
-                async with self.data_lock:
-                    d = load_data_sync()
-                    if game_slug in d.get("upcoming_messages", {}):
-                        d["upcoming_messages"][game_slug]["message_id"] = None
-                        save_data_sync(d)
-
-                # Rebuild sends a new embed at the bottom and pins it
-                try:
-                    await self._rebuild_upcoming_embed(channel, game_slug)
-                    bumped.append(game_slug)
-                except Exception as e:
-                    logger.error(f"Upcoming bumper: failed to rebuild for {game_slug}: {e}")
-
-                await asyncio.sleep(1)  # rate limit between games
-
-            if bumped:
-                logger.info(f"Upcoming embed bumper: bumped {', '.join(bumped)}")
-
-        except Exception as e:
-            logger.error(f"Upcoming embed bumper error: {e}")
-
-    @upcoming_embed_bumper.before_loop
-    async def before_upcoming_embed_bumper(self):
-        await self.bot.wait_until_ready()
-
     # --- RESULT LIFECYCLE (18hr per match result) ---
 
     RESULT_LIFETIME_SECONDS = 18 * 3600  # 18 hours
@@ -3411,7 +3571,7 @@ class Esports(commands.Cog):
                     try:
                         old_msg = await channel.fetch_message(msg_id)
                         await old_msg.delete()
-                    except (discord.NotFound, discord.HTTPException):
+                    except (discord.NotFound, discord.HTTPException, aiohttp.ClientError):
                         pass
                     logger.info(f"Result lifecycle: cleaned up legacy result entry for {game_slug}")
                     continue
@@ -3458,7 +3618,7 @@ class Esports(commands.Cog):
                     try:
                         old_msg = await channel.fetch_message(msg_id)
                         await old_msg.delete()
-                    except (discord.NotFound, discord.HTTPException):
+                    except (discord.NotFound, discord.HTTPException, aiohttp.ClientError):
                         pass
                     logger.info(f"Result lifecycle: deleted expired result embed for {game_slug}")
                     continue
@@ -3500,7 +3660,7 @@ class Esports(commands.Cog):
                     try:
                         old_msg = await channel.fetch_message(msg_id)
                         await old_msg.delete()
-                    except (discord.NotFound, discord.HTTPException):
+                    except (discord.NotFound, discord.HTTPException, aiohttp.ClientError):
                         pass
                     logger.info(f"Result lifecycle: deleted result embed for {game_slug} (no valid results)")
                     continue
@@ -3546,6 +3706,9 @@ class Esports(commands.Cog):
 
                 expired_count = len(showcased_ids) - len(remaining)
                 logger.info(f"Result lifecycle: removed {expired_count} expired result(s) for {game_slug}, {len(remaining)} remaining")
+
+            # Cleanup any orphaned result embeds still lingering in the channel
+            await self._cleanup_orphaned_result_embeds()
 
         except Exception as e:
             logger.error(f"Result lifecycle checker error: {e}")
@@ -3960,11 +4123,6 @@ class Esports(commands.Cog):
     @app_commands.default_permissions(administrator=True)
     async def admin_panel(self, interaction: discord.Interaction):
         await interaction.response.send_message(embed=discord.Embed(title="🎮 Admin Panel", color=discord.Color.dark_grey()), view=EsportsAdminView(self), ephemeral=True)
-
-    @app_commands.command(name="esports_leaderboard")
-    async def leaderboard(self, interaction: discord.Interaction):
-        embed = await self.generate_leaderboard_embed(interaction.guild, "valorant")
-        await interaction.response.send_message(embed=embed, view=LeaderboardView(self, interaction.user.id))
 
 async def setup(bot):
     await bot.add_cog(Esports(bot))

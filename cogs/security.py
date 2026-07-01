@@ -23,7 +23,7 @@ FLOOD_MSG_COUNT = 5          # messages in window to trigger
 FLOOD_WINDOW_SECS = 4        # seconds
 DUPLICATE_COUNT = 4           # duplicate messages to trigger
 DUPLICATE_WINDOW_SECS = 10   # seconds
-MASS_MENTION_THRESHOLD = 6   # unique mentions in one message
+MASS_MENTION_THRESHOLD = 10   # unique mentions in one message
 NUKE_CHANNEL_DELETE = 3       # channel deletes in window
 NUKE_ROLE_DELETE = 3          # role deletes in window
 NUKE_MASS_BAN = 5             # bans in window
@@ -289,7 +289,9 @@ class AdminPanelView(ui.View):
         quarantine_role = f"<@&{cfg['quarantine_role_id']}>" if cfg.get("quarantine_role_id") else "*Not set*"
         alert_channel = f"<#{cfg['alert_channel_id']}>" if cfg.get("alert_channel_id") else "*Not set*"
         exempt_channels = ", ".join(f"<#{c}>" for c in cfg.get("exempt_channels", [])) or "*None*"
+        admin_roles = ", ".join(f"<@&{r}>" for r in cfg.get("admin_roles", [])) or "*None*"
         mod_roles = ", ".join(f"<@&{r}>" for r in cfg.get("mod_roles", [])) or "*None*"
+        whitelisted = ", ".join(f"<@{u}>" for u in cfg.get("whitelisted_users", [])) or "*None*"
         mention_exempt = ", ".join(f"<@&{r}>" for r in cfg.get("mention_exempt_roles", [])) or "*None*"
 
         embed = discord.Embed(title="Security Dashboard", color=EMBED_COLOR_INFO)
@@ -299,7 +301,9 @@ class AdminPanelView(ui.View):
         embed.add_field(name="Alert Channel", value=alert_channel, inline=True)
         embed.add_field(name="Quarantine Role", value=quarantine_role, inline=True)
         embed.add_field(name="Exempt Channels", value=exempt_channels, inline=False)
+        embed.add_field(name="Admin Roles (Full Bypass)", value=admin_roles, inline=False)
         embed.add_field(name="Mod Roles (Exempt)", value=mod_roles, inline=False)
+        embed.add_field(name="Whitelisted Users", value=whitelisted, inline=False)
         embed.add_field(name="Mention-Exempt Roles", value=mention_exempt, inline=False)
         embed.add_field(name="Modules", value="\n".join(module_status), inline=False)
         embed.set_footer(text=self.cog.get_footer_text())
@@ -396,7 +400,39 @@ class AdminPanelView(ui.View):
         view.add_item(ch_select)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-    @ui.button(label="Mod Roles (Exempt)", style=discord.ButtonStyle.secondary, row=2)
+    @ui.button(label="Admin Roles (Full Bypass)", style=discord.ButtonStyle.secondary, row=2)
+    async def admin_roles_btn(self, interaction: discord.Interaction, button: ui.Button):
+        embed = discord.Embed(
+            description="Select a role to add/remove from the admin whitelist.\nUsers with these roles bypass **all** security detection, including anti-nuke.",
+            color=EMBED_COLOR_INFO,
+        )
+        view = ui.View(timeout=60)
+        role_select = ui.RoleSelect(
+            placeholder="Toggle admin role whitelist...",
+            custom_id="security_admin_role",
+        )
+
+        async def role_callback(i: discord.Interaction):
+            role_id = int(i.data["values"][0])
+            cfg = self.cog.get_guild_config(i.guild_id)
+            admin_roles = cfg.setdefault("admin_roles", [])
+            if role_id in admin_roles:
+                admin_roles.remove(role_id)
+                msg = f"<@&{role_id}> removed from admin whitelist."
+            else:
+                admin_roles.append(role_id)
+                msg = f"<@&{role_id}> added to admin whitelist."
+            self.cog.save()
+            await i.response.send_message(
+                embed=discord.Embed(description=msg, color=EMBED_COLOR_SUCCESS),
+                ephemeral=True,
+            )
+
+        role_select.callback = role_callback
+        view.add_item(role_select)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    @ui.button(label="Mod Roles (Exempt)", style=discord.ButtonStyle.secondary, row=3)
     async def mod_roles_btn(self, interaction: discord.Interaction, button: ui.Button):
         embed = discord.Embed(
             description="Select a role to add/remove from the exempt mod roles list.\nUsers with these roles bypass all spam detection.",
@@ -428,7 +464,39 @@ class AdminPanelView(ui.View):
         view.add_item(role_select)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-    @ui.button(label="Mention-Exempt Roles", style=discord.ButtonStyle.secondary, row=3)
+    @ui.button(label="Whitelisted Users", style=discord.ButtonStyle.secondary, row=3)
+    async def whitelisted_users_btn(self, interaction: discord.Interaction, button: ui.Button):
+        embed = discord.Embed(
+            description="Select a user to add/remove from the whitelist.\nWhitelisted users bypass basic spam detection (flood, duplicates, mass mentions, invites) but **not** anti-nuke.",
+            color=EMBED_COLOR_INFO,
+        )
+        view = ui.View(timeout=60)
+        user_select = ui.UserSelect(
+            placeholder="Toggle user whitelist...",
+            custom_id="security_whitelist_user",
+        )
+
+        async def user_callback(i: discord.Interaction):
+            user_id = int(i.data["values"][0])
+            cfg = self.cog.get_guild_config(i.guild_id)
+            whitelist = cfg.setdefault("whitelisted_users", [])
+            if user_id in whitelist:
+                whitelist.remove(user_id)
+                msg = f"<@{user_id}> removed from whitelist."
+            else:
+                whitelist.append(user_id)
+                msg = f"<@{user_id}> added to whitelist."
+            self.cog.save()
+            await i.response.send_message(
+                embed=discord.Embed(description=msg, color=EMBED_COLOR_SUCCESS),
+                ephemeral=True,
+            )
+
+        user_select.callback = user_callback
+        view.add_item(user_select)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    @ui.button(label="Mention-Exempt Roles", style=discord.ButtonStyle.secondary, row=4)
     async def mention_exempt_roles_btn(self, interaction: discord.Interaction, button: ui.Button):
         embed = discord.Embed(
             description="Select a role to add/remove from the mention-exempt list.\nUsers with these roles can mass-mention without triggering detection.",
@@ -460,7 +528,7 @@ class AdminPanelView(ui.View):
         view.add_item(role_select)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-    @ui.button(label="Infraction Log", style=discord.ButtonStyle.danger, row=3)
+    @ui.button(label="Infraction Log", style=discord.ButtonStyle.danger, row=4)
     async def infraction_log_btn(self, interaction: discord.Interaction, button: ui.Button):
         infractions = load_infractions()
         guild_infractions = infractions.get(str(interaction.guild_id), {})
@@ -528,7 +596,9 @@ class Security(commands.Cog):
             self.config[gid] = {
                 "alert_channel_id": None,
                 "quarantine_role_id": None,
+                "admin_roles": [],
                 "mod_roles": [],
+                "whitelisted_users": [],
                 "mention_exempt_roles": [],
                 "exempt_channels": [],
                 "enabled_modules": {
@@ -550,15 +620,25 @@ class Security(commands.Cog):
         cfg = self.get_guild_config(guild_id)
         return cfg.get("enabled_modules", {}).get(module, True)
 
+    def has_admin_role(self, member: discord.Member) -> bool:
+        """Check if a member has an admin-whitelisted role (bypasses everything)."""
+        cfg = self.get_guild_config(member.guild.id)
+        admin_roles = cfg.get("admin_roles", [])
+        return any(role.id in admin_roles for role in member.roles)
+
     def is_exempt(self, member: discord.Member, channel_id: int | None = None) -> bool:
         """Check if a member is exempt from spam detection."""
         if member.bot:
+            return True
+        if self.has_admin_role(member):
             return True
         if member.guild_permissions.manage_messages:
             return True
         cfg = self.get_guild_config(member.guild.id)
         mod_roles = cfg.get("mod_roles", [])
         if any(role.id in mod_roles for role in member.roles):
+            return True
+        if member.id in cfg.get("whitelisted_users", []):
             return True
         if channel_id and channel_id in cfg.get("exempt_channels", []):
             return True
@@ -605,8 +685,38 @@ class Security(commands.Cog):
 
     # --- Alert ---
 
+    def resolve_mentions_plain(self, guild: discord.Guild, text: str) -> str:
+        """Resolve Discord mention markup to plain text names."""
+        # Resolve role mentions: <@&ID> -> @RoleName
+        def replace_role(match):
+            role_id = int(match.group(1))
+            role = guild.get_role(role_id)
+            return f"@{role.name}" if role else f"@UnknownRole({role_id})"
+
+        text = re.sub(r"<@&(\d+)>", replace_role, text)
+
+        # Resolve user mentions: <@ID> or <@!ID> -> @Username
+        def replace_user(match):
+            user_id = int(match.group(1))
+            member = guild.get_member(user_id)
+            return f"@{member.display_name}" if member else f"@UnknownUser({user_id})"
+
+        text = re.sub(r"<@!?(\d+)>", replace_user, text)
+
+        # Resolve channel mentions: <#ID> -> #channel-name
+        def replace_channel(match):
+            ch_id = int(match.group(1))
+            ch = guild.get_channel(ch_id)
+            return f"#{ch.name}" if ch else f"#unknown-channel({ch_id})"
+
+        text = re.sub(r"<#(\d+)>", replace_channel, text)
+
+        return text
+
     async def send_alert(self, guild: discord.Guild, member: discord.Member, rule: str,
-                         evidence: str, stored_role_ids: list[int] | None = None):
+                         evidence: str, stored_role_ids: list[int] | None = None,
+                         channel: discord.abc.GuildChannel | None = None,
+                         attachments: list[discord.Attachment] | None = None):
         """Send an alert embed to the mod channel and log the infraction."""
         cfg = self.get_guild_config(guild.id)
         alert_channel_id = cfg.get("alert_channel_id")
@@ -642,14 +752,38 @@ class Security(commands.Cog):
 
         embed = discord.Embed(
             title="Security Alert",
-            description=f"**User:** {member.mention} (`{member.id}`)\n"
+            description=f"**User:** {member.mention} — {member.display_name} ({member.name})\n"
                         f"**Rule Violated:** {rule}\n"
                         f"**Account Created:** {account_age}\n"
                         f"**Joined Server:** {joined_at}",
             color=EMBED_COLOR,
             timestamp=datetime.now(timezone.utc),
         )
-        embed.add_field(name="Evidence", value=f"```\n{evidence[:1000]}\n```", inline=False)
+
+        # Build plain-text evidence with context
+        evidence_parts = []
+        if channel:
+            if isinstance(channel, discord.Thread):
+                evidence_parts.append(f"Channel: #{channel.parent.name if channel.parent else 'unknown'} (thread: {channel.name})")
+            else:
+                evidence_parts.append(f"Channel: #{channel.name}")
+
+        # Resolve mentions in the evidence text to plain names
+        plain_evidence = self.resolve_mentions_plain(guild, evidence)
+
+        # Extract role mentions from the raw evidence to list them explicitly
+        raw_role_mentions = re.findall(r"<@&(\d+)>", evidence)
+        if raw_role_mentions:
+            role_names = []
+            for rid in raw_role_mentions:
+                role = guild.get_role(int(rid))
+                role_names.append(f"@{role.name}" if role else f"@UnknownRole({rid})")
+            evidence_parts.append(f"Roles mentioned: {', '.join(role_names)}")
+
+        evidence_parts.append(f"Message content: {plain_evidence}")
+
+        evidence_display = "\n".join(evidence_parts)
+        embed.add_field(name="Evidence", value=evidence_display[:1024], inline=False)
 
         if stored_role_ids:
             embed.add_field(
@@ -667,6 +801,44 @@ class Security(commands.Cog):
             await alert_channel.send(embed=embed, view=view)
         except discord.Forbidden:
             log.warning(f"Cannot send security alert in guild {guild.id} — missing permissions")
+
+        # Forward any images from the infracting message(s), deduplicated
+        if attachments:
+            # Deduplicate by (filename, size) — same image sent multiple times
+            seen: dict[tuple[str, int], int] = {}  # (filename, size) -> count
+            unique_attachments: list[discord.Attachment] = []
+            for att in attachments:
+                if not (att.content_type and att.content_type.startswith("image/")):
+                    continue
+                key = (att.filename, att.size)
+                if key in seen:
+                    seen[key] += 1
+                else:
+                    seen[key] = 1
+                    unique_attachments.append(att)
+
+            if unique_attachments:
+                image_files = []
+                captions = []
+                for att in unique_attachments:
+                    try:
+                        file = await att.to_file()
+                        image_files.append(file)
+                        count = seen[(att.filename, att.size)]
+                        if count > 1:
+                            captions.append(f"`{att.filename}` (sent {count} times)")
+                        else:
+                            captions.append(f"`{att.filename}`")
+                    except Exception:
+                        pass
+                if image_files:
+                    header = f"**Images from {member.display_name}'s message:**"
+                    if captions:
+                        header += "\n" + "\n".join(captions)
+                    try:
+                        await alert_channel.send(content=header, files=image_files)
+                    except discord.Forbidden:
+                        pass
 
     # --- Modtools Discussion Integration ---
 
@@ -732,6 +904,10 @@ class Security(commands.Cog):
 
     async def handle_violation(self, message: discord.Message, rule: str, evidence: str):
         """Delete the message, quarantine the user, send alert."""
+        # Grab attachments before deleting
+        attachments = list(message.attachments)
+        channel = message.channel
+
         # Delete the offending message
         try:
             await message.delete()
@@ -742,13 +918,15 @@ class Security(commands.Cog):
         stored_roles = await self.quarantine_user(message.author)
 
         # Send alert
-        await self.send_alert(message.guild, message.author, rule, evidence, stored_roles)
+        await self.send_alert(message.guild, message.author, rule, evidence, stored_roles,
+                              channel=channel, attachments=attachments)
 
     async def handle_flood_violation(self, guild: discord.Guild, member: discord.Member,
                                      channel: discord.TextChannel, messages_content: list[str]):
         """Handle flood/duplicate by deleting recent messages, quarantining, alerting."""
         # Bulk delete recent messages from this user in the channel
         now = datetime.now(timezone.utc)
+        deleted = []
 
         def is_recent_by_user(m):
             return m.author.id == member.id and (now - m.created_at).total_seconds() < 30
@@ -761,9 +939,15 @@ class Security(commands.Cog):
         except Exception as e:
             log.warning(f"Purge failed in #{channel.name}: {e}")
 
+        # Collect all attachments from purged messages
+        all_attachments = []
+        for msg in deleted:
+            all_attachments.extend(msg.attachments)
+
         stored_roles = await self.quarantine_user(member)
         evidence = "\n".join(messages_content[:10])
-        await self.send_alert(guild, member, "Message Flood / Duplicate Spam", evidence, stored_roles)
+        await self.send_alert(guild, member, "Message Flood / Duplicate Spam", evidence, stored_roles,
+                              channel=channel, attachments=all_attachments)
 
     # ============================================================
     #  Event Listeners — Spam Detection
@@ -809,7 +993,8 @@ class Security(commands.Cog):
                 strike_count = len(strikes)
                 strikes.clear()
                 stored_roles = await self.quarantine_user(member)
-                await self.send_alert(guild, member, f"Discord Invite Links ({strike_count})", content, stored_roles)
+                await self.send_alert(guild, member, f"Discord Invite Links ({strike_count})", content, stored_roles,
+                                      channel=message.channel, attachments=list(message.attachments))
                 history.clear()
             else:
                 # Warning — auto-deleting message
@@ -907,6 +1092,10 @@ class Security(commands.Cog):
         if not member:
             return
 
+        # Admin-whitelisted roles bypass anti-nuke entirely
+        if self.has_admin_role(member):
+            return
+
         # Anti-nuke: strip ALL roles
         stored_role_ids = await self.quarantine_user(member, strip_roles=True)
 
@@ -937,43 +1126,46 @@ class Security(commands.Cog):
     @tasks.loop(minutes=5)
     async def cleanup_loop(self):
         """Periodically prune stale tracking data to prevent memory bloat."""
-        now = datetime.now(timezone.utc).timestamp()
-        for guild_id in list(self._message_history.keys()):
-            users = self._message_history[guild_id]
-            for user_id in list(users.keys()):
-                users[user_id] = [(t, c) for t, c in users[user_id] if now - t < 30]
-                if not users[user_id]:
-                    del users[user_id]
-            if not users:
-                del self._message_history[guild_id]
+        try:
+            now = datetime.now(timezone.utc).timestamp()
+            for guild_id in list(self._message_history.keys()):
+                users = self._message_history[guild_id]
+                for user_id in list(users.keys()):
+                    users[user_id] = [(t, c) for t, c in users[user_id] if now - t < 30]
+                    if not users[user_id]:
+                        del users[user_id]
+                if not users:
+                    del self._message_history[guild_id]
 
-        for guild_id in list(self._audit_actions.keys()):
-            users = self._audit_actions[guild_id]
-            for user_id in list(users.keys()):
-                users[user_id] = [(t, a) for t, a in users[user_id] if now - t < NUKE_WINDOW_SECS]
-                if not users[user_id]:
-                    del users[user_id]
-            if not users:
-                del self._audit_actions[guild_id]
+            for guild_id in list(self._audit_actions.keys()):
+                users = self._audit_actions[guild_id]
+                for user_id in list(users.keys()):
+                    users[user_id] = [(t, a) for t, a in users[user_id] if now - t < NUKE_WINDOW_SECS]
+                    if not users[user_id]:
+                        del users[user_id]
+                if not users:
+                    del self._audit_actions[guild_id]
 
-        # Prune invite strikes
-        for guild_id in list(self._invite_strikes.keys()):
-            users = self._invite_strikes[guild_id]
-            for user_id in list(users.keys()):
-                users[user_id] = [t for t in users[user_id] if now - t < INVITE_STRIKE_WINDOW]
-                if not users[user_id]:
-                    del users[user_id]
-            if not users:
-                del self._invite_strikes[guild_id]
+            # Prune invite strikes
+            for guild_id in list(self._invite_strikes.keys()):
+                users = self._invite_strikes[guild_id]
+                for user_id in list(users.keys()):
+                    users[user_id] = [t for t in users[user_id] if now - t < INVITE_STRIKE_WINDOW]
+                    if not users[user_id]:
+                        del users[user_id]
+                if not users:
+                    del self._invite_strikes[guild_id]
 
-        # Prune ignore cooldowns
-        for guild_id in list(self._ignore_cooldown.keys()):
-            users = self._ignore_cooldown[guild_id]
-            for uid in list(users.keys()):
-                if now - users[uid] >= 300:
-                    del users[uid]
-            if not users:
-                del self._ignore_cooldown[guild_id]
+            # Prune ignore cooldowns
+            for guild_id in list(self._ignore_cooldown.keys()):
+                users = self._ignore_cooldown[guild_id]
+                for uid in list(users.keys()):
+                    if now - users[uid] >= 300:
+                        del users[uid]
+                if not users:
+                    del self._ignore_cooldown[guild_id]
+        except Exception as e:
+            await self.bot.error_reporter.report("Security", f"cleanup_loop: {e}")
 
     @cleanup_loop.before_loop
     async def before_cleanup(self):

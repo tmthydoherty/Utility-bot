@@ -40,7 +40,7 @@ def _safe_map_path(map_name: str) -> Optional[Path]:
     if not str(filepath).startswith(str(MAPS_ASSETS_DIR.resolve())):
         return None
     return filepath
-AdminAction = Literal["remove_game", "remove_maps", "set_thumbnail", "set_max_votes", "map_stats", "view_maps"]
+AdminAction = Literal["remove_game", "remove_maps", "set_thumbnail", "set_max_votes", "map_stats", "view_maps", "configure_mode_vote", "new_maps_config"]
 
 
 # --- Synchronous Helper Functions for File I/O ---
@@ -90,71 +90,52 @@ class VotingView(discord.ui.View):
         super().__init__(timeout=None)
         self.cog = cog_instance
 
-    async def handle_vote_interaction(self, interaction: discord.Interaction, map_index: int):
-        """
-        Main handler for processing a user's vote. Checks for max votes to conclude.
-        """
-        try:
-            await interaction.response.defer(ephemeral=True)
-
-            channel = interaction.channel
-            if isinstance(channel, (discord.TextChannel, discord.Thread, discord.VoiceChannel)):
-                permissions = channel.permissions_for(interaction.user)
-                if not permissions.send_messages:
-                    return await interaction.followup.send(
-                        "You don't have permission to vote in this channel.",
-                        ephemeral=True
-                    )
-
-            # Updated process_vote returns a bool to indicate if vote should conclude
-            success, message, updated_vote_data, should_conclude = await self.cog.process_vote(interaction, map_index)
-            await interaction.followup.send(message, ephemeral=True)
-            
-            if success and updated_vote_data:
-                if should_conclude:
-                    # Show the final vote count before concluding
-                    await self.cog.update_vote_display(interaction.message, updated_vote_data)
-                    await self.cog.conclude_vote(
-                        guild_id_str=str(interaction.guild_id),
-                        message_id_str=str(interaction.message.id)
-                    )
-                else:
-                    # Just update the display
-                    await self.cog.update_vote_display(interaction.message, updated_vote_data)
-
-        except Exception as e:
-            log_map.error(f"Error in handle_vote_interaction: {e}", exc_info=True)
-            try:
-                await interaction.followup.send("An unexpected error occurred while casting your vote.", ephemeral=True)
-            except discord.HTTPException:
-                pass
-
     @discord.ui.button(label="Map 1", style=discord.ButtonStyle.secondary, custom_id="map_vote_1", row=0)
     async def map_1_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_vote_interaction(interaction, 0)
+        await self.cog._handle_vote_interaction(interaction, 0)
 
     @discord.ui.button(label="Map 2", style=discord.ButtonStyle.secondary, custom_id="map_vote_2", row=0)
     async def map_2_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_vote_interaction(interaction, 1)
+        await self.cog._handle_vote_interaction(interaction, 1)
 
     @discord.ui.button(label="Map 3", style=discord.ButtonStyle.secondary, custom_id="map_vote_3", row=0)
     async def map_3_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.handle_vote_interaction(interaction, 2)
-        
+        await self.cog._handle_vote_interaction(interaction, 2)
+
     @discord.ui.button(label="End Vote", style=discord.ButtonStyle.danger, custom_id="end_vote_early", row=1)
     async def end_vote_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """Allows an admin to end the vote prematurely."""
-        await interaction.response.defer(ephemeral=True)
-        gid_str, msg_id_str = str(interaction.guild_id), str(interaction.message.id)
+        await self.cog._handle_end_vote(interaction)
 
-        # FIX: Check admin permissions first (without needing lock)
-        if not await self.cog.is_map_admin(interaction.user):
-            return await interaction.followup.send("❌ You don't have permission to end this vote.", ephemeral=True)
 
-        # FIX: Verify vote exists inside conclude_vote which uses atomic pop
-        # This prevents race conditions where vote could be concluded between check and call
-        await interaction.followup.send("✅ Ending vote...", ephemeral=True)
-        await self.cog.conclude_vote(guild_id_str=gid_str, message_id_str=msg_id_str, ended_by=interaction.user)
+class ModeVotingView(discord.ui.View):
+    """A persistent view for mode voting polls. Supports 2-5 mode buttons."""
+    def __init__(self, cog_instance: 'MapVote'):
+        super().__init__(timeout=None)
+        self.cog = cog_instance
+
+    @discord.ui.button(label="Mode 1", style=discord.ButtonStyle.secondary, custom_id="mode_vote_1", row=0)
+    async def mode_1(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog._handle_vote_interaction(interaction, 0)
+
+    @discord.ui.button(label="Mode 2", style=discord.ButtonStyle.secondary, custom_id="mode_vote_2", row=0)
+    async def mode_2(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog._handle_vote_interaction(interaction, 1)
+
+    @discord.ui.button(label="Mode 3", style=discord.ButtonStyle.secondary, custom_id="mode_vote_3", row=0)
+    async def mode_3(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog._handle_vote_interaction(interaction, 2)
+
+    @discord.ui.button(label="Mode 4", style=discord.ButtonStyle.secondary, custom_id="mode_vote_4", row=0)
+    async def mode_4(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog._handle_vote_interaction(interaction, 3)
+
+    @discord.ui.button(label="Mode 5", style=discord.ButtonStyle.secondary, custom_id="mode_vote_5", row=0)
+    async def mode_5(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog._handle_vote_interaction(interaction, 4)
+
+    @discord.ui.button(label="End Vote", style=discord.ButtonStyle.danger, custom_id="mode_vote_end", row=1)
+    async def end_vote(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog._handle_end_vote(interaction)
 
 
 # --- Admin Panel Modals & Dynamic Views ---
@@ -236,6 +217,22 @@ class GameSelect(discord.ui.Select):
         elif self.action == "view_maps":
             await self.cog.logic_view_maps(interaction, self.view.game_name)
             self.view.stop()
+        elif self.action == "configure_mode_vote":
+            await interaction.response.defer()
+            async with self.cog.config_lock:
+                self.cog._ensure_latest_game_format(self.view.game_name)
+                game_data = self.cog._get_games_config_sync().get(self.view.game_name, {})
+            view = ModeVoteConfigView(self.cog, self.view.game_name, game_data)
+            embed = view.build_status_embed()
+            await interaction.edit_original_response(content="", embed=embed, view=view)
+        elif self.action == "new_maps_config":
+            await interaction.response.defer()
+            async with self.cog.config_lock:
+                self.cog._ensure_latest_game_format(self.view.game_name)
+                game_data = self.cog._get_games_config_sync().get(self.view.game_name, {})
+            view = NewMapsConfigView(self.cog, self.view.game_name, game_data)
+            embed = view.build_embed()
+            await interaction.edit_original_response(content="", embed=embed, view=view)
 
 class MapSelect(discord.ui.Select):
     def __init__(self, cog: 'MapVote', action: AdminAction, game_name: str, maps: List[str]):
@@ -302,6 +299,290 @@ class MapListView(discord.ui.View):
         self.add_item(MapPreviewSelect(cog, game_name, maps_data))
 
 
+class ModeVoteConfigView(discord.ui.View):
+    """Configure a game as a mode vote game."""
+    def __init__(self, cog: 'MapVote', game_name: str, game_data: dict):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.game_name = game_name
+        self.game_data = game_data
+        self._rebuild()
+
+    def _rebuild(self):
+        self.clear_items()
+        is_mode = self.game_data.get("is_mode_vote", False)
+
+        toggle_btn = discord.ui.Button(
+            label=f"Mode Vote: {'ON' if is_mode else 'OFF'}",
+            style=discord.ButtonStyle.success if is_mode else discord.ButtonStyle.secondary,
+            row=0
+        )
+        toggle_btn.callback = self._toggle
+        self.add_item(toggle_btn)
+
+        if is_mode:
+            parent_btn = discord.ui.Button(label="Set Parent Game", style=discord.ButtonStyle.primary, row=0)
+            parent_btn.callback = self._set_parent
+            self.add_item(parent_btn)
+
+            pool_btn = discord.ui.Button(label="Mode Map Pools", style=discord.ButtonStyle.primary, row=1)
+            pool_btn.callback = self._configure_pools
+            self.add_item(pool_btn)
+
+    def build_status_embed(self) -> discord.Embed:
+        embed = discord.Embed(title=f"Mode Vote Config — {self.game_name}", color=ADMIN_EMBED_COLOR)
+        is_mode = self.game_data.get("is_mode_vote", False)
+        embed.add_field(name="Mode Vote", value="Enabled" if is_mode else "Disabled", inline=True)
+        if is_mode:
+            embed.add_field(name="Parent Game", value=self.game_data.get("parent_game") or "Not set", inline=True)
+            maps = self.game_data.get("maps", {})
+            if maps:
+                lines = []
+                for mode_name, mode_data in maps.items():
+                    pool_type = mode_data.get("map_pool_type", "none") if isinstance(mode_data, dict) else "none"
+                    custom = mode_data.get("custom_maps", []) if isinstance(mode_data, dict) else []
+                    pool_display = pool_type
+                    if pool_type == "custom" and custom:
+                        pool_display = f"custom ({len(custom)} maps)"
+                    lines.append(f"**{mode_name}**: {pool_display}")
+                embed.add_field(name="Mode Pools", value="\n".join(lines), inline=False)
+        return embed
+
+    async def _refresh(self, interaction: discord.Interaction):
+        async with self.cog.config_lock:
+            self.game_data = self.cog._get_games_config_sync().get(self.game_name, {})
+        self._rebuild()
+        await interaction.response.edit_message(embed=self.build_status_embed(), view=self)
+
+    async def _toggle(self, interaction: discord.Interaction):
+        async with self.cog.config_lock:
+            gd = self.cog._get_games_config_sync().setdefault(self.game_name, {})
+            gd["is_mode_vote"] = not gd.get("is_mode_vote", False)
+            await self.cog._save_config()
+        await self._refresh(interaction)
+
+    async def _set_parent(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(ParentGameModal(self.cog, self.game_name, self))
+
+    async def _configure_pools(self, interaction: discord.Interaction):
+        maps = self.game_data.get("maps", {})
+        modes = list(maps.keys())
+        if not modes:
+            return await interaction.response.send_message("No modes (maps) added to this game yet. Add them via 'Add Maps'.", ephemeral=True)
+        view = ModePoolSelectView(self.cog, self.game_name, modes, self)
+        await interaction.response.send_message("Select a mode to configure its map pool:", view=view, ephemeral=True)
+
+
+class ParentGameModal(discord.ui.Modal, title="Set Parent Game"):
+    parent_input = discord.ui.TextInput(
+        label="Parent Game Name",
+        placeholder="e.g., Rivals, Valorant",
+        required=False
+    )
+    def __init__(self, cog: 'MapVote', game_name: str, parent_view: ModeVoteConfigView):
+        super().__init__()
+        self.cog = cog
+        self.game_name = game_name
+        self.parent_view = parent_view
+    async def on_submit(self, interaction: discord.Interaction):
+        value = self.parent_input.value.strip() or None
+        async with self.cog.config_lock:
+            gd = self.cog._get_games_config_sync().setdefault(self.game_name, {})
+            gd["parent_game"] = value
+            await self.cog._save_config()
+        await self.parent_view._refresh(interaction)
+
+
+class ModePoolSelectView(discord.ui.View):
+    """Select a mode to configure its map pool type."""
+    def __init__(self, cog: 'MapVote', game_name: str, modes: List[str], parent_view: ModeVoteConfigView):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.game_name = game_name
+        self.parent_view = parent_view
+        options = [discord.SelectOption(label=m) for m in modes[:25]]
+        select = discord.ui.Select(placeholder="Select a mode...", options=options)
+        select.callback = self._on_select
+        self.add_item(select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        mode_name = interaction.data["values"][0]
+        view = ModePoolTypeView(self.cog, self.game_name, mode_name, self.parent_view)
+        await interaction.response.edit_message(content=f"Configure map pool for **{mode_name}**:", view=view)
+
+
+class ModePoolTypeView(discord.ui.View):
+    """Choose map pool type for a specific mode."""
+    def __init__(self, cog: 'MapVote', game_name: str, mode_name: str, parent_view: ModeVoteConfigView):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.game_name = game_name
+        self.mode_name = mode_name
+        self.parent_view = parent_view
+
+    @discord.ui.button(label="No Map (game decides)", style=discord.ButtonStyle.secondary, row=0)
+    async def no_map(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._set_pool(interaction, "none", [])
+
+    @discord.ui.button(label="Standard Pool (from parent)", style=discord.ButtonStyle.primary, row=0)
+    async def standard(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._set_pool(interaction, "standard", [])
+
+    @discord.ui.button(label="Custom Pool", style=discord.ButtonStyle.success, row=0)
+    async def custom(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(
+            CustomMapsModal(self.cog, self.game_name, self.mode_name, self.parent_view)
+        )
+
+    async def _set_pool(self, interaction: discord.Interaction, pool_type: str, custom_maps: list):
+        async with self.cog.config_lock:
+            gd = self.cog._get_games_config_sync().setdefault(self.game_name, {})
+            maps = gd.setdefault("maps", {})
+            mode_data = maps.setdefault(self.mode_name, {})
+            if not isinstance(mode_data, dict):
+                maps[self.mode_name] = {"url": None}
+                mode_data = maps[self.mode_name]
+            mode_data["map_pool_type"] = pool_type
+            mode_data["custom_maps"] = custom_maps
+            await self.cog._save_config()
+        await self.parent_view._refresh(interaction)
+
+
+class CustomMapsModal(discord.ui.Modal, title="Set Custom Map Pool"):
+    maps_input = discord.ui.TextInput(
+        label="Maps (comma-separated)",
+        style=discord.TextStyle.paragraph,
+        placeholder="Map1, Map2, Map3",
+        required=True
+    )
+    def __init__(self, cog: 'MapVote', game_name: str, mode_name: str, parent_view: ModeVoteConfigView):
+        super().__init__()
+        self.cog = cog
+        self.game_name = game_name
+        self.mode_name = mode_name
+        self.parent_view = parent_view
+    async def on_submit(self, interaction: discord.Interaction):
+        custom_maps = [m.strip() for m in self.maps_input.value.split(",") if m.strip()]
+        if not custom_maps:
+            return await interaction.response.send_message("No valid map names provided.", ephemeral=True)
+        async with self.cog.config_lock:
+            gd = self.cog._get_games_config_sync().setdefault(self.game_name, {})
+            maps = gd.setdefault("maps", {})
+            mode_data = maps.setdefault(self.mode_name, {})
+            if not isinstance(mode_data, dict):
+                maps[self.mode_name] = {"url": None}
+                mode_data = maps[self.mode_name]
+            mode_data["map_pool_type"] = "custom"
+            mode_data["custom_maps"] = custom_maps
+            await self.cog._save_config()
+        await self.parent_view._refresh(interaction)
+
+
+class NewMapsConfigView(discord.ui.View):
+    """Configure which maps are flagged as new (guaranteed in every vote)."""
+    def __init__(self, cog: 'MapVote', game_name: str, game_data: dict):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.game_name = game_name
+        self.game_data = game_data
+
+    def build_embed(self) -> discord.Embed:
+        embed = discord.Embed(title=f"New Maps Config — {self.game_name}", color=ADMIN_EMBED_COLOR)
+        duration = self.game_data.get("new_map_duration_days", 7)
+        embed.add_field(name="Duration", value=f"{duration} days", inline=True)
+        new_maps = self.game_data.get("new_maps", {})
+        now = datetime.now(timezone.utc)
+        if new_maps:
+            lines = []
+            for map_name, expiry_iso in sorted(new_maps.items()):
+                expiry = datetime.fromisoformat(expiry_iso)
+                if (expiry - now).total_seconds() > 0:
+                    lines.append(f"🆕 **{map_name}** — expires <t:{int(expiry.timestamp())}:R>")
+                else:
+                    lines.append(f"⏰ **{map_name}** — expired")
+            embed.add_field(name="New Maps", value="\n".join(lines), inline=False)
+        else:
+            embed.add_field(name="New Maps", value="None", inline=False)
+        embed.set_footer(text="New maps are guaranteed a spot in every vote until they expire.")
+        return embed
+
+    async def _refresh(self, interaction: discord.Interaction):
+        async with self.cog.config_lock:
+            self.game_data = self.cog._get_games_config_sync().get(self.game_name, {})
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="Set Duration", style=discord.ButtonStyle.primary, row=0)
+    async def set_duration(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(NewMapDurationModal(self.cog, self.game_name, self))
+
+    @discord.ui.button(label="Add New Maps", style=discord.ButtonStyle.success, row=0)
+    async def add_new_maps(self, interaction: discord.Interaction, button: discord.ui.Button):
+        all_maps = list(self.game_data.get("maps", {}).keys())
+        current_new = set(self.game_data.get("new_maps", {}).keys())
+        available = [m for m in sorted(all_maps) if m not in current_new]
+        if not available:
+            return await interaction.response.send_message("All maps are already flagged as new.", ephemeral=True)
+        view = NewMapSelectView(self.cog, self.game_name, available, self)
+        await interaction.response.send_message("Select maps to flag as new:", view=view, ephemeral=True)
+
+    @discord.ui.button(label="Clear All", style=discord.ButtonStyle.danger, row=0)
+    async def clear_all(self, interaction: discord.Interaction, button: discord.ui.Button):
+        async with self.cog.config_lock:
+            gd = self.cog._get_games_config_sync().get(self.game_name, {})
+            gd["new_maps"] = {}
+            await self.cog._save_config()
+        await self._refresh(interaction)
+
+
+class NewMapDurationModal(discord.ui.Modal, title="Set New Map Duration"):
+    duration_input = discord.ui.TextInput(label="Duration in Days (1-90)", placeholder="e.g., 7")
+    def __init__(self, cog: 'MapVote', game_name: str, parent_view: NewMapsConfigView):
+        super().__init__()
+        self.cog = cog
+        self.game_name = game_name
+        self.parent_view = parent_view
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            days = int(self.duration_input.value)
+            if not 1 <= days <= 90: raise ValueError()
+        except ValueError:
+            return await interaction.response.send_message("❌ Invalid number. Must be 1-90.", ephemeral=True)
+        async with self.cog.config_lock:
+            gd = self.cog._get_games_config_sync().setdefault(self.game_name, {})
+            gd["new_map_duration_days"] = days
+            await self.cog._save_config()
+        await self.parent_view._refresh(interaction)
+
+
+class NewMapSelectView(discord.ui.View):
+    """Select maps to flag as new."""
+    def __init__(self, cog: 'MapVote', game_name: str, available_maps: List[str], parent_view: NewMapsConfigView):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.game_name = game_name
+        self.parent_view = parent_view
+        options = [discord.SelectOption(label=m) for m in available_maps[:25]]
+        select = discord.ui.Select(placeholder="Select maps to flag as new...", options=options, min_values=1, max_values=len(options))
+        select.callback = self._on_select
+        self.add_item(select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        selected = interaction.data["values"]
+        async with self.cog.config_lock:
+            gd = self.cog._get_games_config_sync().get(self.game_name, {})
+            duration_days = gd.get("new_map_duration_days", 7)
+            new_maps = gd.setdefault("new_maps", {})
+            expiry = (datetime.now(timezone.utc) + timedelta(days=duration_days)).isoformat()
+            for map_name in selected:
+                new_maps[map_name] = expiry
+            await self.cog._save_config()
+            self.parent_view.game_data = copy.deepcopy(gd)
+        await interaction.response.edit_message(
+            content=f"✅ Flagged **{len(selected)}** map(s) as new for **{duration_days}** days.",
+            view=None
+        )
+
+
 class AdminPanelView(discord.ui.View):
     def __init__(self, cog_instance: 'MapVote'): super().__init__(timeout=180); self.cog = cog_instance
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -321,6 +602,8 @@ class AdminPanelView(discord.ui.View):
     async def add_maps(self, inter, button): await inter.response.send_modal(AddMapsModal(self.cog))
     @discord.ui.button(label="Remove Maps", style=discord.ButtonStyle.red, row=1)
     async def remove_maps(self, inter, button): await self._start_action(inter, "remove_maps", "Remove Maps")
+    @discord.ui.button(label="New Maps", style=discord.ButtonStyle.primary, row=1)
+    async def new_maps_config(self, inter, button): await self._start_action(inter, "new_maps_config", "New Maps Config")
     @discord.ui.button(label="Add Admin Role", style=discord.ButtonStyle.secondary, row=2)
     async def add_admin(self, inter, button): await inter.response.send_modal(AdminRoleModal(self.cog, "add"))
     @discord.ui.button(label="Remove Admin Role", style=discord.ButtonStyle.secondary, row=2)
@@ -329,6 +612,8 @@ class AdminPanelView(discord.ui.View):
     async def set_max_votes(self, inter, button): await self._start_action(inter, "set_max_votes", "Set Max Votes")
     @discord.ui.button(label="Set Map Thumbnail", style=discord.ButtonStyle.secondary, row=3)
     async def set_thumb(self, inter, button): await self._start_action(inter, "set_thumbnail", "Set Map Thumbnail")
+    @discord.ui.button(label="Mode Vote Config", style=discord.ButtonStyle.secondary, row=3)
+    async def mode_config(self, inter, button): await self._start_action(inter, "configure_mode_vote", "Configure Mode Vote")
     @discord.ui.button(label="View Map Stats", style=discord.ButtonStyle.secondary, row=4)
     async def map_stats(self, inter, button): await self._start_action(inter, "map_stats", "View Map Stats")
     @discord.ui.button(label="View User Stats", style=discord.ButtonStyle.secondary, row=4)
@@ -403,19 +688,161 @@ class MapVote(commands.Cog, name="mapvote"):
         """Gets the UNIVERSAL games config (games, maps, image URLs, win history)."""
         return self.active_config.setdefault("universal_games", {})
     
-    async def _save_config(self): 
+    async def _save_config(self):
         """Saves the entire active_config (universal and guild-specific)."""
         await self.config_manager.save(self.active_config)
 
+    def _clean_expired_new_maps(self, gd: dict):
+        """Remove expired entries from a game's new_maps dict. Must be called under config_lock."""
+        new_maps = gd.get("new_maps")
+        if not new_maps:
+            return
+        now = datetime.now(timezone.utc)
+        expired = [m for m, exp in new_maps.items() if datetime.fromisoformat(exp) <= now]
+        for m in expired:
+            del new_maps[m]
+
+    def _pick_vote_maps(self, gd: dict, pick_count: int) -> List[str]:
+        """Pick maps for a vote, guaranteeing active new maps are included.
+        Updates unseen/seen tracking in-place. Must be called under config_lock."""
+        unseen = gd.get("unseen_maps", [])
+        seen = gd.get("seen_maps", [])
+
+        # Clean expired new maps and determine guaranteed picks
+        self._clean_expired_new_maps(gd)
+        all_pool = set(unseen + seen)
+        new_map_names = [m for m in gd.get("new_maps", {}).keys() if m in all_pool]
+
+        if len(new_map_names) > pick_count:
+            guaranteed = random.sample(new_map_names, pick_count)
+        else:
+            guaranteed = list(new_map_names)
+        guaranteed_set = set(guaranteed)
+        remaining = pick_count - len(guaranteed)
+
+        chosen = list(guaranteed)
+
+        if remaining > 0:
+            avail_unseen = [m for m in unseen if m not in guaranteed_set]
+            avail_seen = [m for m in seen if m not in guaranteed_set]
+
+            if len(avail_unseen) >= remaining:
+                chosen.extend(random.sample(avail_unseen, remaining))
+                gd["unseen_maps"] = [m for m in unseen if m not in set(chosen)]
+                gd["seen_maps"] = list(set(seen) | set(chosen))
+            else:
+                chosen.extend(avail_unseen)
+                extra = remaining - len(avail_unseen)
+                if avail_seen and extra > 0:
+                    chosen.extend(random.sample(avail_seen, min(extra, len(avail_seen))))
+                chosen_set = set(chosen)
+                gd["unseen_maps"] = [m for m in avail_seen if m not in chosen_set]
+                gd["seen_maps"] = list(chosen_set)
+        else:
+            chosen_set = set(chosen)
+            gd["unseen_maps"] = [m for m in unseen if m not in chosen_set]
+            gd["seen_maps"] = list(set(seen) | chosen_set)
+
+        return chosen
+
     # --- ---
+
+    async def _handle_vote_interaction(self, interaction: discord.Interaction, map_index: int):
+        """Shared handler for map/mode vote button presses."""
+        try:
+            await interaction.response.defer(ephemeral=True)
+
+            channel = interaction.channel
+            if isinstance(channel, (discord.TextChannel, discord.Thread, discord.VoiceChannel)):
+                permissions = channel.permissions_for(interaction.user)
+                if not permissions.send_messages:
+                    # For mode votes in locked channels, check allowed_voters/roles instead
+                    gid, mid = str(interaction.guild_id), str(interaction.message.id)
+                    async with self.config_lock:
+                        vote = self._get_guild_config_sync(gid).get("active_votes", {}).get(mid)
+                    if vote:
+                        is_allowed = False
+                        if interaction.user.id in (vote.get("allowed_voters") or []):
+                            is_allowed = True
+                        allowed_role_ids = vote.get("allowed_role_ids", [])
+                        if allowed_role_ids and hasattr(interaction.user, 'roles'):
+                            user_role_ids = {r.id for r in interaction.user.roles}
+                            if not user_role_ids.isdisjoint(allowed_role_ids):
+                                is_allowed = True
+                        if not is_allowed:
+                            return await interaction.followup.send(
+                                "You don't have permission to vote in this channel.", ephemeral=True)
+                    else:
+                        return await interaction.followup.send(
+                            "You don't have permission to vote in this channel.", ephemeral=True)
+
+            success, message, updated_vote_data, should_conclude = await self.process_vote(interaction, map_index)
+            await interaction.followup.send(message, ephemeral=True)
+
+            if success and updated_vote_data:
+                if should_conclude:
+                    await self.update_vote_display(interaction.message, updated_vote_data)
+                    await self.conclude_vote(
+                        guild_id_str=str(interaction.guild_id),
+                        message_id_str=str(interaction.message.id)
+                    )
+                else:
+                    await self.update_vote_display(interaction.message, updated_vote_data)
+
+        except Exception as e:
+            log_map.error(f"Error in _handle_vote_interaction: {e}", exc_info=True)
+            try:
+                await interaction.followup.send("An unexpected error occurred while casting your vote.", ephemeral=True)
+            except discord.HTTPException:
+                pass
+
+    async def _handle_end_vote(self, interaction: discord.Interaction):
+        """Shared handler for End Vote button (map and mode votes)."""
+        await interaction.response.defer(ephemeral=True)
+        gid_str, msg_id_str = str(interaction.guild_id), str(interaction.message.id)
+
+        if not await self.is_map_admin(interaction.user):
+            return await interaction.followup.send("❌ You don't have permission to end this vote.", ephemeral=True)
+
+        await interaction.followup.send("✅ Ending vote...", ephemeral=True)
+        await self.conclude_vote(guild_id_str=gid_str, message_id_str=msg_id_str, ended_by=interaction.user)
+
+    def _build_mode_vote_view(self, modes: List[str], votes: Dict[str, list], max_votes: int = 10) -> discord.ui.View:
+        """Build a temporary view with the correct number of mode buttons (2-5)."""
+        view = discord.ui.View(timeout=None)
+        voter_ids = {uid for v_list in votes.values() for uid in v_list}
+        for i, mode_name in enumerate(modes):
+            count = len(votes.get(mode_name, []))
+            btn = discord.ui.Button(
+                label=f"{mode_name} ({count})",
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"mode_vote_{i + 1}",
+                row=0,
+            )
+            view.add_item(btn)
+        end_btn = discord.ui.Button(
+            label=f"End Vote · {len(voter_ids)}/{max_votes}",
+            style=discord.ButtonStyle.danger,
+            custom_id="mode_vote_end",
+            row=1,
+        )
+        view.add_item(end_btn)
+        return view
 
     def _generate_vote_embed(self, vote_data: Dict[str, Any]) -> discord.Embed:
         game, end_time = vote_data.get("game", "Unknown Game"), datetime.fromisoformat(vote_data["end_time_iso"])
         min_users, max_votes = vote_data.get("min_users", 1), vote_data.get("max_votes", 10)
-        desc = (f"Vote for the map to play! Winner is random, weighted by votes.\n**You can change your vote at any time.**\n\n"
-                f"🕒 Concludes <t:{int(end_time.timestamp())}:R> or at **{max_votes}** votes.\n"
-                f"👥 Needs **{min_users}** to be valid.")
-        embed = discord.Embed(title=f"🗺️ {game} Map Vote", color=EMBED_COLOR_MAP, description=desc)
+        is_mode = vote_data.get("is_mode_vote", False)
+        if is_mode:
+            desc = (f"Vote for the game mode! Winner is random, weighted by votes.\n**You can change your vote at any time.**\n\n"
+                    f"🕒 Concludes <t:{int(end_time.timestamp())}:R> or at **{max_votes}** votes.\n"
+                    f"👥 Needs **{min_users}** to be valid.")
+            embed = discord.Embed(title=f"🎮 {game} Mode Vote", color=EMBED_COLOR_MAP, description=desc)
+        else:
+            desc = (f"Vote for the map to play! Winner is random, weighted by votes.\n**You can change your vote at any time.**\n\n"
+                    f"🕒 Concludes <t:{int(end_time.timestamp())}:R> or at **{max_votes}** votes.\n"
+                    f"👥 Needs **{min_users}** to be valid.")
+            embed = discord.Embed(title=f"🗺️ {game} Map Vote", color=EMBED_COLOR_MAP, description=desc)
         return embed
 
     def _get_local_map_path(self, map_name: str) -> Optional[Path]:
@@ -575,23 +1002,24 @@ class MapVote(commands.Cog, name="mapvote"):
     async def update_vote_display(self, message: discord.Message, vote_data: Dict[str, Any]):
         """Update only the embed text and button labels — the image doesn't change between votes."""
         try:
-            view = VotingView(self)
             maps, votes = vote_data.get("maps", []), vote_data.get("votes", {})
-            voter_ids = {uid for v_list in votes.values() for uid in v_list}
             max_votes = vote_data.get("max_votes", 10)
-            for i, child in enumerate(c for c in view.children if c.custom_id and c.custom_id.startswith("map_vote_")):
-                if i < len(maps):
-                    child.label = f"{maps[i]} ({len(votes.get(maps[i], []))})"
-                    child.disabled = False
-                else:
-                    child.disabled = True
 
-            # Put voter count on the End Vote button since editing the embed
-            # breaks the attachment/embed image association on Discord.
-            for child in view.children:
-                if getattr(child, "custom_id", None) == "end_vote_early":
-                    child.label = f"End Vote · {len(voter_ids)}/{max_votes}"
-                    break
+            if vote_data.get("is_mode_vote"):
+                view = self._build_mode_vote_view(maps, votes, max_votes)
+            else:
+                view = VotingView(self)
+                voter_ids = {uid for v_list in votes.values() for uid in v_list}
+                for i, child in enumerate(c for c in view.children if c.custom_id and c.custom_id.startswith("map_vote_")):
+                    if i < len(maps):
+                        child.label = f"{maps[i]} ({len(votes.get(maps[i], []))})"
+                        child.disabled = False
+                    else:
+                        child.disabled = True
+                for child in view.children:
+                    if getattr(child, "custom_id", None) == "end_vote_early":
+                        child.label = f"End Vote · {len(voter_ids)}/{max_votes}"
+                        break
 
             await message.edit(view=view)
 
@@ -653,25 +1081,29 @@ class MapVote(commands.Cog, name="mapvote"):
             return
 
         maps = vote_data.get("maps", [])
-
-        view = VotingView(self)
-        map_buttons = [
-            c for c in view.children
-            if getattr(c, "custom_id", None) and c.custom_id.startswith("map_vote_")
-        ]
-        voter_ids = {uid for v_list in vote_data.get("votes", {}).values() for uid in v_list}
+        votes = vote_data.get("votes", {})
         max_votes = vote_data.get("max_votes", 10)
-        for i, child in enumerate(map_buttons):
-            if i < len(maps):
-                vote_count = len(vote_data.get("votes", {}).get(maps[i], []))
-                child.label = f"{maps[i]} ({vote_count})" if vote_count else maps[i]
-        for child in view.children:
-            if getattr(child, "custom_id", None) == "end_vote_early":
-                child.label = f"End Vote · {len(voter_ids)}/{max_votes}"
-                break
+
+        if vote_data.get("is_mode_vote"):
+            view = self._build_mode_vote_view(maps, votes, max_votes)
+        else:
+            view = VotingView(self)
+            map_buttons = [
+                c for c in view.children
+                if getattr(c, "custom_id", None) and c.custom_id.startswith("map_vote_")
+            ]
+            voter_ids = {uid for v_list in votes.values() for uid in v_list}
+            for i, child in enumerate(map_buttons):
+                if i < len(maps):
+                    vote_count = len(votes.get(maps[i], []))
+                    child.label = f"{maps[i]} ({vote_count})" if vote_count else maps[i]
+            for child in view.children:
+                if getattr(child, "custom_id", None) == "end_vote_early":
+                    child.label = f"End Vote · {len(voter_ids)}/{max_votes}"
+                    break
 
         embed = self._generate_vote_embed(vote_data)
-        img_file = await self.create_composite_image(maps)
+        img_file = None if vote_data.get("is_mode_vote") else await self.create_composite_image(maps)
 
         try:
             if img_file:
@@ -731,19 +1163,50 @@ class MapVote(commands.Cog, name="mapvote"):
                     bonus += 50             # other half goes to top map
                 elif count > 0:
                     pool.extend([m] * (count * 100))
-            if bonus and top_map:
+            if bonus and top_map and vote_counts.get(top_map, 0) > 1:
                 pool.extend([top_map] * bonus)
             winner = random.choice(pool) if pool else random.choice(vote["maps"])
+
+            # Compute weighted chances for result display
+            if pool:
+                pool_counter = Counter(pool)
+                total_pool = len(pool)
+                weighted_chances = {m: pool_counter.get(m, 0) / total_pool * 100 for m in vote_counts}
+            else:
+                weighted_chances = {m: 100 / len(vote["maps"]) for m in vote["maps"]}
+
+            # Resolve map for mode votes
+            selected_map = None
+            is_mode = vote.get("is_mode_vote", False)
+            if is_mode:
+                game_name = vote.get("game")
+                games_cfg = self._get_games_config_sync()
+                game_data = games_cfg.get(game_name, {})
+                mode_config = game_data.get("maps", {}).get(winner, {})
+                pool_type = mode_config.get("map_pool_type", "none")
+
+                if pool_type == "standard":
+                    parent_name = game_data.get("parent_game")
+                    parent_data = games_cfg.get(parent_name, {})
+                    parent_maps = list(parent_data.get("maps", {}).keys())
+                    selected_map = random.choice(parent_maps) if parent_maps else None
+                elif pool_type == "custom":
+                    custom_maps = mode_config.get("custom_maps", [])
+                    selected_map = random.choice(custom_maps) if custom_maps else None
 
             if match_id := vote.get("match_id"):
                 try:
                     custommatch_cog = self.bot.get_cog("CustomMatch")
                     if custommatch_cog:
                         from cogs.custommatch import DatabaseHelper
-                        await DatabaseHelper.set_match_map(match_id, winner)
-                        log_map.info(f"Stored map '{winner}' for match {match_id}")
+                        if is_mode:
+                            await DatabaseHelper.set_match_mode(match_id, winner, selected_map)
+                            log_map.info(f"Stored mode '{winner}' (map: {selected_map}) for match {match_id}")
+                        else:
+                            await DatabaseHelper.set_match_map(match_id, winner)
+                            log_map.info(f"Stored map '{winner}' for match {match_id}")
                 except Exception as e:
-                    log_map.error(f"Failed to store map for match {match_id}: {e}")
+                    log_map.error(f"Failed to store {'mode' if is_mode else 'map'} for match {match_id}: {e}")
 
             if game_name := vote.get("game"):
                 self._ensure_latest_game_format(game_name)
@@ -768,20 +1231,30 @@ class MapVote(commands.Cog, name="mapvote"):
         vote_counts = {m: len(v) for m, v in vote.get("votes", {}).items()}
         non_zero_counts = [c for c in vote_counts.values() if c > 0]
         winner_count = vote_counts.get(winner, 0)
-        # If the least-voted map (above 0) wins and another map had more votes, rub it in
         is_underdog = (winner_count > 0 and non_zero_counts
                        and winner_count == min(non_zero_counts)
                        and max(non_zero_counts) > winner_count)
-        desc = f"The chosen map is **{winner}**!" + (" ||Cry about it||" if is_underdog else "")
+
+        if is_mode:
+            desc = f"The chosen mode is **{winner}**!"
+            if selected_map:
+                desc += f"\nMap: **{selected_map}**"
+            desc += (" ||Cry about it||" if is_underdog else "")
+        else:
+            desc = f"The chosen map is **{winner}**!" + (" ||Cry about it||" if is_underdog else "")
         if ended_by: desc += f"\n\n*Ended early by {ended_by.mention}.*"
         elif len(voters) >= vote.get("max_votes", 999): desc += f"\n\n*Concluded at {vote.get('max_votes')} votes.*"
 
-        res_embed = discord.Embed(title="Map Vote Concluded", color=discord.Color.gold(), description=desc)
-        total_v = sum(len(v) for v in vote.get("votes", {}).values())
+        res_embed = discord.Embed(
+            title="Mode Vote Concluded" if is_mode else "Map Vote Concluded",
+            color=discord.Color.gold(), description=desc
+        )
         for m, v in sorted(vote.get("votes", {}).items(), key=lambda i: len(i[1]), reverse=True):
-            res_embed.add_field(name=m, value=f"{len(v)} Votes ({(len(v)/total_v*100) if total_v else 0:.1f}% chance)")
+            res_embed.add_field(name=m, value=f"{len(v)} Votes ({weighted_chances.get(m, 0):.1f}% chance)")
 
-        winner_path = self._get_local_map_path(winner)
+        # For mode votes, try to show the selected map's image; for map votes, show winner map image
+        display_map = selected_map if is_mode else winner
+        winner_path = self._get_local_map_path(display_map) if display_map else None
         attachments = []
         if winner_path:
             attachments.append(discord.File(str(winner_path), filename="winner.png"))
@@ -789,16 +1262,27 @@ class MapVote(commands.Cog, name="mapvote"):
 
         try:
             msg = await channel.fetch_message(int(message_id_str))
-            disabled_view = VotingView(self)
             maps, final_votes = vote.get("maps", []), vote.get("votes", {})
-            map_buttons = [c for c in disabled_view.children if c.custom_id and c.custom_id.startswith("map_vote_")]
-            for i, child in enumerate(map_buttons):
-                if i < len(maps): child.label = f"{maps[i]} ({len(final_votes.get(maps[i], []))})"
-                child.disabled = True
+            if vote.get("is_mode_vote"):
+                disabled_view = self._build_mode_vote_view(maps, final_votes, vote.get("max_votes", 10))
+            else:
+                disabled_view = VotingView(self)
+                map_buttons = [c for c in disabled_view.children if c.custom_id and c.custom_id.startswith("map_vote_")]
+                for i, child in enumerate(map_buttons):
+                    if i < len(maps): child.label = f"{maps[i]} ({len(final_votes.get(maps[i], []))})"
+                    child.disabled = True
             for item in disabled_view.children: item.disabled = True
             await msg.edit(view=disabled_view)
             result_msg = await msg.reply(embed=res_embed, files=attachments)
         except (discord.NotFound, discord.Forbidden) as e: log_map.warning(f"Failed conclude reply: {e}")
+
+        # Dispatch event for mode votes so custommatch can unlock channel and post teams
+        if is_mode and vote.get("match_id"):
+            self.bot.dispatch(
+                "mode_vote_concluded",
+                int(guild_id_str), vote["match_id"],
+                winner, selected_map, channel_id
+            )
 
     async def _enter_overtime(self, gid_str: str, mid_str: str, vote: dict):
         """Timer expired without majority — mark vote as overtime and ping
@@ -831,7 +1315,7 @@ class MapVote(commands.Cog, name="mapvote"):
             majority = (max_votes // 2) + 1
             try:
                 await channel.send(
-                    f"{mentions}\nThe map vote timer has ended but we need at least "
+                    f"{mentions}\nThe {'mode' if vote.get('is_mode_vote') else 'map'} vote timer has ended but we need at least "
                     f"**{majority}** votes to decide. Please vote now!"
                 )
             except Exception as e:
@@ -860,64 +1344,71 @@ class MapVote(commands.Cog, name="mapvote"):
         # --- END FIX ---
         
         voters = {u for ul in vote.get("votes", {}).values() for u in ul}
+        vote_type = "modes" if vote.get("is_mode_vote") else "maps"
         desc = (f"Vote cancelled. Required **{vote.get('min_users', 1)}** voters, got **{len(voters)}**.\n\n"
-                f"⚠️ **The same maps will be used for the next vote** to prevent intentional dodging.")
+                f"⚠️ **The same {vote_type} will be used for the next vote** to prevent intentional dodging.")
         try:
             msg = await channel.fetch_message(int(mid_str))
-            disabled_view = VotingView(self)
             maps, final_votes = vote.get("maps", []), vote.get("votes", {})
-            for i, child in enumerate(c for c in disabled_view.children if c.custom_id and c.custom_id.startswith("map_vote_")):
-                if i < len(maps): child.label = f"{maps[i]} ({len(final_votes.get(maps[i], []))})"
-                child.disabled = True
+            if vote.get("is_mode_vote"):
+                disabled_view = self._build_mode_vote_view(maps, final_votes, vote.get("max_votes", 10))
+            else:
+                disabled_view = VotingView(self)
+                for i, child in enumerate(c for c in disabled_view.children if c.custom_id and c.custom_id.startswith("map_vote_")):
+                    if i < len(maps): child.label = f"{maps[i]} ({len(final_votes.get(maps[i], []))})"
+                    child.disabled = True
             for item in disabled_view.children: item.disabled = True
             await msg.edit(view=disabled_view); await msg.reply(embed=discord.Embed(title="🚫 Vote Cancelled", color=discord.Color.red(), description=desc))
         except (discord.NotFound, discord.Forbidden) as e: log_map.warning(f"Failed cancel reply: {e}")
 
     @tasks.loop(seconds=15)
     async def vote_check_loop(self):
-        now = datetime.now(timezone.utc)
-        to_process = []
-        
-        active_votes_copy = {}
         try:
-            async with self.config_lock:
-                active_votes_copy = copy.deepcopy(self.active_config.get("guild_data", {}))
-        except Exception as e:
-            log_map.error(f"Error copying active config in vote_check_loop: {e}", exc_info=True)
-            return # Don't proceed if copy failed
+            now = datetime.now(timezone.utc)
+            to_process = []
 
-        for gid, g_cfg in active_votes_copy.items():
-            for mid, vote in g_cfg.get("active_votes", {}).items():
-                try:
-                    if now >= datetime.fromisoformat(vote["end_time_iso"]):
-                        to_process.append((gid, mid, vote))
-                except Exception as e:
-                    log_map.error(f"Error parsing timestamp for vote {mid} in guild {gid}: {e}")
-
-        for gid, mid, _vote in to_process:
+            active_votes_copy = {}
             try:
-                # Re-read current state under lock to avoid stale-copy race
                 async with self.config_lock:
-                    guild_cfg = self._get_guild_config_sync(gid)
-                    live_vote = guild_cfg.get("active_votes", {}).get(mid)
-                    if not live_vote or live_vote.get("_bumping"):
-                        continue  # Already concluded/cancelled/being bumped
-                    # Skip votes already in overtime (they conclude via process_vote)
-                    if live_vote.get("overtime"):
-                        continue
-                    voter_count = len({u for ul in live_vote.get("votes", {}).values() for u in ul})
-                    max_votes = live_vote.get("max_votes", 10)
-                    majority = (max_votes // 2) + 1
-                    vote_snapshot = copy.deepcopy(live_vote)
-
-                if voter_count >= majority:
-                    await self.conclude_vote(gid, mid)
-                else:
-                    # Not enough votes yet — enter overtime: ping non-voters
-                    # and wait for majority before concluding
-                    await self._enter_overtime(gid, mid, vote_snapshot)
+                    active_votes_copy = copy.deepcopy(self.active_config.get("guild_data", {}))
             except Exception as e:
-                log_map.error(f"Error processing vote {mid} in guild {gid}: {e}", exc_info=True)
+                log_map.error(f"Error copying active config in vote_check_loop: {e}", exc_info=True)
+                return # Don't proceed if copy failed
+
+            for gid, g_cfg in active_votes_copy.items():
+                for mid, vote in g_cfg.get("active_votes", {}).items():
+                    try:
+                        if now >= datetime.fromisoformat(vote["end_time_iso"]):
+                            to_process.append((gid, mid, vote))
+                    except Exception as e:
+                        log_map.error(f"Error parsing timestamp for vote {mid} in guild {gid}: {e}")
+
+            for gid, mid, _vote in to_process:
+                try:
+                    # Re-read current state under lock to avoid stale-copy race
+                    async with self.config_lock:
+                        guild_cfg = self._get_guild_config_sync(gid)
+                        live_vote = guild_cfg.get("active_votes", {}).get(mid)
+                        if not live_vote or live_vote.get("_bumping"):
+                            continue  # Already concluded/cancelled/being bumped
+                        # Skip votes already in overtime (they conclude via process_vote)
+                        if live_vote.get("overtime"):
+                            continue
+                        voter_count = len({u for ul in live_vote.get("votes", {}).values() for u in ul})
+                        max_votes = live_vote.get("max_votes", 10)
+                        majority = (max_votes // 2) + 1
+                        vote_snapshot = copy.deepcopy(live_vote)
+
+                    if voter_count >= majority:
+                        await self.conclude_vote(gid, mid)
+                    else:
+                        # Not enough votes yet — enter overtime: ping non-voters
+                        # and wait for majority before concluding
+                        await self._enter_overtime(gid, mid, vote_snapshot)
+                except Exception as e:
+                    log_map.error(f"Error processing vote {mid} in guild {gid}: {e}", exc_info=True)
+        except Exception as e:
+            await self.bot.error_reporter.report("MapVote", f"vote_check_loop: {e}")
 
     @vote_check_loop.before_loop
     async def before_loops(self): await self.bot.wait_until_ready();
@@ -940,6 +1431,8 @@ class MapVote(commands.Cog, name="mapvote"):
             gd = games_cfg.get(game)
 
             if not gd: return await inter.followup.send(f"❌ Game '{game}' not configured.", ephemeral=True)
+            if gd.get("is_mode_vote"):
+                return await inter.followup.send(f"❌ '{game}' is a mode vote game. Mode votes are started automatically by custom matches.", ephemeral=True)
             game_max_votes = gd.get('max_votes', 10)
             if min_users is None:
                 min_users = (game_max_votes // 2) + 1
@@ -954,14 +1447,30 @@ class MapVote(commands.Cog, name="mapvote"):
             reserved_maps = guild_cfg.get("reserved_maps", {}).get(game)
             chosen_maps = []
 
+            # Clean expired new maps up front
+            self._clean_expired_new_maps(gd)
+            all_pool = set(unseen + seen)
+            active_new = [m for m in gd.get("new_maps", {}).keys() if m in all_pool]
+
             if reserved_maps and len(reserved_maps) == VOTE_MAP_COUNT:
-                all_maps = set(unseen + seen)
-                valid_reserved = [m for m in reserved_maps if m in all_maps]
+                valid_reserved = [m for m in reserved_maps if m in all_pool]
 
                 if len(valid_reserved) == VOTE_MAP_COUNT:
                     chosen_maps = valid_reserved
                     log_map.info(f"Using reserved maps {chosen_maps} for {game} vote in guild {inter.guild_id}")
                     guild_cfg.get("reserved_maps", {}).pop(game, None)
+
+                    # Swap in any new maps not already in the reserved set
+                    missing_new = [m for m in active_new if m not in set(chosen_maps)]
+                    if missing_new:
+                        new_set = set(active_new)
+                        replaceable = [m for m in chosen_maps if m not in new_set]
+                        for nm in missing_new:
+                            if not replaceable:
+                                break
+                            old = replaceable.pop(0)
+                            chosen_maps[chosen_maps.index(old)] = nm
+
                     gd["unseen_maps"] = [m for m in unseen if m not in chosen_maps]
                     gd["seen_maps"] = list(set(seen).union(chosen_maps))
                 else:
@@ -970,17 +1479,7 @@ class MapVote(commands.Cog, name="mapvote"):
                     reserved_maps = None
 
             if not chosen_maps:
-                if len(unseen) >= VOTE_MAP_COUNT:
-                    chosen_maps = random.sample(unseen, VOTE_MAP_COUNT)
-                    gd["unseen_maps"] = [m for m in unseen if m not in chosen_maps]
-                    gd["seen_maps"].extend(chosen_maps)
-                else:
-                    chosen_maps.extend(unseen)
-                    needed = VOTE_MAP_COUNT - len(chosen_maps)
-                    fillers = random.sample(seen, needed)
-                    chosen_maps.extend(fillers)
-                    gd["unseen_maps"] = [m for m in seen if m not in fillers]
-                    gd["seen_maps"] = chosen_maps
+                chosen_maps = self._pick_vote_maps(gd, VOTE_MAP_COUNT)
 
             guild_cfg["vote_counter"] = guild_cfg.get("vote_counter", 0) + 1
             vote_data = {"channel_id": inter.channel_id, "end_time_iso": (datetime.now(timezone.utc) + timedelta(minutes=duration)).isoformat(), "maps": chosen_maps, "votes": {m:[] for m in chosen_maps}, "game": game, "short_id": guild_cfg['vote_counter'], "min_users": min_users, "max_votes": gd.get('max_votes', 10)}
@@ -1223,28 +1722,30 @@ class MapVote(commands.Cog, name="mapvote"):
         allowed_voters: Optional[List[int]] = None,
         red_role_id: Optional[int] = None,
         blue_role_id: Optional[int] = None,
-        match_id: Optional[int] = None
+        match_id: Optional[int] = None,
+        is_mode_vote: bool = False
     ) -> Optional[int]:
         """
-        Start a map vote programmatically (for custom match integration).
+        Start a map or mode vote programmatically (for custom match integration).
         Returns message_id or None on failure.
 
         Args:
             guild_id: The guild ID
             channel: The channel to post the vote in
-            game_name: The game to vote on
+            game_name: The game to vote on (or mode-vote game name)
             duration: Vote duration in minutes (default 3)
             min_users: Minimum users required for vote to pass (default: majority of max_votes)
             max_votes: Maximum votes before auto-conclude (default 10)
             allowed_voters: List of user IDs who can vote (if None, anyone can vote)
             red_role_id: Optional role ID for red team (alternative voter restriction)
             blue_role_id: Optional role ID for blue team (alternative voter restriction)
-            match_id: Optional match ID from custommatch cog (for storing selected map)
+            match_id: Optional match ID from custommatch cog (for storing selected map/mode)
+            is_mode_vote: If True, treat options as game modes instead of maps
         """
         if min_users is None:
             min_users = (max_votes // 2) + 1
         try:
-            # Phase 1: Acquire lock, validate, pick maps, prepare vote_data, release lock
+            # Phase 1: Acquire lock, validate, pick options, prepare vote_data, release lock
             async with self.config_lock:
                 guild_cfg = self._get_guild_config_sync(guild_id)
                 games_cfg = self._get_games_config_sync()
@@ -1258,22 +1759,21 @@ class MapVote(commands.Cog, name="mapvote"):
 
                 unseen = gd.get("unseen_maps", [])
                 seen = gd.get("seen_maps", [])
+                total_available = len(unseen) + len(seen)
 
-                if len(unseen) + len(seen) < VOTE_MAP_COUNT:
-                    log_map.warning(f"Programmatic vote failed: '{game_name}' needs at least {VOTE_MAP_COUNT} maps")
-                    return None
-
-                if len(unseen) >= VOTE_MAP_COUNT:
-                    chosen_maps = random.sample(unseen, VOTE_MAP_COUNT)
-                    gd["unseen_maps"] = [m for m in unseen if m not in chosen_maps]
-                    gd["seen_maps"].extend(chosen_maps)
+                # For mode votes, pick up to 5 options (min 2); for map votes, always 3
+                if is_mode_vote:
+                    pick_count = min(total_available, 5)
+                    if pick_count < 2:
+                        log_map.warning(f"Programmatic vote failed: '{game_name}' needs at least 2 modes")
+                        return None
                 else:
-                    chosen_maps = list(unseen)
-                    needed = VOTE_MAP_COUNT - len(chosen_maps)
-                    fillers = random.sample(seen, needed)
-                    chosen_maps.extend(fillers)
-                    gd["unseen_maps"] = [m for m in seen if m not in fillers]
-                    gd["seen_maps"] = chosen_maps
+                    pick_count = VOTE_MAP_COUNT
+                    if total_available < pick_count:
+                        log_map.warning(f"Programmatic vote failed: '{game_name}' needs at least {VOTE_MAP_COUNT} maps")
+                        return None
+
+                chosen_maps = self._pick_vote_maps(gd, pick_count)
 
                 guild_cfg["vote_counter"] = guild_cfg.get("vote_counter", 0) + 1
                 vote_data = {
@@ -1289,30 +1789,38 @@ class MapVote(commands.Cog, name="mapvote"):
                     "allowed_role_ids": [r for r in [red_role_id, blue_role_id] if r],
                     "match_id": match_id
                 }
+                if is_mode_vote:
+                    vote_data["is_mode_vote"] = True
                 await self._save_config()
 
             # Phase 2: I/O outside the lock
-            img_file = await self.create_composite_image(chosen_maps)
             embed = self._generate_vote_embed(vote_data)
-            view = VotingView(self)
 
-            for i, child in enumerate(c for c in view.children if c.custom_id and c.custom_id.startswith("map_vote_")):
-                if i < len(chosen_maps):
-                    child.label = f"{chosen_maps[i]} (0)"
-                    child.disabled = False
-                else:
-                    child.disabled = True
-            for child in view.children:
-                if getattr(child, "custom_id", None) == "end_vote_early":
-                    child.label = f"End Vote · 0/{vote_data.get('max_votes', 10)}"
-                    break
-
-            if img_file:
-                msg = await channel.send(file=img_file)
-                embed.set_image(url=f"attachment://{msg.attachments[0].filename}")
-                await msg.edit(embed=embed, view=view)
-            else:
+            if is_mode_vote:
+                # Mode votes: no composite image, use dynamic button view
+                view = self._build_mode_vote_view(chosen_maps, {m: [] for m in chosen_maps}, max_votes)
                 msg = await channel.send(embed=embed, view=view)
+            else:
+                # Map votes: composite image + VotingView
+                img_file = await self.create_composite_image(chosen_maps)
+                view = VotingView(self)
+                for i, child in enumerate(c for c in view.children if c.custom_id and c.custom_id.startswith("map_vote_")):
+                    if i < len(chosen_maps):
+                        child.label = f"{chosen_maps[i]} (0)"
+                        child.disabled = False
+                    else:
+                        child.disabled = True
+                for child in view.children:
+                    if getattr(child, "custom_id", None) == "end_vote_early":
+                        child.label = f"End Vote · 0/{vote_data.get('max_votes', 10)}"
+                        break
+
+                if img_file:
+                    msg = await channel.send(file=img_file)
+                    embed.set_image(url=f"attachment://{msg.attachments[0].filename}")
+                    await msg.edit(embed=embed, view=view)
+                else:
+                    msg = await channel.send(embed=embed, view=view)
 
             # Phase 3: Re-acquire lock to store message ID
             async with self.config_lock:
@@ -1320,7 +1828,7 @@ class MapVote(commands.Cog, name="mapvote"):
                 guild_cfg.setdefault("active_votes", {})[str(msg.id)] = vote_data
                 await self._save_config()
 
-            log_map.info(f"Programmatic vote started for {game_name} in channel {channel.id}")
+            log_map.info(f"Programmatic {'mode' if is_mode_vote else 'map'} vote started for {game_name} in channel {channel.id}")
             return msg.id
 
         except Exception as e:
@@ -1332,6 +1840,7 @@ async def setup(bot: commands.Bot):
     """The setup function called by discord.py to load the cog."""
     cog = MapVote(bot)
     bot.add_view(VotingView(cog))
+    bot.add_view(ModeVotingView(cog))
     await bot.add_cog(cog)
 
 

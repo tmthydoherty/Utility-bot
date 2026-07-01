@@ -297,26 +297,6 @@ class IntroCog(commands.Cog):
         view = AdminPanelView(self)
         await interaction.response.send_message("**Newcomer Panel**\nSelect a module to configure:", view=view, ephemeral=True)
 
-    @app_commands.command(name="regenerate_intro", description="Admin: Regenerate an intro image with new avatar/username header")
-    @app_commands.describe(
-        user="The user whose intro to regenerate",
-        message_id="The message ID of the Q&A image in the intro channel"
-    )
-    async def regenerate_intro(self, interaction: discord.Interaction, user: discord.Member, message_id: str):
-        if not self.bot.is_bot_admin(interaction.user):
-            return await interaction.response.send_message("Admin access only.", ephemeral=True)
-
-        # Store for the modal
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute("SELECT value FROM settings WHERE key='intro_channel_id'")
-            res = await cursor.fetchone()
-            if not res:
-                return await interaction.response.send_message("Intro channel not configured.", ephemeral=True)
-            intro_channel_id = int(res[0])
-
-        modal = RegenerateIntroModal(self, user, message_id, intro_channel_id)
-        await interaction.response.send_modal(modal)
-
     # --- EVENTS ---
     @commands.Cog.listener()
     async def on_interaction(self, interaction: discord.Interaction):
@@ -589,6 +569,59 @@ class IntroCog(commands.Cog):
                 await self.check_role_upgrade(message.author, db)
 
     @commands.Cog.listener()
+    async def on_member_update(self, before, after):
+        """Detect when a base role is removed externally and clean up tier roles."""
+        if before.roles == after.roles:
+            return
+
+        removed_roles = set(r.id for r in before.roles) - set(r.id for r in after.roles)
+        if not removed_roles:
+            return
+
+        async with aiosqlite.connect(self.db_path) as db:
+            # Load all configured base roles
+            cursor = await db.execute("SELECT base_rank, role_id FROM base_roles")
+            base_map = dict(await cursor.fetchall())
+
+            # Check if any removed role is a base role
+            removed_base_ranks = [
+                rank for rank, role_id in base_map.items()
+                if role_id in removed_roles
+            ]
+
+            if not removed_base_ranks:
+                return
+
+            # For each removed base rank, strip all its tier roles from the member
+            for rank in removed_base_ranks:
+                cursor = await db.execute(
+                    "SELECT tier, role_id FROM role_config WHERE base_rank = ?", (rank,)
+                )
+                tier_roles = await cursor.fetchall()
+                roles_to_remove = []
+                for _, tier_role_id in tier_roles:
+                    role = after.guild.get_role(tier_role_id)
+                    if role and role in after.roles:
+                        roles_to_remove.append(role)
+
+                if roles_to_remove:
+                    try:
+                        await after.remove_roles(*roles_to_remove)
+                        logger.info(
+                            f"Removed tier role(s) from {after.name} after base rank {rank} was lost"
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to remove tier roles for {after.name}: {e}")
+
+            # Now sync tier for their next highest remaining base role
+            # Re-fetch the member to get updated roles after our removal
+            try:
+                member = after.guild.get_member(after.id) or await after.guild.fetch_member(after.id)
+            except Exception:
+                member = after
+            await self.sync_tier_role(member, db)
+
+    @commands.Cog.listener()
     async def on_member_remove(self, member):
         """Clean up all intro data when a user leaves the server"""
         async with aiosqlite.connect(self.db_path) as db:
@@ -738,47 +771,122 @@ class IntroCog(commands.Cog):
     @tasks.loop(hours=1)
     async def decay_task(self):
         """Runs hourly. Expires point grants whose 30-day window has passed."""
-        today = datetime.date.today().isoformat()
+        try:
+            today = datetime.date.today().isoformat()
 
-        async with aiosqlite.connect(self.db_path) as db:
-            # Find all expired, undecayed ledger entries grouped by user
-            cursor = await db.execute(
-                "SELECT user_id, SUM(points) FROM point_ledger WHERE expires_at <= ? AND decayed = 0 GROUP BY user_id",
-                (today,)
-            )
-            decay_rows = await cursor.fetchall()
-
-            if decay_rows:
-                # Mark those entries as decayed
-                await db.execute(
-                    "UPDATE point_ledger SET decayed = 1 WHERE expires_at <= ? AND decayed = 0",
+            async with aiosqlite.connect(self.db_path) as db:
+                # Find all expired, undecayed ledger entries grouped by user
+                cursor = await db.execute(
+                    "SELECT user_id, SUM(points) FROM point_ledger WHERE expires_at <= ? AND decayed = 0 GROUP BY user_id",
                     (today,)
                 )
-                # Subtract expired points from user totals (floor at 0)
-                for user_id, pts_to_remove in decay_rows:
+                decay_rows = await cursor.fetchall()
+
+                if decay_rows:
+                    # Mark those entries as decayed
                     await db.execute(
-                        "UPDATE user_points SET points = MAX(0, points - ?) WHERE user_id = ?",
-                        (pts_to_remove, user_id)
+                        "UPDATE point_ledger SET decayed = 1 WHERE expires_at <= ? AND decayed = 0",
+                        (today,)
                     )
+                    # Subtract expired points from user totals (floor at 0)
+                    for user_id, pts_to_remove in decay_rows:
+                        await db.execute(
+                            "UPDATE user_points SET points = MAX(0, points - ?) WHERE user_id = ?",
+                            (pts_to_remove, user_id)
+                        )
 
-            # Clean up hourly_points rows older than 2 days
-            cutoff_key = (datetime.datetime.now() - datetime.timedelta(days=2)).strftime("%Y-%m-%d-%H")
-            await db.execute("DELETE FROM hourly_points WHERE hour_key < ?", (cutoff_key,))
+                # Clean up hourly_points rows older than 2 days
+                cutoff_key = (datetime.datetime.now() - datetime.timedelta(days=2)).strftime("%Y-%m-%d-%H")
+                await db.execute("DELETE FROM hourly_points WHERE hour_key < ?", (cutoff_key,))
 
-            await db.commit()
+                await db.commit()
 
-        if not decay_rows:
-            return
+            if decay_rows:
+                logger.info(f"Decay task: expired points for {len(decay_rows)} user(s).")
 
-        logger.info(f"Decay task: expired points for {len(decay_rows)} user(s).")
+            # Sync tier roles for every affected user (may downgrade)
+            if decay_rows:
+                for guild in self.bot.guilds:
+                    for user_id, _ in decay_rows:
+                        member = guild.get_member(user_id)
+                        if member:
+                            async with aiosqlite.connect(self.db_path) as db:
+                                await self.sync_tier_role(member, db)
 
-        # Sync tier roles for every affected user (may downgrade)
+            # Audit: find members with tier roles for base ranks they no longer hold
+            try:
+                await self._audit_stale_tier_roles()
+            except Exception as e:
+                logger.error(f"Audit failed: {e}", exc_info=True)
+        except Exception as e:
+            await self.bot.error_reporter.report("Newcomer", f"decay_task: {e}")
+
+    async def _audit_stale_tier_roles(self):
+        """Check all members for tier roles whose base role they don't have. Fix any found."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("SELECT base_rank, role_id FROM base_roles")
+            base_map = dict(await cursor.fetchall())
+            if not base_map:
+                return
+
+            # Build {base_rank: {tier_role_id, ...}} and a flat set of all tier role IDs
+            tier_roles_by_base = {}
+            all_tier_role_ids = set()
+            for rank in base_map:
+                cursor = await db.execute(
+                    "SELECT role_id FROM role_config WHERE base_rank = ?", (rank,)
+                )
+                ids = {row[0] for row in await cursor.fetchall()}
+                tier_roles_by_base[rank] = ids
+                all_tier_role_ids |= ids
+
+            if not all_tier_role_ids:
+                return
+
         for guild in self.bot.guilds:
-            for user_id, _ in decay_rows:
-                member = guild.get_member(user_id)
-                if member:
+            logger.info(f"Audit: scanning {len(guild.members)} members in {guild.name}")
+            for member in guild.members:
+                if member.bot:
+                    continue
+                member_role_ids = {r.id for r in member.roles}
+
+                # Quick skip: member has no tier roles at all
+                if not member_role_ids & all_tier_role_ids:
+                    continue
+
+                stale_roles = []
+                for rank, base_role_id in base_map.items():
+                    has_base = base_role_id in member_role_ids
+                    if has_base:
+                        continue
+                    # They don't have this base role - any tier roles for it are stale
+                    for tier_role_id in tier_roles_by_base.get(rank, set()):
+                        if tier_role_id in member_role_ids:
+                            role = guild.get_role(tier_role_id)
+                            if role:
+                                stale_roles.append(role)
+
+                if stale_roles:
+                    try:
+                        await member.remove_roles(*stale_roles)
+                        logger.info(
+                            f"Audit: removed stale tier role(s) from {member.name} "
+                            f"({', '.join(r.name for r in stale_roles)})"
+                        )
+                    except Exception as e:
+                        logger.error(f"Audit: failed to remove stale roles from {member.name}: {e}")
+
+                    # Sync to correct tier for their actual highest base role
                     async with aiosqlite.connect(self.db_path) as db:
-                        await self.sync_tier_role(member, db)
+                        try:
+                            refreshed = guild.get_member(member.id) or await guild.fetch_member(member.id)
+                        except Exception:
+                            refreshed = member
+                        await self.sync_tier_role(refreshed, db)
+
+    @decay_task.before_loop
+    async def before_decay_task(self):
+        await self.bot.wait_until_ready()
 
 # --- UI CLASSES ---
 

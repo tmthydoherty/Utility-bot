@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        @font-face {{
+            font-family: 'NotoSans';
+            src: url('file://{font_path}/NotoSans-Regular.ttf') format('truetype');
+            font-weight: normal;
+        }}
+        @font-face {{
+            font-family: 'NotoSans';
+            src: url('file://{font_path}/NotoSans-Bold.ttf') format('truetype');
+            font-weight: bold;
+        }}
+
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+
+        body {{
+            width: 640px;
+            font-family: 'NotoSans', 'Segoe UI', sans-serif;
+            font-weight: bold;
+            background: #1a1b1e;
+            color: #ffffff;
+            padding: 0;
+        }}
+
+        .card {{
+            background: #2b2d31;
+            border-radius: 12px;
+            overflow: hidden;
+            margin: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.04);
+        }}
+
+        /* --- HEADER --- */
+        .header {{
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            padding: 20px 22px;
+            background: #313338;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        }}
+
+        .avatar {{
+            width: 56px;
+            height: 56px;
+            border-radius: 50%;
+            object-fit: cover;
+            border: 2px solid rgba(255, 255, 255, 0.1);
+        }}
+
+        .header-info {{
+            flex: 1;
+        }}
+
+        .display-name {{
+            font-size: 24px;
+            font-weight: bold;
+            color: #ffffff;
+            line-height: 1.2;
+        }}
+
+        .username {{
+            font-size: 15px;
+            color: #949ba4;
+            margin-top: 1px;
+        }}
+
+        .header-badges {{
+            display: flex;
+            gap: 8px;
+        }}
+
+        .date-badge {{
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 6px;
+            padding: 6px 12px;
+            text-align: center;
+        }}
+
+        .date-badge-label {{
+            font-size: 12px;
+            font-weight: bold;
+            color: #949ba4;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }}
+
+        .date-badge-value {{
+            font-size: 14px;
+            color: #e0e1e5;
+            font-weight: bold;
+            margin-top: 2px;
+        }}
+
+        /* --- THREE-COLUMN STATS --- */
+        .stats-row {{
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        }}
+
+        .stats-box {{
+            padding: 14px 18px;
+            border-right: 1px solid rgba(255, 255, 255, 0.06);
+        }}
+
+        .stats-box:last-child {{
+            border-right: none;
+        }}
+
+        .stats-box-header {{
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 12px;
+        }}
+
+        .stats-box-title {{
+            font-size: 15px;
+            font-weight: bold;
+            color: #e0e1e5;
+        }}
+
+        .stats-box-icon {{
+            font-size: 15px;
+            color: #949ba4;
+        }}
+
+        /* --- RANK ITEMS --- */
+        .rank-item {{
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 12px;
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 6px;
+            margin-bottom: 6px;
+        }}
+
+        .rank-label {{
+            font-size: 15px;
+            font-weight: bold;
+            color: #e0e1e5;
+        }}
+
+        .rank-value {{
+            font-size: 16px;
+            font-weight: bold;
+            color: #ffffff;
+        }}
+
+        .rank-value.no-data {{
+            color: #6d6f78;
+            font-size: 14px;
+        }}
+
+        /* --- BREAKDOWN ITEMS --- */
+        .breakdown-item {{
+            display: flex;
+            align-items: center;
+            padding: 5px 0;
+            gap: 10px;
+        }}
+
+        .breakdown-period {{
+            font-size: 15px;
+            font-weight: bold;
+            color: #ffffff;
+            min-width: 30px;
+        }}
+
+        .breakdown-value {{
+            font-size: 15px;
+            color: #b5bac1;
+        }}
+
+        /* --- BOTTOM SECTION --- */
+        .bottom-section {{
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        }}
+
+        .bottom-col {{
+            padding: 16px 22px;
+        }}
+
+        .bottom-col:first-child {{
+            border-right: 1px solid rgba(255, 255, 255, 0.06);
+        }}
+
+        .section-header {{
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 12px;
+        }}
+
+        .section-title {{
+            font-size: 14px;
+            font-weight: bold;
+            color: #949ba4;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }}
+
+        .section-icon {{
+            font-size: 14px;
+            color: #949ba4;
+        }}
+
+        /* --- CHANNEL LIST --- */
+        .channel-item {{
+            display: flex;
+            align-items: center;
+            padding: 4px 0;
+            gap: 8px;
+        }}
+
+        .channel-hash {{
+            font-size: 15px;
+            color: #949ba4;
+            font-weight: bold;
+        }}
+
+        .channel-name {{
+            font-size: 15px;
+            color: #e0e1e5;
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }}
+
+        .channel-count {{
+            font-size: 14px;
+            color: #949ba4;
+        }}
+
+        /* --- CHART AREA --- */
+        .chart-area {{
+            margin-top: 8px;
+            position: relative;
+        }}
+
+        .chart-axis-row {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 6px;
+        }}
+
+        .axis-label {{
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+        }}
+
+        .axis-dot {{
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+        }}
+
+        .axis-dot.green {{ background: #23a559; }}
+        .axis-dot.red {{ background: #da373c; }}
+
+        .axis-name {{
+            color: #949ba4;
+        }}
+
+        .axis-peak {{
+            color: #e0e1e5;
+        }}
+
+        .sparkline-svg {{
+            width: 100%;
+            height: 80px;
+            display: block;
+        }}
+
+        .chart-dates {{
+            display: flex;
+            justify-content: space-between;
+            padding: 4px 0 0;
+        }}
+
+        .chart-date {{
+            font-size: 11px;
+            color: #6d6f78;
+        }}
+
+        /* --- FOOTER --- */
+        .footer {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 22px;
+            border-top: 1px solid rgba(255, 255, 255, 0.06);
+            background: rgba(0, 0, 0, 0.15);
+        }}
+
+        .footer-text {{
+            font-size: 12px;
+            color: #5a5d6b;
+        }}
+
+        .footer-highlight {{
+            color: #e0e1e5;
+        }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="header">
+            <img class="avatar" src="{avatar_url}" alt="">
+            <div class="header-info">
+                <div class="display-name">{display_name}</div>
+                <div class="username">{username}</div>
+            </div>
+            <div class="header-badges">
+                <div class="date-badge">
+                    <div class="date-badge-label">Created On</div>
+                    <div class="date-badge-value">{created_date}</div>
+                </div>
+                <div class="date-badge">
+                    <div class="date-badge-label">Joined On</div>
+                    <div class="date-badge-value">{joined_date}</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="stats-row">
+            <div class="stats-box">
+                <div class="stats-box-header">
+                    <div class="stats-box-title">Server Ranks</div>
+                    <div class="stats-box-icon">&#127942;</div>
+                </div>
+                <div class="rank-item">
+                    <span class="rank-label">Message</span>
+                    <span class="rank-value">{msg_rank}</span>
+                </div>
+                <div class="rank-item">
+                    <span class="rank-label">Voice</span>
+                    <span class="rank-value {voice_rank_class}">{voice_rank}</span>
+                </div>
+            </div>
+
+            <div class="stats-box">
+                <div class="stats-box-header">
+                    <div class="stats-box-title">Messages</div>
+                    <div class="stats-box-icon">#</div>
+                </div>
+                <div class="breakdown-item">
+                    <span class="breakdown-period">1d</span>
+                    <span class="breakdown-value">{msgs_1d} messages</span>
+                </div>
+                <div class="breakdown-item">
+                    <span class="breakdown-period">7d</span>
+                    <span class="breakdown-value">{msgs_7d} messages</span>
+                </div>
+                <div class="breakdown-item">
+                    <span class="breakdown-period">14d</span>
+                    <span class="breakdown-value">{msgs_14d} messages</span>
+                </div>
+                <div class="breakdown-item">
+                    <span class="breakdown-period">30d</span>
+                    <span class="breakdown-value">{msgs_30d} messages</span>
+                </div>
+                <div class="breakdown-item">
+                    <span class="breakdown-period">All</span>
+                    <span class="breakdown-value">{msgs_all} messages</span>
+                </div>
+            </div>
+
+            <div class="stats-box">
+                <div class="stats-box-header">
+                    <div class="stats-box-title">Voice Activity</div>
+                    <div class="stats-box-icon">&#128264;</div>
+                </div>
+                <div class="breakdown-item">
+                    <span class="breakdown-period">1d</span>
+                    <span class="breakdown-value">{voice_1d}</span>
+                </div>
+                <div class="breakdown-item">
+                    <span class="breakdown-period">7d</span>
+                    <span class="breakdown-value">{voice_7d}</span>
+                </div>
+                <div class="breakdown-item">
+                    <span class="breakdown-period">14d</span>
+                    <span class="breakdown-value">{voice_14d}</span>
+                </div>
+                <div class="breakdown-item">
+                    <span class="breakdown-period">30d</span>
+                    <span class="breakdown-value">{voice_30d}</span>
+                </div>
+                <div class="breakdown-item">
+                    <span class="breakdown-period">All</span>
+                    <span class="breakdown-value">{voice_all}</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="bottom-section">
+            <div class="bottom-col">
+                <div class="section-header">
+                    <div class="section-title">Top Channels &amp; Applications</div>
+                </div>
+                {channels_html}
+            </div>
+            <div class="bottom-col">
+                <div class="section-header">
+                    <div class="section-title">Activity</div>
+                </div>
+                <div class="chart-area">
+                    <div class="chart-axis-row">
+                        <div class="axis-label"><span class="axis-dot green"></span><span class="axis-name">Messages</span><span class="axis-peak">peak {msg_max}</span></div>
+                        <div class="axis-label"><span class="axis-dot red"></span><span class="axis-name">Voice</span><span class="axis-peak">peak {voice_max}</span></div>
+                    </div>
+                    <svg class="sparkline-svg" viewBox="0 0 {chart_width} 80" preserveAspectRatio="none">
+                        <polyline points="{msg_chart_points}" fill="none" stroke="#23a559" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        <polyline points="{voice_chart_points}" fill="none" stroke="#da373c" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    <div class="chart-dates">
+                        <span class="chart-date">{chart_date_start}</span>
+                        <span class="chart-date">{chart_date_end}</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="footer">
+            <div class="footer-text">Server Lookback: <span class="footer-highlight">{period_label}</span> &mdash; Timezone: UTC</div>
+            <div class="footer-text">Powered by Vibey</div>
+        </div>
+    </div>
+</body>
+</html>

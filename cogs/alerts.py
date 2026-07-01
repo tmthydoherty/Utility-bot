@@ -12,8 +12,10 @@ from typing import Dict, Any
 
 # --- Constants ---
 CONFIG_FILE = "welcome_config.json"
-# How many seconds after join to wait for role additions before sending welcome
-ROLE_WAIT_SECONDS = 15
+# How many seconds after first game role to wait for further role additions before sending welcome
+ROLE_WAIT_SECONDS = 30
+# Max seconds to wait for onboarding signal before giving up and sending a generic welcome
+MAX_ONBOARDING_WAIT_SECONDS = 300
 
 logger = logging.getLogger(__name__)
 
@@ -81,18 +83,19 @@ def _default_guild_config() -> Dict[str, Any]:
     return {
         "welcome_channel_id": None,
         "exit_channel_id": None,
+        "mod_channel_id": None,
         "intro_channel_id": None,
         "lfg_forum_id": None,
         "game_mappings": {},  # role_id (str) -> {"thread_id": int}
     }
 
 
-class Welcome(commands.Cog):
+class Alerts(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.config_manager = ConfigManager(CONFIG_FILE)
         self.config: Dict[str, Any] = {}
-        # Track pending new joiners: {user_id: {"joined_at": time, "task": asyncio.Task}}
+        # Track pending new joiners: {user_id: {"joined_at": time, "task": asyncio.Task, "triggered": bool}}
         self._pending_welcomes: Dict[int, Dict] = {}
         self.bot.loop.create_task(self._load_config())
 
@@ -118,37 +121,54 @@ class Welcome(commands.Cog):
         gc = self._guild_config(member.guild.id)
         if not gc.get("welcome_channel_id"):
             return
-        # Start a delayed welcome task - waits for role additions
-        if member.id in self._pending_welcomes:
-            task = self._pending_welcomes[member.id].get("task")
-            if task and not task.done():
-                task.cancel()
-        task = asyncio.create_task(self._delayed_welcome(member))
-        self._pending_welcomes[member.id] = {"joined_at": time.time(), "task": task}
+
+        # Register as pending — wait for a game role before starting the welcome timer.
+        # Fallback timer ensures welcome still fires if onboarding is never completed.
+        task = asyncio.create_task(self._delayed_welcome(member, MAX_ONBOARDING_WAIT_SECONDS))
+        self._pending_welcomes[member.id] = {
+            "joined_at": time.time(),
+            "task": task,
+            "triggered": False,
+        }
 
     @commands.Cog.listener()
     async def on_member_update(self, before: discord.Member, after: discord.Member):
         if after.bot:
             return
-        # Only care about pending new joiners
-        pending = self._pending_welcomes.get(after.id)
-        if not pending:
-            return
-        # Only within the grace window
-        if time.time() - pending["joined_at"] > ROLE_WAIT_SECONDS + 5:
-            return
-        # If roles changed, restart the timer so we can batch multiple role adds
-        if before.roles != after.roles:
-            task = pending.get("task")
-            if task and not task.done():
-                task.cancel()
-            task = asyncio.create_task(self._delayed_welcome(after))
-            pending["task"] = task
 
-    async def _delayed_welcome(self, member: discord.Member):
+        # --- Welcome: pending role tracking ---
+        pending = self._pending_welcomes.get(after.id)
+        if pending and before.roles != after.roles:
+            gc = self._guild_config(after.guild.id)
+            game_role_ids = {int(rid) for rid in gc.get("game_mappings", {})}
+            added_role_ids = {r.id for r in after.roles} - {r.id for r in before.roles}
+
+            if not pending["triggered"]:
+                # Waiting for first game role to signal onboarding is done
+                if added_role_ids & game_role_ids:
+                    pending["triggered"] = True
+                    task = pending.get("task")
+                    if task and not task.done():
+                        task.cancel()
+                    task = asyncio.create_task(self._delayed_welcome(after))
+                    pending["task"] = task
+            else:
+                # Already triggered — restart timer to batch further game role adds
+                if added_role_ids & game_role_ids:
+                    task = pending.get("task")
+                    if task and not task.done():
+                        task.cancel()
+                    task = asyncio.create_task(self._delayed_welcome(after))
+                    pending["task"] = task
+
+        # --- Mod alerts: timeout detection ---
+        if not before.timed_out_until and after.timed_out_until:
+            asyncio.create_task(self._handle_timeout(after))
+
+    async def _delayed_welcome(self, member: discord.Member, delay: int = ROLE_WAIT_SECONDS):
         """Wait for role additions to settle, then send a tailored welcome."""
         try:
-            await asyncio.sleep(ROLE_WAIT_SECONDS)
+            await asyncio.sleep(delay)
         except asyncio.CancelledError:
             return
 
@@ -256,15 +276,30 @@ class Welcome(commands.Cog):
 
         gc = self._guild_config(member.guild.id)
         exit_ch_id = gc.get("exit_channel_id")
-        if not exit_ch_id:
+        mod_ch_id = gc.get("mod_channel_id")
+        if not exit_ch_id and not mod_ch_id:
             return
 
-        channel = member.guild.get_channel(exit_ch_id)
-        if not channel:
-            try:
-                channel = await member.guild.fetch_channel(exit_ch_id)
-            except Exception:
-                return
+        exit_channel = None
+        if exit_ch_id:
+            exit_channel = member.guild.get_channel(exit_ch_id)
+            if not exit_channel:
+                try:
+                    exit_channel = await member.guild.fetch_channel(exit_ch_id)
+                except Exception:
+                    exit_channel = None
+
+        mod_channel = None
+        if mod_ch_id:
+            mod_channel = member.guild.get_channel(mod_ch_id)
+            if not mod_channel:
+                try:
+                    mod_channel = await member.guild.fetch_channel(mod_ch_id)
+                except Exception:
+                    mod_channel = None
+
+        if not exit_channel and not mod_channel:
+            return
 
         # Small delay to let audit log populate for kicks/bans
         await asyncio.sleep(2)
@@ -273,6 +308,7 @@ class Welcome(commands.Cog):
         action_type = "left"
         moderator = None
         reason = None
+        is_inactivity_kick = False
 
         try:
             # Check for ban first
@@ -292,33 +328,125 @@ class Welcome(commands.Cog):
                             action_type = "kicked"
                             moderator = entry.user
                             reason = entry.reason
+                            # Parse inactivity kicks to attribute to the real admin
+                            if reason and reason.startswith("Inactivity | admin:"):
+                                is_inactivity_kick = True
+                                try:
+                                    admin_id = int(reason.split("admin:")[1])
+                                    admin = member.guild.get_member(admin_id) or await member.guild.fetch_member(admin_id)
+                                    if admin:
+                                        moderator = admin
+                                except (ValueError, IndexError, discord.NotFound):
+                                    pass
+                                reason = "Inactivity"
                             break
         except discord.Forbidden:
             pass  # No audit log permission
 
-        if action_type == "left":
-            msg = f"**{member.name}** left the server."
-        elif action_type == "kicked":
-            msg = f"**{member.name}** was kicked by **{moderator}**."
+        if action_type == "kicked":
+            color = discord.Color.orange()
+            footer = f"Kicked by {moderator}"
             if reason:
-                msg += f"\nReason: {reason}"
-        else:  # banned
-            msg = f"**{member.name}** was banned by **{moderator}**."
+                footer += f" — {reason}"
+        elif action_type == "banned":
+            color = discord.Color.red()
+            footer = f"Banned by {moderator}"
             if reason:
-                msg += f"\nReason: {reason}"
+                footer += f" — {reason}"
+        else:
+            color = discord.Color.yellow()
+            footer = "Left"
 
-        await channel.send(msg)
+        embed = discord.Embed(
+            description=f"{member.name}\n<@{member.id}>",
+            color=color,
+        )
+        embed.set_author(name=member.display_name, icon_url=member.display_avatar.url)
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.set_footer(text=footer)
+
+        # Send to exit channel (all events)
+        if exit_channel:
+            await exit_channel.send(embed=embed)
+
+        # Send to mod channel (kicks and bans only, skip inactivity kicks)
+        if mod_channel and action_type in ("kicked", "banned") and not is_inactivity_kick:
+            await mod_channel.send(embed=embed)
+
+    # ------------------------------------------------------------------
+    # TIMEOUT DETECTION
+    # ------------------------------------------------------------------
+    async def _handle_timeout(self, member: discord.Member):
+        gc = self._guild_config(member.guild.id)
+        mod_ch_id = gc.get("mod_channel_id")
+        if not mod_ch_id:
+            return
+
+        channel = member.guild.get_channel(mod_ch_id)
+        if not channel:
+            try:
+                channel = await member.guild.fetch_channel(mod_ch_id)
+            except Exception:
+                return
+
+        # Small delay for audit log to populate
+        await asyncio.sleep(2)
+
+        moderator = None
+        reason = None
+        try:
+            async for entry in member.guild.audit_logs(limit=5, action=discord.AuditLogAction.member_update):
+                if entry.target and entry.target.id == member.id:
+                    if (discord.utils.utcnow() - entry.created_at).total_seconds() < 15:
+                        moderator = entry.user
+                        reason = entry.reason
+                        break
+        except discord.Forbidden:
+            pass
+
+        # Calculate duration
+        duration_str = "Unknown duration"
+        if member.timed_out_until:
+            delta = member.timed_out_until - discord.utils.utcnow()
+            total_seconds = int(delta.total_seconds())
+            if total_seconds > 0:
+                days, remainder = divmod(total_seconds, 86400)
+                hours, remainder = divmod(remainder, 3600)
+                minutes, _ = divmod(remainder, 60)
+                parts = []
+                if days:
+                    parts.append(f"{days}d")
+                if hours:
+                    parts.append(f"{hours}h")
+                if minutes:
+                    parts.append(f"{minutes}m")
+                duration_str = " ".join(parts) if parts else "<1m"
+
+        footer = f"Timed out by {moderator}" if moderator else "Timed out"
+        footer += f" — {duration_str}"
+        if reason:
+            footer += f" — {reason}"
+
+        embed = discord.Embed(
+            description=f"{member.name}\n<@{member.id}>",
+            color=discord.Color.dark_gold(),
+        )
+        embed.set_author(name=member.display_name, icon_url=member.display_avatar.url)
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.set_footer(text=footer)
+
+        await channel.send(embed=embed)
 
     # ------------------------------------------------------------------
     # ADMIN PANEL
     # ------------------------------------------------------------------
-    @app_commands.command(name="welcome_panel", description="Admin: Configure the Welcome & Exit system")
-    async def welcome_panel(self, interaction: discord.Interaction):
+    @app_commands.command(name="alerts_panel", description="Admin: Configure the Alerts system (Welcome, Exit & Mod)")
+    async def alerts_panel(self, interaction: discord.Interaction):
         if not self.bot.is_bot_admin(interaction.user):
             return await interaction.response.send_message("Admin access only.", ephemeral=True)
-        view = WelcomePanelView(self)
+        view = AlertsPanelView(self)
         await interaction.response.send_message(
-            "**Welcome & Exit Panel**\nSelect a module to configure:", view=view, ephemeral=True
+            "**Alerts Panel**\nSelect a module to configure:", view=view, ephemeral=True
         )
 
 
@@ -326,15 +454,15 @@ class Welcome(commands.Cog):
 # ADMIN PANEL VIEWS
 # ======================================================================
 
-class WelcomePanelView(ui.View):
-    def __init__(self, cog: Welcome):
+class AlertsPanelView(ui.View):
+    def __init__(self, cog: Alerts):
         super().__init__(timeout=120)
         self.cog = cog
 
     @ui.button(label="Channels", style=discord.ButtonStyle.primary, row=0)
     async def channels_btn(self, interaction: discord.Interaction, button: ui.Button):
         await interaction.response.send_message(
-            "Select channels for welcome and exit messages:",
+            "Select channels for welcome, exit, and mod alert messages:",
             view=ChannelConfigView(self.cog, interaction.guild_id),
             ephemeral=True,
         )
@@ -354,6 +482,7 @@ class WelcomePanelView(ui.View):
 
         welcome_ch = f"<#{gc['welcome_channel_id']}>" if gc.get("welcome_channel_id") else "Not set"
         exit_ch = f"<#{gc['exit_channel_id']}>" if gc.get("exit_channel_id") else "Not set"
+        mod_ch = f"<#{gc['mod_channel_id']}>" if gc.get("mod_channel_id") else "Not set"
         intro_ch = f"<#{gc['intro_channel_id']}>" if gc.get("intro_channel_id") else "Not set"
         lfg_forum = f"<#{gc['lfg_forum_id']}>" if gc.get("lfg_forum_id") else "Not set"
 
@@ -361,6 +490,7 @@ class WelcomePanelView(ui.View):
             "**Current Configuration**",
             f"Welcome Channel: {welcome_ch}",
             f"Exit Channel: {exit_ch}",
+            f"Mod Channel: {mod_ch}",
             f"Intro Channel: {intro_ch}",
             f"LFG Forum: {lfg_forum}",
             "",
@@ -381,7 +511,7 @@ class WelcomePanelView(ui.View):
 
 
 class ChannelConfigView(ui.View):
-    def __init__(self, cog: Welcome, guild_id: int):
+    def __init__(self, cog: Alerts, guild_id: int):
         super().__init__(timeout=120)
         self.cog = cog
         self.guild_id = guild_id
@@ -424,6 +554,24 @@ class ChannelConfigView(ui.View):
 
     @ui.select(
         cls=ui.ChannelSelect,
+        placeholder="Mod Channel (kick/ban/timeout alerts)",
+        min_values=1, max_values=1,
+        channel_types=[
+            discord.ChannelType.text,
+            discord.ChannelType.public_thread,
+            discord.ChannelType.private_thread,
+        ],
+    )
+    async def mod_ch(self, interaction: discord.Interaction, select: ui.ChannelSelect):
+        gc = self.cog._guild_config(self.guild_id)
+        gc["mod_channel_id"] = select.values[0].id
+        await self.cog._save_config()
+        await interaction.response.send_message(
+            f"Mod channel set to {select.values[0].mention}", ephemeral=True
+        )
+
+    @ui.select(
+        cls=ui.ChannelSelect,
         placeholder="Introduction Channel (for invite at end of welcome)",
         min_values=1, max_values=1,
         channel_types=[
@@ -460,7 +608,7 @@ class ChannelConfigView(ui.View):
 
 
 class GameMappingMenuView(ui.View):
-    def __init__(self, cog: Welcome, guild_id: int):
+    def __init__(self, cog: Alerts, guild_id: int):
         super().__init__(timeout=120)
         self.cog = cog
         self.guild_id = guild_id
@@ -491,7 +639,7 @@ class GameMappingMenuView(ui.View):
 
 
 class AddMappingRoleView(ui.View):
-    def __init__(self, cog: Welcome, guild_id: int):
+    def __init__(self, cog: Alerts, guild_id: int):
         super().__init__(timeout=120)
         self.cog = cog
         self.guild_id = guild_id
@@ -507,7 +655,7 @@ class AddMappingRoleView(ui.View):
 
 
 class AddMappingThreadView(ui.View):
-    def __init__(self, cog: Welcome, guild_id: int, role: discord.Role):
+    def __init__(self, cog: Alerts, guild_id: int, role: discord.Role):
         super().__init__(timeout=120)
         self.cog = cog
         self.guild_id = guild_id
@@ -538,7 +686,7 @@ class AddMappingThreadView(ui.View):
 
 
 class RemoveMappingView(ui.View):
-    def __init__(self, cog: Welcome, guild_id: int, options):
+    def __init__(self, cog: Alerts, guild_id: int, options):
         super().__init__(timeout=60)
         self.cog = cog
         self.guild_id = guild_id
@@ -558,4 +706,4 @@ class RemoveMappingView(ui.View):
 
 
 async def setup(bot):
-    await bot.add_cog(Welcome(bot))
+    await bot.add_cog(Alerts(bot))

@@ -1,0 +1,30 @@
+{
+    "1431565435010289778": {
+        "alert_channel_id": 1431565436713177200,
+        "quarantine_role_id": 1431565435790164024,
+        "mod_roles": [
+            1431565435790164026,
+            1431565435790164023,
+            1431565435790164022,
+            1431565435790164021,
+            1431565435819528302
+        ],
+        "mention_exempt_roles": [],
+        "exempt_channels": [],
+        "enabled_modules": {
+            "invite_links": true,
+            "message_flood": true,
+            "duplicate_spam": true,
+            "mass_mentions": true,
+            "nuke_channel_delete": true,
+            "nuke_role_delete": true,
+            "nuke_mass_ban": true
+        },
+        "admin_roles": [
+            1431565435819528302
+        ],
+        "whitelisted_users": [
+            560914996549386242
+        ]
+    }
+}

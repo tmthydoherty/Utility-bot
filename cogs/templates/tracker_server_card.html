@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        @font-face {{
+            font-family: 'NotoSans';
+            src: url('file://{font_path}/NotoSans-Regular.ttf') format('truetype');
+            font-weight: normal;
+        }}
+        @font-face {{
+            font-family: 'NotoSans';
+            src: url('file://{font_path}/NotoSans-Bold.ttf') format('truetype');
+            font-weight: bold;
+        }}
+
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+
+        body {{
+            width: 640px;
+            font-family: 'NotoSans', 'Segoe UI', sans-serif;
+            font-weight: bold;
+            background: #1a1b1e;
+            color: #ffffff;
+            padding: 0;
+        }}
+
+        .card {{
+            background: #2b2d31;
+            border-radius: 12px;
+            overflow: hidden;
+            margin: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.04);
+        }}
+
+        /* --- HEADER --- */
+        .header {{
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            padding: 18px 22px;
+            background: #313338;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        }}
+
+        .server-icon {{
+            width: 48px;
+            height: 48px;
+            border-radius: 12px;
+            object-fit: cover;
+        }}
+
+        .header-text {{
+            flex: 1;
+        }}
+
+        .server-name {{
+            font-size: 20px;
+            font-weight: bold;
+            color: #ffffff;
+            line-height: 1.2;
+        }}
+
+        .header-subtitle {{
+            font-size: 14px;
+            color: #949ba4;
+            margin-top: 2px;
+        }}
+
+        /* --- HERO STATS --- */
+        .hero-stats {{
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        }}
+
+        .hero-item {{
+            padding: 16px 12px;
+            text-align: center;
+            border-right: 1px solid rgba(255, 255, 255, 0.06);
+        }}
+
+        .hero-item:last-child {{
+            border-right: none;
+        }}
+
+        .hero-label {{
+            font-size: 13px;
+            font-weight: bold;
+            color: #949ba4;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+        }}
+
+        .dot {{
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+        }}
+
+        .dot-green {{ background: #23a559; }}
+        .dot-gray {{ background: #949ba4; }}
+
+        .hero-value {{
+            font-size: 28px;
+            font-weight: bold;
+            color: #ffffff;
+            line-height: 1;
+        }}
+
+        .hero-value.green {{ color: #23a559; }}
+
+        .hero-change {{
+            font-size: 13px;
+            margin-top: 4px;
+            font-weight: bold;
+        }}
+
+        .hero-change.positive {{ color: #23a559; }}
+        .hero-change.negative {{ color: #da373c; }}
+
+        /* --- CHART SECTION --- */
+        .chart-section {{
+            padding: 16px 22px 8px;
+            position: relative;
+        }}
+
+        .chart-header {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }}
+
+        .chart-title {{
+            font-size: 14px;
+            font-weight: bold;
+            color: #949ba4;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }}
+
+        .chart-legend {{
+            display: flex;
+            gap: 16px;
+        }}
+
+        .legend-item {{
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 13px;
+            color: #b5bac1;
+        }}
+
+        .chart-area {{
+            position: relative;
+            height: 160px;
+        }}
+
+        .bars-container {{
+            display: flex;
+            align-items: flex-end;
+            gap: 3px;
+            height: 150px;
+            padding: 0;
+        }}
+
+        .bar-wrapper {{
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            height: 100%;
+            justify-content: flex-end;
+        }}
+
+        .bar {{
+            width: 100%;
+            border-radius: 3px 3px 0 0;
+            min-height: 2px;
+            transition: opacity 0.2s;
+        }}
+
+        .bar-msg {{
+            background: linear-gradient(180deg, #2ecc71 0%, #1a9b4a 100%);
+            opacity: 0.8;
+        }}
+
+        .bar-contrib {{
+            background: rgba(255, 255, 255, 0.12);
+            border-radius: 3px 3px 0 0;
+            position: absolute;
+            bottom: 0;
+        }}
+
+        .svg-overlay {{
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 150px;
+            pointer-events: none;
+        }}
+
+        .chart-labels {{
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0 0;
+        }}
+
+        .chart-label {{
+            font-size: 12px;
+            color: #6d6f78;
+            text-align: center;
+            flex: 1;
+        }}
+
+        .y-axis {{
+            position: absolute;
+            top: 0;
+            left: -2px;
+            height: 150px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            pointer-events: none;
+        }}
+
+        .y-label {{
+            font-size: 9px;
+            color: #6d6f78;
+            text-align: right;
+            line-height: 1;
+        }}
+
+        .y-axis-right {{
+            position: absolute;
+            top: 0;
+            right: -2px;
+            height: 150px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            pointer-events: none;
+        }}
+
+        /* --- LISTS SECTION --- */
+        .lists-section {{
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            border-top: 1px solid rgba(255, 255, 255, 0.06);
+        }}
+
+        .list-col {{
+            padding: 16px 22px;
+        }}
+
+        .list-col:first-child {{
+            border-right: 1px solid rgba(255, 255, 255, 0.06);
+        }}
+
+        .list-title {{
+            font-size: 14px;
+            font-weight: bold;
+            color: #949ba4;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 12px;
+        }}
+
+        .list-item {{
+            display: flex;
+            align-items: center;
+            padding: 5px 0;
+            gap: 8px;
+        }}
+
+        .rank {{
+            font-size: 15px;
+            font-weight: bold;
+            color: #ffffff;
+            min-width: 22px;
+        }}
+
+        .item-name {{
+            font-size: 15px;
+            color: #e0e1e5;
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }}
+
+        .item-value {{
+            font-size: 15px;
+            color: #949ba4;
+            font-weight: bold;
+        }}
+
+        .channel-hash {{
+            color: #949ba4;
+            font-weight: normal;
+        }}
+
+        /* --- FOOTER --- */
+        .footer {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 22px;
+            border-top: 1px solid rgba(255, 255, 255, 0.06);
+            background: rgba(0, 0, 0, 0.15);
+        }}
+
+        .footer-text {{
+            font-size: 12px;
+            color: #5a5d6b;
+        }}
+
+        .footer-highlight {{
+            color: #e0e1e5;
+        }}
+
+        .footer-brand {{
+            font-size: 11px;
+            color: #5a5d6b;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="header">
+            <img class="server-icon" src="{server_icon_url}" alt="">
+            <div class="header-text">
+                <div class="server-name">{server_name}</div>
+                <div class="header-subtitle"># Messages</div>
+            </div>
+        </div>
+
+        <div class="hero-stats">
+            <div class="hero-item">
+                <div class="hero-label">Messages <span class="dot dot-green"></span></div>
+                <div class="hero-value">{total_msgs}</div>
+                <div class="hero-change {growth_class}">{growth_text}</div>
+            </div>
+            <div class="hero-item">
+                <div class="hero-label">Contributors</div>
+                <div class="hero-value">{active_users}</div>
+            </div>
+            <div class="hero-item">
+                <div class="hero-label">New Members</div>
+                <div class="hero-value green">{new_members}</div>
+            </div>
+            <div class="hero-item">
+                <div class="hero-label">Voice Hours</div>
+                <div class="hero-value">{voice_hours}</div>
+            </div>
+        </div>
+
+        <div class="chart-section">
+            <div class="chart-header">
+                <div class="chart-legend">
+                    <div class="legend-item"><span class="dot dot-green"></span> Messages</div>
+                    <div class="legend-item"><span class="dot dot-gray"></span> Contributors</div>
+                </div>
+            </div>
+            <div class="chart-area">
+                <div class="bars-container">
+                    {bars_html}
+                </div>
+                <svg class="svg-overlay" viewBox="0 0 {svg_width} 150" preserveAspectRatio="none">
+                    <polyline points="{svg_points}" fill="none" stroke="#23a559" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.9"/>
+                </svg>
+            </div>
+            <div class="chart-labels">
+                {chart_labels_html}
+            </div>
+        </div>
+
+        <div class="lists-section">
+            <div class="list-col">
+                <div class="list-title">Top Members</div>
+                {members_html}
+            </div>
+            <div class="list-col">
+                <div class="list-title">Top Channels</div>
+                {channels_html}
+            </div>
+        </div>
+
+        <div class="footer">
+            <div class="footer-text">Server Lookback: <span class="footer-highlight">{period_label}</span> &mdash; Timezone: UTC</div>
+            <div class="footer-brand">Powered by Vibey</div>
+        </div>
+    </div>
+</body>
+</html>

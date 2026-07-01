@@ -1146,7 +1146,8 @@ class NeverHaveIEver(commands.Cog):
 
         except Exception as e:
             print(f"NHIE: Error during data cleanup: {e}")
-            
+            await self.bot.error_reporter.report("NHIE", f"cleanup_task: {e}")
+
     @cleanup_task.before_loop
     async def before_cleanup_task(self):
         # (Fix #5): Wait until bot is ready

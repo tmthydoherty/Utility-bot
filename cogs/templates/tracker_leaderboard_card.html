@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        @font-face {{
+            font-family: 'NotoSans';
+            src: url('file://{font_path}/NotoSans-Regular.ttf') format('truetype');
+            font-weight: normal;
+        }}
+        @font-face {{
+            font-family: 'NotoSans';
+            src: url('file://{font_path}/NotoSans-Bold.ttf') format('truetype');
+            font-weight: bold;
+        }}
+
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+
+        body {{
+            width: 700px;
+            font-family: 'NotoSans', 'Segoe UI', sans-serif;
+            font-weight: bold;
+            background: #1a1b1e;
+            color: #ffffff;
+            padding: 0;
+        }}
+
+        .card {{
+            background: #2b2d31;
+            border-radius: 12px;
+            overflow: hidden;
+            margin: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.04);
+        }}
+
+        .header {{
+            padding: 18px 22px;
+            background: #313338;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }}
+
+        .server-icon {{
+            width: 40px;
+            height: 40px;
+            border-radius: 10px;
+            object-fit: cover;
+        }}
+
+        .header-text {{
+            flex: 1;
+        }}
+
+        .header-title {{
+            font-size: 20px;
+            font-weight: bold;
+            color: #ffffff;
+            letter-spacing: 0.5px;
+        }}
+
+        .header-subtitle {{
+            font-size: 14px;
+            color: #949ba4;
+            margin-top: 1px;
+        }}
+
+        /* --- TWO COLUMN LAYOUT --- */
+        .columns {{
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+        }}
+
+        .column {{
+            padding: 16px 22px;
+        }}
+
+        .column:first-child {{
+            border-right: 1px solid rgba(255, 255, 255, 0.06);
+        }}
+
+        .col-header {{
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 14px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        }}
+
+        .col-icon {{
+            font-size: 16px;
+        }}
+
+        .col-title {{
+            font-size: 15px;
+            font-weight: bold;
+            color: #949ba4;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }}
+
+        /* --- LEADERBOARD ITEMS --- */
+        .lb-item {{
+            display: flex;
+            align-items: center;
+            padding: 8px 10px;
+            gap: 12px;
+            border-radius: 8px;
+            margin-bottom: 4px;
+        }}
+
+        .lb-item.top-1 {{
+            background: linear-gradient(135deg, rgba(255, 215, 0, 0.08) 0%, rgba(255, 215, 0, 0.02) 100%);
+            border: 1px solid rgba(255, 215, 0, 0.12);
+        }}
+
+        .lb-item.top-2 {{
+            background: linear-gradient(135deg, rgba(192, 192, 192, 0.06) 0%, rgba(192, 192, 192, 0.01) 100%);
+            border: 1px solid rgba(192, 192, 192, 0.08);
+        }}
+
+        .lb-item.top-3 {{
+            background: linear-gradient(135deg, rgba(205, 127, 50, 0.06) 0%, rgba(205, 127, 50, 0.01) 100%);
+            border: 1px solid rgba(205, 127, 50, 0.08);
+        }}
+
+        .lb-rank {{
+            font-size: 16px;
+            font-weight: bold;
+            min-width: 26px;
+            text-align: center;
+        }}
+
+        .lb-rank.gold {{ color: #ffd700; }}
+        .lb-rank.silver {{ color: #c0c0c0; }}
+        .lb-rank.bronze {{ color: #cd7f32; }}
+        .lb-rank.normal {{ color: #ffffff; }}
+
+        .lb-avatar {{
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            object-fit: cover;
+        }}
+
+        .lb-name {{
+            font-size: 15px;
+            color: #e0e1e5;
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }}
+
+        .lb-value {{
+            font-size: 15px;
+            font-weight: bold;
+            color: #ffffff;
+        }}
+
+        .lb-bar-wrap {{
+            width: 60px;
+            height: 5px;
+            background: rgba(255, 255, 255, 0.06);
+            border-radius: 3px;
+            overflow: hidden;
+        }}
+
+        .lb-bar {{
+            height: 100%;
+            border-radius: 3px;
+        }}
+
+        .lb-bar.msg {{ background: #23a559; }}
+        .lb-bar.voice {{ background: #23a559; }}
+
+        .no-data {{
+            text-align: center;
+            padding: 20px;
+            color: #6d6f78;
+            font-size: 15px;
+        }}
+
+        /* --- FOOTER --- */
+        .footer {{
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 22px;
+            border-top: 1px solid rgba(255, 255, 255, 0.06);
+            background: rgba(0, 0, 0, 0.15);
+        }}
+
+        .footer-text {{
+            font-size: 12px;
+            color: #5a5d6b;
+        }}
+
+        .footer-highlight {{
+            color: #e0e1e5;
+        }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="header">
+            <img class="server-icon" src="{server_icon_url}" alt="">
+            <div class="header-text">
+                <div class="header-title">Leaderboard</div>
+                <div class="header-subtitle">{server_name} &mdash; {period_label}</div>
+            </div>
+        </div>
+
+        <div class="columns">
+            <div class="column">
+                <div class="col-header">
+                    <span class="col-icon">&#128172;</span>
+                    <span class="col-title">Messages</span>
+                </div>
+                {msg_leaderboard_html}
+            </div>
+            <div class="column">
+                <div class="col-header">
+                    <span class="col-icon">&#127908;</span>
+                    <span class="col-title">Voice Time</span>
+                </div>
+                {voice_leaderboard_html}
+            </div>
+        </div>
+
+        <div class="footer">
+            <div class="footer-text">Server Lookback: <span class="footer-highlight">{period_label}</span> &mdash; Timezone: UTC</div>
+            <div class="footer-text">Powered by Vibey</div>
+        </div>
+    </div>
+</body>
+</html>

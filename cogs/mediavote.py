@@ -351,7 +351,8 @@ class ConfirmLaunchView(discord.ui.View):
         sticky_embed = discord.Embed(
             title=self.wizard_data['display_name'],
             description=(
-                "Submit your entry by attaching an image to a message saying **Entry**.\n\n"
+                "Submit your entry by attaching an image to a message saying **Entry**.\n"
+                "You may submit up to **3** entries.\n\n"
                 f"Submissions close {discord.utils.format_dt(sub_dl, 'R')} ({discord.utils.format_dt(sub_dl, 'F')})"
             ),
             color=EMBED_COLOR
@@ -546,12 +547,12 @@ class AdminRoleSelectView(discord.ui.View):
 # ─── Submission Vote View (persistent buttons on each thread entry) ──────────
 class SubmissionVoteView(discord.ui.View):
     """Attached to each submission in the showcase thread. Buttons handled via on_interaction."""
-    def __init__(self, submitter_id: str):
+    def __init__(self, entry_id: str):
         super().__init__(timeout=None)
         for rank in [1, 2, 3]:
             btn = discord.ui.Button(
                 label=f"#{rank}",
-                custom_id=f"mv:{rank}:{submitter_id}",
+                custom_id=f"mv:{rank}:{entry_id}",
                 style=discord.ButtonStyle.secondary
             )
             self.add_item(btn)
@@ -781,7 +782,8 @@ class MediaVote(commands.Cog):
             sub_dl = datetime.fromisoformat(event["submission_deadline"])
             custom_text = event.get("sticky_text")
             body = custom_text or (
-                "Submit your entry by attaching an image to a message saying **Entry**."
+                "Submit your entry by attaching an image to a message saying **Entry**.\n"
+                "You may submit up to **3** entries."
             )
             return discord.Embed(
                 title=event['display_name'],
@@ -794,12 +796,15 @@ class MediaVote(commands.Cog):
 
         # Voting phase
         vote_dl = datetime.fromisoformat(event["voting_deadline"])
+        total_voters = len(event.get("votes", {}))
+        total_votes = sum(len(v) for v in event.get("votes", {}).values())
         return discord.Embed(
             title=f"{event['display_name']} — Voting Open!",
             description=(
                 "Head over to the showcase thread and vote for your favorites!\n"
                 "Use the **#1**, **#2**, and **#3** buttons to pick your top 3.\n\n"
                 f"<#{event['thread_id']}>\n\n"
+                f"**Voters:** {total_voters} · **Total votes:** {total_votes}\n\n"
                 f"Voting closes {discord.utils.format_dt(vote_dl, 'R')} ({discord.utils.format_dt(vote_dl, 'F')})"
             ),
             color=EMBED_COLOR
@@ -952,13 +957,20 @@ class MediaVote(commands.Cog):
                         pass
                     return
 
-            # Handle re-submission: delete old entry
-            is_resubmission = False
-            old_entry = event.get("entries", {}).get(user_id)
-            if old_entry:
-                is_resubmission = True
+            # Check user's existing entries (max 3, oldest replaced on 4th)
+            MAX_ENTRIES = 3
+            user_entries = [
+                (eid, e) for eid, e in event.get("entries", {}).items()
+                if e.get("user_id") == user_id
+            ]
+            user_entries.sort(key=lambda x: x[1].get("submitted_at", ""))
+
+            replaced_oldest = False
+            if len(user_entries) >= MAX_ENTRIES:
+                replaced_oldest = True
+                oldest_eid, oldest_entry = user_entries[0]
                 try:
-                    old_msg = await thread.fetch_message(old_entry["thread_message_id"])
+                    old_msg = await thread.fetch_message(oldest_entry["thread_message_id"])
                     await old_msg.delete()
                 except (discord.NotFound, discord.Forbidden):
                     pass
@@ -966,9 +978,8 @@ class MediaVote(commands.Cog):
             # Bug 2: Wrap thread.send in try/except — image data would be lost on failure
             filename = attachment.filename or "entry.png"
             file = discord.File(io.BytesIO(image_data), filename=filename)
-            view = SubmissionVoteView(user_id)
             try:
-                thread_msg = await thread.send(file=file, view=view)
+                thread_msg = await thread.send(file=file)
             except (discord.Forbidden, discord.HTTPException) as e:
                 logger.error(f"Failed to post entry to thread: {e}")
                 try:
@@ -977,18 +988,36 @@ class MediaVote(commands.Cog):
                     pass
                 return
 
+            # Add vote buttons with entry ID
+            entry_id = str(thread_msg.id)
+            view = SubmissionVoteView(entry_id)
+            try:
+                await thread_msg.edit(view=view)
+            except (discord.Forbidden, discord.HTTPException) as e:
+                logger.warning(f"Could not add vote buttons to entry: {e}")
+
             # Save entry
             async with self.config_lock:
-                event.setdefault("entries", {})[user_id] = {
+                entries = event.setdefault("entries", {})
+                if replaced_oldest:
+                    entries.pop(oldest_eid, None)
+                entries[entry_id] = {
+                    "user_id": user_id,
                     "thread_message_id": thread_msg.id,
                     "username": display_name,
                     "submitted_at": datetime.now(timezone.utc).isoformat()
                 }
                 await self._save()
 
+            # Count user's entries after save
+            new_count = len([e for e in event.get("entries", {}).values() if e.get("user_id") == user_id])
+
             # Bug 6: Wrap confirmation send in try/except
             try:
-                confirm_text = "Entry received — your previous submission has been replaced." if is_resubmission else "Entry received."
+                if replaced_oldest:
+                    confirm_text = f"Entry received ({new_count}/{MAX_ENTRIES}) — your oldest submission has been replaced."
+                else:
+                    confirm_text = f"Entry received ({new_count}/{MAX_ENTRIES})."
                 await channel.send(confirm_text, delete_after=5)
             except (discord.Forbidden, discord.HTTPException):
                 pass
@@ -1026,14 +1055,15 @@ class MediaVote(commands.Cog):
         entries = event_data.get("entries", {})
         votes = event_data.get("votes", {})
 
-        # Tally votes per submission
-        vote_counts = {uid: {"1": 0, "2": 0, "3": 0, "score": 0} for uid in entries}
+        # Tally votes per entry
+        vote_counts = {eid: {"1": 0, "2": 0, "3": 0, "score": 0} for eid in entries}
         for voter_votes in votes.values():
-            for rank_str, submitter_id in voter_votes.items():
-                if submitter_id in vote_counts:
-                    vote_counts[submitter_id][rank_str] += 1
-                    vote_counts[submitter_id]["score"] += RANK_VALUES.get(rank_str, 0)
+            for rank_str, entry_id in voter_votes.items():
+                if entry_id in vote_counts:
+                    vote_counts[entry_id][rank_str] += 1
+                    vote_counts[entry_id]["score"] += RANK_VALUES.get(rank_str, 0)
 
+        deleted_entries = set()
         if thread:
             # Ensure thread is not archived
             if hasattr(thread, 'archived') and thread.archived:
@@ -1043,13 +1073,16 @@ class MediaVote(commands.Cog):
                     pass
 
             # Reveal authors and remove vote buttons
-            for user_id, entry in entries.items():
+            for entry_id, entry in entries.items():
                 try:
                     msg = await thread.fetch_message(entry["thread_message_id"])
                     await msg.edit(content=f"Entry by **{entry['username']}**", view=None)
                     await asyncio.sleep(0.5)
-                except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
-                    logger.warning(f"Could not reveal entry for {entry.get('username', user_id)}: {e}")
+                except discord.NotFound:
+                    deleted_entries.add(entry_id)
+                    logger.warning(f"Entry deleted for {entry.get('username', entry_id)}")
+                except (discord.Forbidden, discord.HTTPException) as e:
+                    logger.warning(f"Could not reveal entry for {entry.get('username', entry_id)}: {e}")
 
             # Lock and archive thread
             try:
@@ -1057,21 +1090,25 @@ class MediaVote(commands.Cog):
             except (discord.Forbidden, discord.HTTPException) as e:
                 logger.warning(f"Could not lock thread: {e}")
 
-        # Sort by score descending
+        # Sort by score descending, excluding deleted entries
         sorted_entries = sorted(
-            entries.items(),
+            ((eid, e) for eid, e in entries.items() if eid not in deleted_entries),
             key=lambda x: vote_counts.get(x[0], {}).get("score", 0),
             reverse=True
         )
 
         # Build results embed with hyperlinks
+        USERNAME_MAX = 24
         thread_id = event_data["thread_id"]
         lines = []
-        for i, (uid, entry) in enumerate(sorted_entries):
-            vc = vote_counts.get(uid, {"1": 0, "2": 0, "3": 0})
+        for i, (eid, entry) in enumerate(sorted_entries):
+            vc = vote_counts.get(eid, {"1": 0, "2": 0, "3": 0})
             jump_url = f"https://discord.com/channels/{guild_id}/{thread_id}/{entry['thread_message_id']}"
+            name = entry['username']
+            if len(name) > USERNAME_MAX:
+                name = name[:USERNAME_MAX - 1] + "…"
             lines.append(
-                f"{i + 1}. [{entry['username']}]({jump_url}) — "
+                f"{i + 1}. [**{name}**]({jump_url})\n"
                 f"🥇 ×{vc['1']}  🥈 ×{vc['2']}  🥉 ×{vc['3']}"
             )
 
@@ -1187,7 +1224,7 @@ class MediaVote(commands.Cog):
     # ─── Message Listener ────────────────────────────────────────────────────
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if message.author.id == self.bot.user.id or not message.guild:
+        if not message.guild:
             return
 
         guild_id = str(message.guild.id)
@@ -1202,13 +1239,14 @@ class MediaVote(commands.Cog):
         if message.id == event.get("sticky_message_id"):
             return
 
-        # Handle entry submission
-        if (event["phase"] == "submissions"
+        # Handle entry submission (skip bot's own messages)
+        if (message.author.id != self.bot.user.id
+                and event["phase"] == "submissions"
                 and message.content
                 and re.search(r'\bentry\b', message.content, re.IGNORECASE)):
             await self._handle_entry(message, guild_id, event)
 
-        # Re-stick (debounced)
+        # Re-stick (debounced) — triggers for all messages including bot's own
         timer_key = (message.channel.id, guild_id)
         if timer_key in self.sticky_timers:
             self.sticky_timers[timer_key].cancel()
@@ -1228,7 +1266,7 @@ class MediaVote(commands.Cog):
         if len(parts) != 3:
             return
 
-        _, rank_str, submitter_id = parts
+        _, rank_str, entry_id = parts
         if rank_str not in ('1', '2', '3'):
             return
 
@@ -1242,13 +1280,13 @@ class MediaVote(commands.Cog):
             await interaction.response.send_message("Voting is not currently active.", ephemeral=True)
             return
 
-        # Verify the submitter is a valid entry
-        if submitter_id not in event.get("entries", {}):
+        # Verify the entry is valid
+        if entry_id not in event.get("entries", {}):
             await interaction.response.send_message("This submission is no longer valid.", ephemeral=True)
             return
 
         voter_id = str(interaction.user.id)
-        submitter_name = event["entries"][submitter_id]["username"]
+        entry_name = event["entries"][entry_id]["username"]
 
         already_voted = False
         old_rank = None
@@ -1257,19 +1295,19 @@ class MediaVote(commands.Cog):
             votes = event.setdefault("votes", {})
             voter_votes = votes.setdefault(voter_id, {})
 
-            # Already voted this rank for this submission?
-            if voter_votes.get(rank_str) == submitter_id:
+            # Already voted this rank for this entry?
+            if voter_votes.get(rank_str) == entry_id:
                 already_voted = True
             else:
-                # If this submission already has a different rank from this voter, remove it
-                for r, sid in list(voter_votes.items()):
-                    if sid == submitter_id:
+                # If this entry already has a different rank from this voter, remove it
+                for r, eid in list(voter_votes.items()):
+                    if eid == entry_id:
                         old_rank = r
                         del voter_votes[r]
                         break
 
-                # Set the new vote (overwrites any previous submission at this rank)
-                voter_votes[rank_str] = submitter_id
+                # Set the new vote (overwrites any previous entry at this rank)
+                voter_votes[rank_str] = entry_id
                 await self._save()
 
         if already_voted:
@@ -1283,11 +1321,24 @@ class MediaVote(commands.Cog):
         rank_label = RANK_LABELS[rank_str]
         if old_rank:
             old_label = RANK_LABELS[old_rank]
-            msg = f"Your vote for **{submitter_name}** moved from **{old_label}** to **{rank_label}**."
+            msg = f"Your vote for **{entry_name}** moved from **{old_label}** to **{rank_label}**."
         else:
             msg = f"Your **{rank_label}** vote has been recorded."
 
         await interaction.response.send_message(msg, ephemeral=True)
+
+        # Update sticky with new vote count
+        channel = self.bot.get_channel(event["channel_id"])
+        if channel and not already_voted:
+            sticky_id = event.get("sticky_message_id")
+            if sticky_id:
+                try:
+                    sticky_msg = await channel.fetch_message(sticky_id)
+                    embed = self._build_sticky_embed(guild_id)
+                    if embed:
+                        await sticky_msg.edit(embed=embed)
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    pass
 
     # ─── Background Task ─────────────────────────────────────────────────────
     @tasks.loop(seconds=30)

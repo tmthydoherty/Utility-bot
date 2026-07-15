@@ -19,9 +19,9 @@ EMBED_COLOR_INFO = 0x3498DB  # Blue for info/panel
 EMBED_COLOR_SUCCESS = 0x2ECC71  # Green for success
 
 # --- Detection Thresholds ---
-FLOOD_MSG_COUNT = 5          # messages in window to trigger
-FLOOD_WINDOW_SECS = 4        # seconds
-DUPLICATE_COUNT = 4           # duplicate messages to trigger
+FLOOD_MSG_COUNT = 10         # messages in window to trigger
+FLOOD_WINDOW_SECS = 7        # seconds
+DUPLICATE_COUNT = 6           # duplicate messages to trigger
 DUPLICATE_WINDOW_SECS = 10   # seconds
 MASS_MENTION_THRESHOLD = 10   # unique mentions in one message
 NUKE_CHANNEL_DELETE = 3       # channel deletes in window

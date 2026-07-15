@@ -114,38 +114,8 @@ class ChannelSelectView(discord.ui.View):
             item.disabled = True
 
 
-class PreviewChannelSelectView(discord.ui.View):
-    def __init__(self, cog: "DailyQuote"):
-        super().__init__(timeout=120)
-        self.cog = cog
-
-    @discord.ui.select(
-        cls=discord.ui.ChannelSelect,
-        channel_types=[discord.ChannelType.text, discord.ChannelType.public_thread, discord.ChannelType.private_thread],
-        placeholder="Select a preview channel...",
-        min_values=1, max_values=1
-    )
-    async def channel_select(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
-        channel = select.values[0]
-        async with self.cog.config_lock:
-            cfg = self.cog.get_guild_settings(interaction.guild.id)
-            cfg["preview_channel_id"] = channel.id
-            self.cog.config_is_dirty = True
-
-        for item in self.children:
-            item.disabled = True
-        await interaction.response.edit_message(
-            content=f"Preview channel set to {channel.mention}. New quotes will be sent here for approval before going live.",
-            view=self
-        )
-
-    async def on_timeout(self):
-        for item in self.children:
-            item.disabled = True
-
-
 class QuotePreviewView(discord.ui.View):
-    """Admin approval view posted in the preview channel."""
+    """Admin approval view sent via DM. First click shows confirmation."""
 
     def __init__(self, cog: "DailyQuote"):
         super().__init__(timeout=None)
@@ -155,42 +125,65 @@ class QuotePreviewView(discord.ui.View):
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self.cog.is_user_admin(interaction):
             return await interaction.response.send_message("Only admins can approve quotes.", ephemeral=True)
-
-        async with self.cog.config_lock:
-            pending = self.cog.get_global_data().get("pending_question_data")
-            if not pending:
-                return await interaction.response.send_message("No pending question to approve.", ephemeral=True)
-            pending["approved"] = True
-            self.cog.config_is_dirty = True
-
-        await interaction.response.send_message("Quote **approved!** It will go live with tomorrow's daily post.", ephemeral=True)
-        try:
-            await interaction.message.delete()
-        except discord.HTTPException:
-            pass
+        # Swap to confirmation view
+        await interaction.response.edit_message(view=QuotePreviewConfirmApproveView(self.cog))
 
     @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger, custom_id="daily_quote_preview_deny")
     async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self.cog.is_user_admin(interaction):
             return await interaction.response.send_message("Only admins can deny quotes.", ephemeral=True)
+        # Swap to confirmation view
+        await interaction.response.edit_message(view=QuotePreviewConfirmDenyView(self.cog))
 
-        await interaction.response.defer(ephemeral=True, thinking=True)
+
+class QuotePreviewConfirmApproveView(discord.ui.View):
+    """Confirmation step for approving a quote."""
+
+    def __init__(self, cog: "DailyQuote"):
+        super().__init__(timeout=30)
+        self.cog = cog
+
+    @discord.ui.button(label="Confirm Approve", style=discord.ButtonStyle.success, custom_id="daily_quote_confirm_approve")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        async with self.cog.config_lock:
+            pending = self.cog.get_global_data().get("pending_question_data")
+            if not pending:
+                return await interaction.response.edit_message(content="No pending question to approve.", embed=None, view=None)
+            pending["approved"] = True
+            self.cog.config_is_dirty = True
+
+        await interaction.response.edit_message(
+            content="Quote **approved!** It will go live with tomorrow's daily post.",
+            embed=None, view=None
+        )
+
+    @discord.ui.button(label="Go Back", style=discord.ButtonStyle.secondary, custom_id="daily_quote_confirm_approve_cancel")
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(view=QuotePreviewView(self.cog))
+
+    async def on_timeout(self):
+        pass  # View expires silently; original message keeps its embed
+
+
+class QuotePreviewConfirmDenyView(discord.ui.View):
+    """Confirmation step for denying a quote."""
+
+    def __init__(self, cog: "DailyQuote"):
+        super().__init__(timeout=30)
+        self.cog = cog
+
+    @discord.ui.button(label="Confirm Deny", style=discord.ButtonStyle.danger, custom_id="daily_quote_confirm_deny")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
 
         async with self.cog.config_lock:
             pending = self.cog.get_global_data().get("pending_question_data")
         if not pending:
-            return await interaction.followup.send("No pending question to deny.", ephemeral=True)
+            return await interaction.edit_original_response(content="No pending question to deny.", embed=None, view=None)
 
-        # Delete the denied quote from the database and clear pending
         denied_id = pending.get("quote_id")
-        if denied_id:
-            try:
-                async with aiosqlite.connect(self.cog.db_path) as db:
-                    await db.execute("DELETE FROM quotes WHERE id = ?", (denied_id,))
-                    await db.commit()
-                log_quote.info(f"Deleted denied quote ID {denied_id} from database")
-            except Exception as e:
-                log_quote.error(f"Failed to delete denied quote ID {denied_id}: {e}")
+        guild_id = pending.get("guild_id")
+        await self.cog._delete_quote_from_db(denied_id)
 
         async with self.cog.config_lock:
             global_data = self.cog.get_global_data()
@@ -200,14 +193,22 @@ class QuotePreviewView(discord.ui.View):
             global_data["pending_question_data"] = None
             self.cog.config_is_dirty = True
 
-        try:
-            await interaction.message.delete()
-        except discord.HTTPException:
-            pass
+        await interaction.edit_original_response(
+            content="Quote **denied**. Generating a new preview...",
+            embed=None, view=None
+        )
 
-        # Generate a new question and post it for approval
-        await self.cog._send_preview_question(interaction.guild)
-        await interaction.followup.send("Quote **denied**. A new quote has been posted for review.", ephemeral=True)
+        # Generate a new question and DM it for approval
+        guild = self.cog.bot.get_guild(guild_id) if guild_id else None
+        if guild:
+            await self.cog._send_preview_question(guild)
+
+    @discord.ui.button(label="Go Back", style=discord.ButtonStyle.secondary, custom_id="daily_quote_confirm_deny_cancel")
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(view=QuotePreviewView(self.cog))
+
+    async def on_timeout(self):
+        pass
 
 
 class AlertSettingsModal(discord.ui.Modal, title="Low Quote Alert Settings"):
@@ -491,17 +492,15 @@ class QuoteAdminPanelView(discord.ui.View):
 
         await interaction.response.send_message(f"Daily Quote is now **{'enabled' if new_state else 'disabled'}**.", ephemeral=True)
 
-    @discord.ui.button(label="Preview Channel", style=discord.ButtonStyle.secondary, row=0)
-    async def set_preview_channel(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="Toggle Screening", style=discord.ButtonStyle.secondary, row=0)
+    async def toggle_screening(self, interaction: discord.Interaction, button: discord.ui.Button):
         async with self.cog.config_lock:
             cfg = self.cog.get_guild_settings(interaction.guild.id)
-            current = cfg.get("preview_channel_id")
-        current_text = f"Currently: <#{current}>" if current else "Currently: **Not set** (quotes post directly without approval)"
-        await interaction.response.send_message(
-            f"{current_text}\n\nSelect the preview channel for admin approval:",
-            view=PreviewChannelSelectView(self.cog),
-            ephemeral=True
-        )
+            cfg["screening_enabled"] = not cfg.get("screening_enabled", True)
+            new_state = cfg["screening_enabled"]
+            self.cog.config_is_dirty = True
+        state_text = "**enabled** — previews will be DM'd for approval" if new_state else "**disabled** — quotes post directly"
+        await interaction.response.send_message(f"Screening is now {state_text}.", ephemeral=True)
 
     @discord.ui.button(label="Alert Settings", style=discord.ButtonStyle.secondary, row=0)
     async def alert_settings(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -519,12 +518,12 @@ class QuoteAdminPanelView(discord.ui.View):
     @discord.ui.button(label="Force Preview", style=discord.ButtonStyle.success, row=1)
     async def force_preview(self, interaction: discord.Interaction, button: discord.ui.Button):
         cfg = self.cog.get_guild_settings(interaction.guild.id)
-        if not cfg.get("preview_channel_id"):
-            return await interaction.response.send_message("No preview channel configured.", ephemeral=True)
+        if not cfg.get("screening_enabled", True):
+            return await interaction.response.send_message("Screening is disabled. Enable it first.", ephemeral=True)
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
             await self.cog._send_preview_question(interaction.guild)
-            await interaction.followup.send("Preview question sent for approval!", ephemeral=True)
+            await interaction.followup.send("Preview question DM'd for approval!", ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"Failed to send preview: {e}", ephemeral=True)
 
@@ -614,6 +613,7 @@ class QuoteAdminPanelView(discord.ui.View):
             value=(
                 f"**Channel:** {'<#' + str(cfg['channel_id']) + '>' if cfg.get('channel_id') else 'Not set'}\n"
                 f"**Enabled:** {cfg.get('enabled', False)}\n"
+                f"**Screening:** {'DM (enabled)' if cfg.get('screening_enabled', True) else 'Disabled'}\n"
                 f"**Last Posted:** {cfg.get('last_posted_date', 'Never')}\n"
                 f"**Low Quote Alert:** {alert_days} days"
             ),
@@ -745,7 +745,7 @@ class DailyQuote(commands.Cog, name="DailyQuote"):
             "last_posted_date": None,
             "low_quote_alert_days": DEFAULT_LOW_QUOTE_ALERT_DAYS,
             "last_low_quote_alert_date": None,
-            "preview_channel_id": None,
+            "screening_enabled": True,
         }
 
     def get_global_data(self) -> dict:
@@ -826,8 +826,10 @@ class DailyQuote(commands.Cog, name="DailyQuote"):
             log_quote.debug("Daily quote config saved to disk.")
 
     async def is_user_admin(self, interaction: discord.Interaction) -> bool:
-        if await self.bot.is_owner(interaction.user) or self.bot.is_bot_admin(interaction.user):
+        if await self.bot.is_owner(interaction.user):
             return True
+        if interaction.guild and isinstance(interaction.user, discord.Member):
+            return self.bot.is_bot_admin(interaction.user)
         return False
 
     async def _is_user_blocked(self, user_id: int) -> bool:
@@ -1558,11 +1560,40 @@ class DailyQuote(commands.Cog, name="DailyQuote"):
 
     # === Daily Post Logic ===
 
+    async def _delete_quote_from_db(self, quote_id: int | None):
+        """Permanently delete a used or denied quote from the database."""
+        if not quote_id or not os.path.exists(self.db_path):
+            return
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute("DELETE FROM quotes WHERE id = ?", (quote_id,))
+                await db.commit()
+            log_quote.info(f"Deleted used quote ID {quote_id} from database")
+        except Exception as e:
+            log_quote.error(f"Failed to delete quote ID {quote_id}: {e}")
+
+    async def _retire_old_question(self):
+        """Delete the outgoing daily question from DB and clean used_quote_ids."""
+        async with self.config_lock:
+            global_data = self.get_global_data()
+            old_q = global_data.get("daily_question_data")
+            if not old_q:
+                return
+            old_id = old_q.get("quote_id")
+            used = global_data.get("used_quote_ids", [])
+            if old_id and old_id in used:
+                used.remove(old_id)
+                self.config_is_dirty = True
+        await self._delete_quote_from_db(old_id)
+
     async def _trigger_daily_post(self, guild: discord.Guild):
         q_data = await self._get_daily_question()
         if not q_data:
             log_quote.error(f"Failed to generate daily question for guild {guild.id}")
             return
+
+        # Delete the outgoing question from DB before replacing it
+        await self._retire_old_question()
 
         async with self.config_lock:
             global_data = self.get_global_data()
@@ -1683,31 +1714,32 @@ class DailyQuote(commands.Cog, name="DailyQuote"):
     # === Preview / Approval System ===
 
     async def _send_preview_question(self, guild: discord.Guild):
-        """Generate a question and post it to the preview channel for admin approval."""
-        cfg = self.get_guild_settings(guild.id)
-        preview_channel_id = cfg.get("preview_channel_id")
-        if not preview_channel_id:
-            return
-
+        """Generate a question and DM it to the bot owner for approval."""
         q_data = await self._get_daily_question()
         if not q_data:
             log_quote.error(f"Failed to generate preview question for guild {guild.id}")
             return
 
+        q_data["guild_id"] = guild.id  # Store guild context for DM approve/deny
+
         async with self.config_lock:
             self.get_global_data()["pending_question_data"] = q_data
             self.config_is_dirty = True
 
+        # DM the bot owner
         try:
-            channel = await self.bot.fetch_channel(preview_channel_id)
-        except (discord.NotFound, discord.Forbidden) as e:
-            log_quote.error(f"Cannot access preview channel {preview_channel_id}: {e}")
+            app_info = await self.bot.application_info()
+            owner = app_info.owner
+            dm = await owner.create_dm()
+        except Exception as e:
+            log_quote.error(f"Cannot DM bot owner for preview: {e}")
             return
 
         question_type = q_data.get("question_type", "movie")
         prompt = "Which movie or show is this quote from?" if question_type == "movie" else "Who said this quote?"
 
         answer_labels = ["A", "B", "C", "D"]
+        correct_idx = q_data.get("correct_index", 0)
         embed = discord.Embed(
             title="📋 Daily Quote — Pending Approval",
             description=(
@@ -1730,13 +1762,16 @@ class DailyQuote(commands.Cog, name="DailyQuote"):
         )
 
         try:
-            await channel.send(embed=embed, view=QuotePreviewView(self))
-            log_quote.info(f"Preview question posted for guild {guild.id}")
+            await dm.send(embed=embed, view=QuotePreviewView(self))
+            log_quote.info(f"Preview question DM'd to owner for guild {guild.id}")
         except discord.HTTPException as e:
-            log_quote.error(f"Failed to send preview question: {e}")
+            log_quote.error(f"Failed to DM preview question: {e}")
 
     async def _approve_pending_quote(self, guild: discord.Guild):
         """Move pending question to live and post to the main channel."""
+        # Delete the outgoing question from DB before replacing it
+        await self._retire_old_question()
+
         async with self.config_lock:
             global_data = self.get_global_data()
             cfg_settings = self.get_guild_settings(guild.id)
@@ -1790,29 +1825,29 @@ class DailyQuote(commands.Cog, name="DailyQuote"):
 
                     if now_ct.day == 1:
                         await self._post_monthly_leaderboard(guild)
-                        ran_monthly_reset = True
+                        if not ran_monthly_reset:
+                            async with self.config_lock:
+                                if self.get_global_data().get("scores"):
+                                    self.get_global_data()["scores"] = {}
+                                    self.config_is_dirty = True
+                                    log_quote.info("Monthly quote scores have been reset.")
+                            ran_monthly_reset = True
 
                     # Post today's question: use pending if available, otherwise generate fresh
                     pending = self.get_global_data().get("pending_question_data")
-                    if pending and cfg_settings.get("preview_channel_id"):
+                    if pending and cfg_settings.get("screening_enabled", True):
                         await self._approve_pending_quote(guild)
                     else:
                         await self._trigger_daily_post(guild)
 
-                    # Generate tomorrow's preview if preview channel is configured
-                    if cfg_settings.get("preview_channel_id"):
+                    # Generate tomorrow's preview if screening is enabled
+                    if cfg_settings.get("screening_enabled", True):
                         await self._send_preview_question(guild)
 
                 except Exception as e:
                     log_quote.error(f"Error in quote loop for guild {gid_str}: {e}", exc_info=True)
 
-            if ran_monthly_reset:
-                async with self.config_lock:
-                    scores = self.get_global_data().get("scores", {})
-                    if scores:
-                        self.get_global_data()["scores"] = {}
-                        self.config_is_dirty = True
-                        log_quote.info("Monthly quote scores have been reset.")
+            # Monthly reset already handled inside the guild loop above
         except Exception as e:
             await self.bot.error_reporter.report("DailyQuote", f"quote_loop: {e}")
 

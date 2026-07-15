@@ -2,102 +2,82 @@
     "global_data": {
         "scores": {
             "350399886950268941": {
-                "score": 17,
-                "timestamp": "2026-07-01T00:05:10.626232+00:00"
-            },
-            "739592205265535007": {
-                "score": 18,
-                "timestamp": "2026-06-29T00:13:04.675591+00:00"
-            },
-            "495858386936791040": {
-                "score": 16,
-                "timestamp": "2026-07-01T02:55:26.657402+00:00"
-            },
-            "732384312200003605": {
-                "score": 0,
-                "timestamp": null
+                "score": 12,
+                "timestamp": "2026-07-15T00:09:35.655680+00:00"
             },
             "356774449032331264": {
-                "score": 14,
-                "timestamp": "2026-07-01T01:23:29.197225+00:00"
-            },
-            "560914996549386242": {
-                "score": 23,
-                "timestamp": "2026-06-29T02:19:03.995358+00:00"
+                "score": 10,
+                "timestamp": "2026-07-15T00:46:55.686421+00:00"
             },
             "676148847147483137": {
-                "score": 14,
-                "timestamp": "2026-07-01T00:43:30.776864+00:00"
-            },
-            "298607678073208832": {
                 "score": 12,
-                "timestamp": "2026-06-21T04:13:04.553977+00:00"
+                "timestamp": "2026-07-15T02:35:32.931876+00:00"
             },
-            "562801560640552980": {
-                "score": 8,
-                "timestamp": "2026-06-30T06:42:20.904030+00:00"
+            "739592205265535007": {
+                "score": 14,
+                "timestamp": "2026-07-15T00:39:57.697511+00:00"
             },
-            "280095356195438592": {
-                "score": 13,
-                "timestamp": "2026-06-27T05:21:57.878435+00:00"
-            },
-            "453901510968082432": {
-                "score": 9,
-                "timestamp": "2026-06-19T07:18:00.952390+00:00"
+            "560914996549386242": {
+                "score": 12,
+                "timestamp": "2026-07-15T00:52:50.975094+00:00"
             },
             "756992075353948243": {
-                "score": 9,
-                "timestamp": "2026-06-29T03:35:34.053924+00:00"
-            },
-            "1077673811215913070": {
-                "score": 3,
-                "timestamp": "2026-06-21T02:04:35.161771+00:00"
-            },
-            "1249162247675056239": {
-                "score": 0,
-                "timestamp": null
+                "score": 6,
+                "timestamp": "2026-07-15T00:41:37.626636+00:00"
             },
             "629824074268278795": {
-                "score": 2,
-                "timestamp": "2026-06-26T01:28:06.516483+00:00"
+                "score": 9,
+                "timestamp": "2026-07-15T00:00:26.372261+00:00"
+            },
+            "495858386936791040": {
+                "score": 5,
+                "timestamp": "2026-07-15T18:43:06.079085+00:00"
+            },
+            "562801560640552980": {
+                "score": 1,
+                "timestamp": "2026-07-10T00:35:09.431001+00:00"
+            },
+            "732384312200003605": {
+                "score": 1,
+                "timestamp": "2026-07-12T16:39:08.960863+00:00"
             }
         },
         "user_stats": {
             "356774449032331264": {
-                "correct": 29,
-                "incorrect": 24,
-                "current_streak": 2,
+                "correct": 39,
+                "incorrect": 28,
+                "current_streak": 1,
                 "longest_streak": 6,
-                "all_time_score": 29,
-                "all_time_timestamp": "2026-07-01T01:23:29.197225+00:00",
-                "streak_achieved_at": "2026-07-01T01:23:29.197203+00:00"
+                "all_time_score": 39,
+                "all_time_timestamp": "2026-07-15T00:46:55.686421+00:00",
+                "streak_achieved_at": "2026-07-15T00:46:55.686407+00:00"
             },
             "350399886950268941": {
-                "correct": 31,
-                "incorrect": 19,
-                "current_streak": 1,
+                "correct": 43,
+                "incorrect": 21,
+                "current_streak": 3,
                 "longest_streak": 9,
-                "all_time_score": 31,
-                "all_time_timestamp": "2026-07-01T00:05:10.626232+00:00",
-                "streak_achieved_at": "2026-07-01T00:05:10.626218+00:00"
+                "all_time_score": 43,
+                "all_time_timestamp": "2026-07-15T00:09:35.655680+00:00",
+                "streak_achieved_at": "2026-07-15T00:09:35.655664+00:00"
             },
             "739592205265535007": {
-                "correct": 38,
+                "correct": 53,
                 "incorrect": 13,
-                "current_streak": 0,
+                "current_streak": 15,
                 "longest_streak": 15,
-                "all_time_score": 38,
-                "all_time_timestamp": "2026-06-29T00:13:04.675591+00:00",
-                "streak_achieved_at": null
+                "all_time_score": 53,
+                "all_time_timestamp": "2026-07-15T00:39:57.697511+00:00",
+                "streak_achieved_at": "2026-07-15T00:39:57.697491+00:00"
             },
             "560914996549386242": {
-                "correct": 41,
-                "incorrect": 10,
-                "current_streak": 0,
-                "longest_streak": 8,
-                "all_time_score": 41,
-                "all_time_timestamp": "2026-06-29T02:19:03.995358+00:00",
-                "streak_achieved_at": null
+                "correct": 54,
+                "incorrect": 12,
+                "current_streak": 12,
+                "longest_streak": 12,
+                "all_time_score": 54,
+                "all_time_timestamp": "2026-07-15T00:52:50.975094+00:00",
+                "streak_achieved_at": "2026-07-15T00:52:50.975075+00:00"
             },
             "298607678073208832": {
                 "correct": 26,
@@ -109,13 +89,13 @@
                 "streak_achieved_at": null
             },
             "676148847147483137": {
-                "correct": 31,
-                "incorrect": 20,
+                "correct": 43,
+                "incorrect": 22,
                 "current_streak": 1,
-                "longest_streak": 6,
-                "all_time_score": 31,
-                "all_time_timestamp": "2026-07-01T00:43:30.776864+00:00",
-                "streak_achieved_at": "2026-07-01T00:43:30.776845+00:00"
+                "longest_streak": 10,
+                "all_time_score": 43,
+                "all_time_timestamp": "2026-07-15T02:35:32.931876+00:00",
+                "streak_achieved_at": "2026-07-15T02:35:32.931858+00:00"
             },
             "453901510968082432": {
                 "correct": 16,
@@ -127,40 +107,40 @@
                 "streak_achieved_at": null
             },
             "562801560640552980": {
-                "correct": 16,
-                "incorrect": 10,
-                "current_streak": 1,
+                "correct": 17,
+                "incorrect": 12,
+                "current_streak": 0,
                 "longest_streak": 3,
-                "all_time_score": 16,
-                "all_time_timestamp": "2026-06-30T06:42:20.904030+00:00",
-                "streak_achieved_at": "2026-06-30T06:42:20.904010+00:00"
+                "all_time_score": 17,
+                "all_time_timestamp": "2026-07-10T00:35:09.431001+00:00",
+                "streak_achieved_at": null
             },
             "495858386936791040": {
-                "correct": 28,
+                "correct": 33,
                 "incorrect": 12,
-                "current_streak": 2,
+                "current_streak": 1,
                 "longest_streak": 6,
-                "all_time_score": 28,
-                "all_time_timestamp": "2026-07-01T02:55:26.657402+00:00",
-                "streak_achieved_at": "2026-07-01T02:55:26.657384+00:00"
+                "all_time_score": 33,
+                "all_time_timestamp": "2026-07-15T18:43:06.079085+00:00",
+                "streak_achieved_at": "2026-07-15T18:43:06.079066+00:00"
             },
             "732384312200003605": {
-                "correct": 4,
+                "correct": 5,
                 "incorrect": 10,
                 "current_streak": 0,
                 "longest_streak": 2,
-                "all_time_score": 4,
-                "all_time_timestamp": "2026-06-01T01:17:22.012728+00:00",
+                "all_time_score": 5,
+                "all_time_timestamp": "2026-07-12T16:39:08.960863+00:00",
                 "streak_achieved_at": null
             },
             "756992075353948243": {
-                "correct": 16,
-                "incorrect": 11,
-                "current_streak": 0,
+                "correct": 22,
+                "incorrect": 14,
+                "current_streak": 1,
                 "longest_streak": 3,
-                "all_time_score": 16,
-                "all_time_timestamp": "2026-06-29T03:35:34.053924+00:00",
-                "streak_achieved_at": null
+                "all_time_score": 22,
+                "all_time_timestamp": "2026-07-15T00:41:37.626636+00:00",
+                "streak_achieved_at": "2026-07-15T00:41:37.626621+00:00"
             },
             "385986637437468683": {
                 "correct": 0,
@@ -208,48 +188,129 @@
                 "streak_achieved_at": null
             },
             "629824074268278795": {
-                "correct": 2,
-                "incorrect": 0,
-                "current_streak": 0,
-                "longest_streak": 1,
-                "all_time_score": 2,
-                "all_time_timestamp": "2026-06-26T01:28:06.516483+00:00",
-                "streak_achieved_at": null
+                "correct": 11,
+                "incorrect": 2,
+                "current_streak": 2,
+                "longest_streak": 5,
+                "all_time_score": 11,
+                "all_time_timestamp": "2026-07-15T00:00:26.372261+00:00",
+                "streak_achieved_at": "2026-07-15T00:00:26.372241+00:00"
             }
         },
         "daily_question_data": {
-            "quote": "So you're telling me there's a chance.",
-            "character": "Lloyd Christmas",
-            "movie_title": "Dumb and Dumber",
-            "genre": "Comedy",
-            "difficulty": "easy",
-            "correct": "Dumb and Dumber",
+            "quote": "Those who want respect, give respect.",
+            "character": "Tony Soprano",
+            "movie_title": "The Sopranos",
+            "genre": "Crime, Drama",
+            "difficulty": "medium",
+            "correct": "The Sopranos",
             "answers": [
-                "American Pie",
-                "Men in Black",
-                "Dumb and Dumber",
-                "Pretty Woman"
+                "The Wire",
+                "Ozark",
+                "The Sopranos",
+                "Boardwalk Empire"
             ],
             "correct_index": 2,
             "question_type": "movie",
-            "quote_id": 166,
+            "quote_id": 409,
+            "guild_id": 1431565435010289778,
             "approved": true
         },
         "daily_interactions": [
+            {
+                "user_id": "629824074268278795",
+                "answer_index": 2,
+                "correct": true,
+                "snapshot": {
+                    "streak": 1,
+                    "longest_streak": 5,
+                    "streak_achieved_at": "2026-07-14T01:31:52.725762+00:00",
+                    "correct": 10,
+                    "incorrect": 2,
+                    "all_time_score": 10,
+                    "all_time_timestamp": "2026-07-14T01:31:52.725779+00:00",
+                    "monthly_score": 8,
+                    "monthly_timestamp": "2026-07-14T01:31:52.725779+00:00"
+                }
+            },
             {
                 "user_id": "350399886950268941",
                 "answer_index": 2,
                 "correct": true,
                 "snapshot": {
-                    "streak": 0,
+                    "streak": 2,
                     "longest_streak": 9,
+                    "streak_achieved_at": "2026-07-14T01:53:19.072456+00:00",
+                    "correct": 42,
+                    "incorrect": 21,
+                    "all_time_score": 42,
+                    "all_time_timestamp": "2026-07-14T01:53:19.072476+00:00",
+                    "monthly_score": 11,
+                    "monthly_timestamp": "2026-07-14T01:53:19.072476+00:00"
+                }
+            },
+            {
+                "user_id": "739592205265535007",
+                "answer_index": 2,
+                "correct": true,
+                "snapshot": {
+                    "streak": 14,
+                    "longest_streak": 15,
+                    "streak_achieved_at": "2026-07-14T00:07:43.129399+00:00",
+                    "correct": 52,
+                    "incorrect": 13,
+                    "all_time_score": 52,
+                    "all_time_timestamp": "2026-07-14T00:07:43.129413+00:00",
+                    "monthly_score": 13,
+                    "monthly_timestamp": "2026-07-14T00:07:43.129413+00:00"
+                }
+            },
+            {
+                "user_id": "756992075353948243",
+                "answer_index": 2,
+                "correct": true,
+                "snapshot": {
+                    "streak": 0,
+                    "longest_streak": 3,
                     "streak_achieved_at": null,
-                    "correct": 30,
-                    "incorrect": 19,
-                    "all_time_score": 30,
-                    "all_time_timestamp": "2026-06-29T00:03:26.118596+00:00",
-                    "monthly_score": 16,
-                    "monthly_timestamp": "2026-06-29T00:03:26.118596+00:00"
+                    "correct": 21,
+                    "incorrect": 14,
+                    "all_time_score": 21,
+                    "all_time_timestamp": "2026-07-11T03:58:47.321421+00:00",
+                    "monthly_score": 5,
+                    "monthly_timestamp": "2026-07-11T03:58:47.321421+00:00"
+                }
+            },
+            {
+                "user_id": "356774449032331264",
+                "answer_index": 2,
+                "correct": true,
+                "snapshot": {
+                    "streak": 0,
+                    "longest_streak": 6,
+                    "streak_achieved_at": null,
+                    "correct": 38,
+                    "incorrect": 28,
+                    "all_time_score": 38,
+                    "all_time_timestamp": "2026-07-13T00:03:35.008510+00:00",
+                    "monthly_score": 9,
+                    "monthly_timestamp": "2026-07-13T00:03:35.008510+00:00"
+                }
+            },
+            {
+                "user_id": "560914996549386242",
+                "answer_index": 2,
+                "correct": true,
+                "snapshot": {
+                    "streak": 11,
+                    "longest_streak": 11,
+                    "streak_achieved_at": "2026-07-14T00:01:07.788638+00:00",
+                    "correct": 53,
+                    "incorrect": 12,
+                    "all_time_score": 53,
+                    "all_time_timestamp": "2026-07-14T00:01:07.788659+00:00",
+                    "monthly_score": 11,
+                    "monthly_timestamp": "2026-07-14T00:01:07.788659+00:00"
                 }
             },
             {
@@ -258,30 +319,14 @@
                 "correct": true,
                 "snapshot": {
                     "streak": 0,
-                    "longest_streak": 6,
+                    "longest_streak": 10,
                     "streak_achieved_at": null,
-                    "correct": 30,
-                    "incorrect": 20,
-                    "all_time_score": 30,
-                    "all_time_timestamp": "2026-06-27T00:15:20.195980+00:00",
-                    "monthly_score": 13,
-                    "monthly_timestamp": "2026-06-27T00:15:20.195980+00:00"
-                }
-            },
-            {
-                "user_id": "356774449032331264",
-                "answer_index": 2,
-                "correct": true,
-                "snapshot": {
-                    "streak": 1,
-                    "longest_streak": 6,
-                    "streak_achieved_at": "2026-06-30T00:05:31.854637+00:00",
-                    "correct": 28,
-                    "incorrect": 24,
-                    "all_time_score": 28,
-                    "all_time_timestamp": "2026-06-30T00:05:31.854658+00:00",
-                    "monthly_score": 13,
-                    "monthly_timestamp": "2026-06-30T00:05:31.854658+00:00"
+                    "correct": 42,
+                    "incorrect": 22,
+                    "all_time_score": 42,
+                    "all_time_timestamp": "2026-07-13T02:40:32.634909+00:00",
+                    "monthly_score": 11,
+                    "monthly_timestamp": "2026-07-13T02:40:32.634909+00:00"
                 }
             },
             {
@@ -289,90 +334,42 @@
                 "answer_index": 2,
                 "correct": true,
                 "snapshot": {
-                    "streak": 1,
+                    "streak": 0,
                     "longest_streak": 6,
-                    "streak_achieved_at": "2026-06-30T00:25:49.891311+00:00",
-                    "correct": 27,
+                    "streak_achieved_at": null,
+                    "correct": 32,
                     "incorrect": 12,
-                    "all_time_score": 27,
-                    "all_time_timestamp": "2026-06-30T00:25:49.891331+00:00",
-                    "monthly_score": 15,
-                    "monthly_timestamp": "2026-06-30T00:25:49.891331+00:00"
+                    "all_time_score": 32,
+                    "all_time_timestamp": "2026-07-13T18:13:24.408410+00:00",
+                    "monthly_score": 4,
+                    "monthly_timestamp": "2026-07-13T18:13:24.408410+00:00"
                 }
             }
         ],
         "daily_answer_times": [],
         "used_quote_ids": [
-            363,
-            244,
-            195,
-            322,
-            263,
-            118,
-            135,
-            17,
-            281,
-            130,
             373,
-            20,
-            87,
-            294,
-            199,
-            268,
-            138,
-            113,
-            10,
-            332,
-            262,
-            221,
-            101,
-            259,
-            346,
-            218,
-            150,
-            76,
-            355,
-            315,
-            207,
-            29,
-            22,
-            157,
-            238,
-            145,
-            80,
-            198,
-            81,
-            270,
-            24,
-            12,
-            290,
-            307,
-            361,
-            119,
-            286,
-            280,
-            136,
-            69,
-            166,
-            111
+            409,
+            404
         ],
         "blocked_users": [],
         "pending_question_data": {
-            "quote": "I must not tell lies.",
-            "character": "Harry Potter",
-            "movie_title": "Harry Potter and the Order of the Phoenix",
-            "genre": "Adventure, Family, Fantasy",
-            "difficulty": "medium",
-            "correct": "Harry Potter",
+            "quote": "Earn this.",
+            "character": "Captain Miller",
+            "movie_title": "Saving Private Ryan",
+            "genre": "War, Drama",
+            "difficulty": "hard",
+            "correct": "Saving Private Ryan",
             "answers": [
-                "Dolores Umbridge",
-                "Harry Potter",
-                "Hermione Granger",
-                "Ron Weasley"
+                "Saving Private Ryan",
+                "Hacksaw Ridge",
+                "Dunkirk",
+                "The Thin Red Line"
             ],
-            "correct_index": 1,
-            "question_type": "character",
-            "quote_id": 111,
+            "correct_index": 0,
+            "question_type": "movie",
+            "quote_id": 404,
+            "guild_id": 1431565435010289778,
             "approved": true
         }
     },
@@ -380,12 +377,12 @@
         "1431565435010289778": {
             "channel_id": 1463938795131895868,
             "enabled": true,
-            "gateway_message_id": 1521666651727069399,
-            "last_posted_date": "2026-06-30",
+            "gateway_message_id": 1526740081996595221,
+            "last_posted_date": "2026-07-14",
             "last_winner_announcement": null,
             "low_quote_alert_days": 30,
-            "last_low_quote_alert_date": null,
-            "preview_channel_id": 1484394129927438428
+            "last_low_quote_alert_date": "2026-07-14",
+            "screening_enabled": true
         }
     }
 }

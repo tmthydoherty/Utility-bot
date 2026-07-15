@@ -80,8 +80,14 @@ class InactivityPanelView(ui.View):
         self.clear_items()
         self.add_item(self.ConfigChannelSelect())
         self.add_item(self.ConfigRoleSelect())
-        self.add_item(self.ConfigButton("Set Threshold", "threshold", discord.ButtonStyle.primary))
-        self.add_item(self.ConfigButton("Set Period", "period", discord.ButtonStyle.secondary))
+        self.add_item(self.ConfigButton("Newcomer Threshold", "threshold", discord.ButtonStyle.primary))
+        self.add_item(self.ConfigButton("Newcomer Period", "period", discord.ButtonStyle.secondary))
+        self.add_item(self.ConfigButton("2nd Threshold", "secondary_threshold", discord.ButtonStyle.primary))
+        self.add_item(self.ConfigButton("2nd Period", "secondary_period", discord.ButtonStyle.secondary))
+        self.add_item(self.ConfigButton("6mo Period", "broad_period", discord.ButtonStyle.secondary))
+        self.add_item(self.ConfigButton("6mo Whitelist", "broad_whitelist", discord.ButtonStyle.secondary))
+        self.add_item(self.ConfigButton("9mo Period", "global_9mo_period", discord.ButtonStyle.secondary))
+        self.add_item(self.ScanButton())
         self.add_item(self.TestButton())
         self.add_item(self.RepairButton())
 
@@ -92,9 +98,16 @@ class InactivityPanelView(ui.View):
             chan = self.guild.get_channel(row['log_channel_id'])
             role = self.guild.get_role(row['highlight_role_id'])
             desc += f"**Log Channel:** {chan.mention if chan else 'Not Set'}\n"
-            desc += f"**Highlight Role:** {role.mention if role else 'Not Set'}\n"
-            desc += f"**Msg Threshold:** {row['msg_threshold']} messages\n"
-            desc += f"**Time Period:** {row['period_days']} days\n"
+            desc += f"**Newcomer Role:** {role.mention if role else 'Not Set'}\n\n"
+            desc += f"**Newcomer Rule:** {row['msg_threshold']} messages / {row['period_days']} days\n"
+            sec_thresh = row['secondary_msg_threshold'] if row['secondary_msg_threshold'] is not None else 5
+            sec_period = row['secondary_period_days'] if row['secondary_period_days'] is not None else 90
+            broad_period = row['broad_period_days'] if row['broad_period_days'] is not None else 180
+            broad_whitelist = row['broad_whitelist_msgs'] if row['broad_whitelist_msgs'] is not None else 25
+            global_9mo = row['global_9mo_period_days'] if row['global_9mo_period_days'] is not None else 270
+            desc += f"**Secondary Rule:** {sec_thresh} messages / {sec_period} days\n"
+            desc += f"**Global (6mo):** 0 messages / {broad_period} days (whitelist: {broad_whitelist}+ all-time msgs)\n"
+            desc += f"**Global (9mo):** 0 messages / {global_9mo} days (no exceptions)\n"
         else:
             desc += "System not configured."
         return discord.Embed(description=desc, color=discord.Color.dark_grey())
@@ -108,7 +121,7 @@ class InactivityPanelView(ui.View):
             await interaction.edit_original_response(embed=embed, view=self.view)
 
     class ConfigRoleSelect(ui.RoleSelect):
-        def __init__(self): super().__init__(placeholder="Set Highlight Role", row=1)
+        def __init__(self): super().__init__(placeholder="Set Newcomer Role", row=1)
         async def callback(self, interaction):
             await self.view.cog.db.execute("INSERT INTO inactivity_config (guild_id, highlight_role_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET highlight_role_id = ?", (interaction.guild.id, self.values[0].id, self.values[0].id))
             await interaction.response.defer()
@@ -116,14 +129,31 @@ class InactivityPanelView(ui.View):
             await interaction.edit_original_response(embed=embed, view=self.view)
 
     class ConfigButton(ui.Button):
+        _row_map = {"threshold": 2, "period": 2, "secondary_threshold": 2, "secondary_period": 2, "broad_period": 3, "broad_whitelist": 3, "global_9mo_period": 3}
         def __init__(self, label, mode, style):
-            super().__init__(label=label, style=style, row=2)
+            super().__init__(label=label, style=style, row=self._row_map.get(mode, 3))
             self.mode = mode
         async def callback(self, interaction):
             await interaction.response.send_modal(InactivityPanelView.ConfigModal(interaction.client.get_cog("Inactivity"), self.mode, self.view))
 
+    class ScanButton(ui.Button):
+        def __init__(self): super().__init__(label="Scan Now", style=discord.ButtonStyle.success, emoji="\U0001f50d", row=4)
+        async def callback(self, interaction):
+            cog = self.view.cog
+            row = await cog.db.fetch_one("SELECT * FROM inactivity_config WHERE guild_id = ?", (interaction.guild.id,))
+            if not row or not row['log_channel_id']:
+                return await interaction.response.send_message("Configure a Log Channel first.", ephemeral=True)
+            await interaction.response.defer(ephemeral=True)
+            # Run the inactivity check for this guild only
+            try:
+                count = await cog._run_guild_check(interaction.guild, row)
+                await interaction.followup.send(f"Scan complete. **{count}** new alert(s) sent.", ephemeral=True)
+            except Exception as e:
+                logger.exception(f"[ScanButton] Error: {e}")
+                await interaction.followup.send(f"Scan failed: {e}", ephemeral=True)
+
     class TestButton(ui.Button):
-        def __init__(self): super().__init__(label="Test Alert", style=discord.ButtonStyle.success, row=2)
+        def __init__(self): super().__init__(label="Test Alert", style=discord.ButtonStyle.success, row=4)
         async def callback(self, interaction):
             row = await self.view.cog.db.fetch_one("SELECT * FROM inactivity_config WHERE guild_id = ?", (interaction.guild.id,))
             if not row or not row['log_channel_id']: return await interaction.response.send_message("Configure a Log Channel first.", ephemeral=True)
@@ -141,7 +171,7 @@ class InactivityPanelView(ui.View):
                 await interaction.response.send_message("Failed to send. Check bot permissions.", ephemeral=True)
 
     class RepairButton(ui.Button):
-        def __init__(self): super().__init__(label="Repair Alerts", style=discord.ButtonStyle.secondary, emoji="\U0001f527", row=3)
+        def __init__(self): super().__init__(label="Repair Alerts", style=discord.ButtonStyle.secondary, emoji="\U0001f527", row=4)
         async def callback(self, interaction):
             try:
                 cog = self.view.cog
@@ -159,7 +189,8 @@ class InactivityPanelView(ui.View):
                     if not message.embeds:
                         continue
                     embed = message.embeds[0]
-                    if embed.title not in ("Inactivity Alert", "VIP Inactivity Alert", "TEST: Inactivity Alert"):
+                    valid_titles = ("Inactivity Alert", "Newcomer Inactivity Alert", "\u203c\ufe0f Member Inactivity Alert", "TEST: Inactivity Alert", "VIP Inactivity Alert")
+                    if embed.title not in valid_titles:
                         continue
                     user_id = None
                     for source in [message.content or "", embed.description or ""]:
@@ -200,7 +231,16 @@ class InactivityPanelView(ui.View):
 
     class ConfigModal(ui.Modal):
         def __init__(self, cog, mode, parent_view):
-            super().__init__(title=f"Set {mode.capitalize()}")
+            titles = {
+                "threshold": "Set Newcomer Threshold",
+                "period": "Set Newcomer Period (days)",
+                "secondary_threshold": "Set Secondary Threshold",
+                "secondary_period": "Set Secondary Period (days)",
+                "broad_period": "Set Global 6mo Period (days)",
+                "broad_whitelist": "Set 6mo Whitelist (all-time msgs)",
+                "global_9mo_period": "Set Global 9mo Period (days)",
+            }
+            super().__init__(title=titles.get(mode, f"Set {mode.capitalize()}"))
             self.cog = cog
             self.mode = mode
             self.parent_view = parent_view
@@ -210,7 +250,16 @@ class InactivityPanelView(ui.View):
         async def on_submit(self, interaction):
             try:
                 val = int(self.val.value)
-                col = "msg_threshold" if self.mode == "threshold" else "period_days"
+                col_map = {
+                    "threshold": "msg_threshold",
+                    "period": "period_days",
+                    "secondary_threshold": "secondary_msg_threshold",
+                    "secondary_period": "secondary_period_days",
+                    "broad_period": "broad_period_days",
+                    "broad_whitelist": "broad_whitelist_msgs",
+                    "global_9mo_period": "global_9mo_period_days",
+                }
+                col = col_map[self.mode]
                 await self.cog.db.execute(f"INSERT INTO inactivity_config (guild_id, {col}) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET {col} = ?", (interaction.guild.id, val, val))
                 embed = await self.parent_view.build_embed()
                 await interaction.response.edit_message(embed=embed, view=self.parent_view)
@@ -240,7 +289,27 @@ class Inactivity(commands.Cog):
             from cogs.tracker import TrackingDB
             self.db = TrackingDB()
             await self.db.connect()
+        await self._migrate_db()
         self.check_inactivity_task.start()
+
+    async def _migrate_db(self):
+        """Add new columns for secondary and broad thresholds if they don't exist."""
+        migrations = [
+            "ALTER TABLE inactivity_config ADD COLUMN secondary_msg_threshold INTEGER DEFAULT 5",
+            "ALTER TABLE inactivity_config ADD COLUMN secondary_period_days INTEGER DEFAULT 90",
+            "ALTER TABLE inactivity_config ADD COLUMN broad_period_days INTEGER DEFAULT 180",
+            "ALTER TABLE inactivity_config ADD COLUMN broad_whitelist_msgs INTEGER DEFAULT 25",
+            "ALTER TABLE inactivity_config ADD COLUMN global_9mo_period_days INTEGER DEFAULT 270",
+        ]
+        for sql in migrations:
+            try:
+                await self.db.execute(sql)
+            except Exception:
+                pass  # Column already exists
+        await self.db.execute(
+            "CREATE TABLE IF NOT EXISTS inactivity_alert_log "
+            "(guild_id INTEGER, user_id INTEGER, rule TEXT, PRIMARY KEY (guild_id, user_id, rule))"
+        )
 
     async def cog_unload(self):
         if self._dm_worker_task:
@@ -291,7 +360,7 @@ class Inactivity(commands.Cog):
     async def inactivity_panel_cmd(self, interaction: discord.Interaction):
         if not self.bot.is_bot_admin(interaction.user):
             return await interaction.response.send_message("\u274c Administrator permission required.", ephemeral=True)
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
         view = InactivityPanelView(self, interaction.guild)
         embed = await view.build_embed()
         await interaction.followup.send(embed=embed, view=view)
@@ -336,6 +405,7 @@ class Inactivity(commands.Cog):
                 except Exception as e:
                     return await interaction.response.send_message(f"\u274c Failed to kick: {e}", ephemeral=True)
             await self.db.execute("INSERT OR REPLACE INTO user_inactivity_status (guild_id, user_id, status, snooze_until) VALUES (?, ?, 'kicked', 0)", (interaction.guild.id, user_id))
+            await self.db.execute("DELETE FROM inactivity_alert_log WHERE guild_id = ? AND user_id = ?", (interaction.guild.id, user_id))
             updated = _stamp_embed_decision(embed, "kicked", interaction.user)
             view = _make_alert_view(user_id, "decided", "kicked")
             return await interaction.response.edit_message(embed=updated, view=view)
@@ -355,6 +425,7 @@ class Inactivity(commands.Cog):
             days = row['period_days'] if row else 30
             snooze_until = int((datetime.now(timezone.utc) + timedelta(days=days)).timestamp())
             await self.db.execute("INSERT OR REPLACE INTO user_inactivity_status (guild_id, user_id, status, snooze_until) VALUES (?, ?, 'snoozed', ?)", (interaction.guild.id, user_id, snooze_until))
+            await self.db.execute("DELETE FROM inactivity_alert_log WHERE guild_id = ? AND user_id = ?", (interaction.guild.id, user_id))
             updated = _stamp_embed_decision(embed, "snoozed", interaction.user, extra=f"reset for {days} days")
             view = _make_alert_view(user_id, "decided", "snoozed")
             return await interaction.response.edit_message(embed=updated, view=view)
@@ -362,6 +433,7 @@ class Inactivity(commands.Cog):
         # --- FORGET ---
         if action == "forget":
             await self.db.execute("INSERT OR REPLACE INTO user_inactivity_status (guild_id, user_id, status, snooze_until) VALUES (?, ?, 'forgotten', 0)", (interaction.guild.id, user_id))
+            await self.db.execute("DELETE FROM inactivity_alert_log WHERE guild_id = ? AND user_id = ?", (interaction.guild.id, user_id))
             updated = _stamp_embed_decision(embed, "forgotten", interaction.user)
             view = _make_alert_view(user_id, "decided", "forgotten")
             return await interaction.response.edit_message(embed=updated, view=view)
@@ -380,6 +452,173 @@ class Inactivity(commands.Cog):
             view = _make_alert_view(user_id, "decided", current)
             return await interaction.response.edit_message(view=view)
 
+    # --- CORE CHECK LOGIC ---
+    async def _run_guild_check(self, guild, row):
+        """Run the inactivity check for a single guild. Returns number of alerts sent."""
+        log_channel = guild.get_channel(row['log_channel_id'])
+        if not log_channel:
+            raise ValueError(f"Log channel {row['log_channel_id']} not found.")
+
+        highlight_role = guild.get_role(row['highlight_role_id']) if row['highlight_role_id'] else None
+
+        # Config values
+        primary_threshold = row['msg_threshold']
+        primary_period = row['period_days']
+        secondary_threshold = row['secondary_msg_threshold'] if row['secondary_msg_threshold'] is not None else 5
+        secondary_period = row['secondary_period_days'] if row['secondary_period_days'] is not None else 90
+        broad_period = row['broad_period_days'] if row['broad_period_days'] is not None else 180
+        broad_whitelist = row['broad_whitelist_msgs'] if row['broad_whitelist_msgs'] is not None else 25
+        global_9mo_period = row['global_9mo_period_days'] if row['global_9mo_period_days'] is not None else 270
+
+        # Statuses
+        status_rows = await self.db.fetch_all("SELECT user_id, status, snooze_until FROM user_inactivity_status WHERE guild_id = ?", (guild.id,))
+        statuses = {r['user_id']: {'status': r['status'], 'snooze_until': r['snooze_until']} for r in status_rows}
+
+        # Alert log
+        alert_rows = await self.db.fetch_all("SELECT user_id, rule FROM inactivity_alert_log WHERE guild_id = ?", (guild.id,))
+        alerted = set()
+        for r in alert_rows:
+            alerted.add((r['user_id'], r['rule']))
+
+        # Message counts for each period
+        now = datetime.now(timezone.utc)
+        primary_cutoff = int((now - timedelta(days=primary_period)).timestamp())
+        secondary_cutoff = int((now - timedelta(days=secondary_period)).timestamp())
+        broad_cutoff = int((now - timedelta(days=broad_period)).timestamp())
+
+        primary_counts_rows = await self.db.fetch_all("SELECT user_id, count(*) as c FROM message_logs WHERE guild_id = ? AND timestamp > ? GROUP BY user_id", (guild.id, primary_cutoff))
+        primary_counts = {r['user_id']: r['c'] for r in primary_counts_rows}
+
+        secondary_counts_rows = await self.db.fetch_all("SELECT user_id, count(*) as c FROM message_logs WHERE guild_id = ? AND timestamp > ? GROUP BY user_id", (guild.id, secondary_cutoff))
+        secondary_counts = {r['user_id']: r['c'] for r in secondary_counts_rows}
+
+        # For global rules: check last message timestamp and all-time counts
+        last_msg_rows = await self.db.fetch_all("SELECT user_id, MAX(timestamp) as last_ts, count(*) as total FROM message_logs WHERE guild_id = ? GROUP BY user_id", (guild.id,))
+        last_msg_ts = {r['user_id']: r['last_ts'] for r in last_msg_rows}
+        alltime_counts = {r['user_id']: r['total'] for r in last_msg_rows}
+        global_9mo_cutoff = int((now - timedelta(days=global_9mo_period)).timestamp())
+
+        alerts_to_send = []
+        updates_to_clear = []
+
+        logger.info(f"[Inactivity] Guild '{guild.name}': checking {len(guild.members)} members.")
+
+        for member in guild.members:
+            if member.bot:
+                continue
+            if not member.joined_at:
+                continue
+
+            join_ts = int(member.joined_at.timestamp())
+            status_info = statuses.get(member.id)
+
+            # Kicked users won't be members; forgotten/snoozed block only rules they were alerted for
+            is_kicked = status_info and status_info['status'] == 'kicked'
+            if is_kicked:
+                continue
+            is_forgotten = status_info and status_info['status'] == 'forgotten'
+            is_snoozed = status_info and status_info['status'] == 'snoozed' and now.timestamp() < status_info['snooze_until']
+
+            has_newcomer_role = highlight_role and highlight_role in member.roles
+
+            # --- PRIMARY RULE (newcomer role only) ---
+            if has_newcomer_role and not (is_forgotten or is_snoozed):
+                p_count = primary_counts.get(member.id, 0)
+                if p_count >= primary_threshold:
+                    if (member.id, 'primary') in alerted:
+                        updates_to_clear.append((member.id, 'primary'))
+                elif join_ts <= primary_cutoff and (member.id, 'primary') not in alerted:
+                    alerts_to_send.append((member, p_count, 'primary', primary_threshold, primary_period))
+
+            # --- SECONDARY RULE (newcomer role only) ---
+            if has_newcomer_role and (member.id, 'secondary') not in alerted:
+                if is_forgotten or is_snoozed:
+                    pass  # blocked
+                else:
+                    s_count = secondary_counts.get(member.id, 0)
+                    if s_count > secondary_threshold:
+                        pass  # active for this rule
+                    elif join_ts <= secondary_cutoff:
+                        alerts_to_send.append((member, s_count, 'secondary', secondary_threshold, secondary_period))
+            elif has_newcomer_role and (member.id, 'secondary') in alerted:
+                s_count = secondary_counts.get(member.id, 0)
+                if s_count > secondary_threshold:
+                    updates_to_clear.append((member.id, 'secondary'))
+
+            # --- GLOBAL 6MO RULE (all members, respects forgotten, whitelists users with 25+ all-time msgs) ---
+            if (member.id, 'broad') not in alerted:
+                if is_forgotten:
+                    pass  # admin said forget this user
+                elif alltime_counts.get(member.id, 0) >= broad_whitelist:
+                    pass  # whitelisted by all-time message count
+                else:
+                    user_last_ts = last_msg_ts.get(member.id, 0)
+                    if user_last_ts > broad_cutoff:
+                        pass  # sent a message within the period
+                    elif join_ts <= broad_cutoff:
+                        alerts_to_send.append((member, 0, 'broad', 0, broad_period))
+            else:
+                user_last_ts = last_msg_ts.get(member.id, 0)
+                if user_last_ts > broad_cutoff:
+                    updates_to_clear.append((member.id, 'broad'))
+
+            # --- GLOBAL 9MO RULE (all members, NO exceptions — ignores forgotten/snoozed/whitelist) ---
+            if (member.id, 'global_9mo') not in alerted:
+                user_last_ts = last_msg_ts.get(member.id, 0)
+                if user_last_ts > global_9mo_cutoff:
+                    pass  # sent a message within the period
+                elif join_ts <= global_9mo_cutoff:
+                    alerts_to_send.append((member, 0, 'global_9mo', 0, global_9mo_period))
+            else:
+                user_last_ts = last_msg_ts.get(member.id, 0)
+                if user_last_ts > global_9mo_cutoff:
+                    updates_to_clear.append((member.id, 'global_9mo'))
+
+        # Clear resolved alerts
+        if updates_to_clear:
+            for uid, rule in updates_to_clear:
+                await self.db.execute("DELETE FROM inactivity_alert_log WHERE guild_id = ? AND user_id = ? AND rule = ?", (guild.id, uid, rule))
+            cleared_users = set(uid for uid, _ in updates_to_clear)
+            for uid in cleared_users:
+                remaining = await self.db.fetch_one("SELECT 1 FROM inactivity_alert_log WHERE guild_id = ? AND user_id = ?", (guild.id, uid))
+                if not remaining:
+                    status_info = statuses.get(uid)
+                    if status_info and status_info['status'] in ('alerted', 'snoozed'):
+                        await self.db.execute("DELETE FROM user_inactivity_status WHERE guild_id = ? AND user_id = ?", (guild.id, uid))
+
+        logger.info(f"[Inactivity] Guild '{guild.name}': {len(alerts_to_send)} alerts to send, {len(updates_to_clear)} alert entries to clear.")
+
+        # Send alerts
+        for member, count, rule, threshold, period in alerts_to_send:
+            if rule == 'primary':
+                title = "Newcomer Inactivity Alert"
+                color = discord.Color.red()
+            elif rule == 'secondary':
+                title = "Newcomer Inactivity Alert"
+                color = discord.Color.red()
+            elif rule == 'global_9mo':
+                title = "\u203c\ufe0f Member Inactivity Alert"
+                color = discord.Color.dark_red()
+            else:  # broad (6mo)
+                title = "\u203c\ufe0f Member Inactivity Alert"
+                color = discord.Color.orange()
+
+            rule_labels = {'primary': 'Newcomer', 'secondary': 'Secondary', 'broad': 'Global (6mo)', 'global_9mo': 'Global (9mo)'}
+            desc = f"**{count}** messages in the last **{period}** days (Threshold: {threshold})"
+            embed = discord.Embed(title=title, description=desc, color=color)
+            embed.set_author(name=f"{member.display_name} ({member.name})", icon_url=member.display_avatar.url)
+            embed.set_thumbnail(url=member.display_avatar.url)
+            embed.add_field(name="Joined", value=member.joined_at.strftime("%Y-%m-%d"), inline=True)
+            embed.add_field(name="User ID", value=str(member.id), inline=True)
+            embed.add_field(name="Rule", value=rule_labels.get(rule, rule.capitalize()), inline=True)
+
+            await log_channel.send(content=member.mention, embed=embed, view=_make_alert_view(member.id, "initial"))
+            await self.db.execute("INSERT OR REPLACE INTO user_inactivity_status (guild_id, user_id, status, snooze_until) VALUES (?, ?, 'alerted', 0)", (guild.id, member.id))
+            await self.db.execute("INSERT OR IGNORE INTO inactivity_alert_log (guild_id, user_id, rule) VALUES (?, ?, ?)", (guild.id, member.id, rule))
+            await asyncio.sleep(2)
+
+        return len(alerts_to_send)
+
     # --- TASKS ---
     @tasks.loop(hours=24)
     async def check_inactivity_task(self):
@@ -392,62 +631,7 @@ class Inactivity(commands.Cog):
                     if not row or not row['log_channel_id']:
                         logger.info(f"[Inactivity] Guild '{guild.name}': no config, skipping.")
                         continue
-                    log_channel = guild.get_channel(row['log_channel_id'])
-                    if not log_channel:
-                        logger.warning(f"[Inactivity] Guild '{guild.name}': log channel {row['log_channel_id']} not found.")
-                        continue
-                    highlight_role = guild.get_role(row['highlight_role_id']) if row['highlight_role_id'] else None
-                    cutoff_ts = int((datetime.now(timezone.utc) - timedelta(days=row['period_days'])).timestamp())
-                    status_rows = await self.db.fetch_all("SELECT user_id, status, snooze_until FROM user_inactivity_status WHERE guild_id = ?", (guild.id,))
-                    statuses = {r['user_id']: {'status': r['status'], 'snooze_until': r['snooze_until']} for r in status_rows}
-                    count_rows = await self.db.fetch_all("SELECT user_id, count(*) as c FROM message_logs WHERE guild_id = ? AND timestamp > ? GROUP BY user_id", (guild.id, cutoff_ts))
-                    msg_counts = {r['user_id']: r['c'] for r in count_rows}
-                    updates_to_clear = []
-                    alerts_to_send = []
-                    logger.info(f"[Inactivity] Guild '{guild.name}': checking {len(guild.members)} members (threshold={row['msg_threshold']}, period={row['period_days']}d).")
-                    skip_too_new = skip_threshold = skip_status = 0
-                    for member in guild.members:
-                        if member.bot: continue
-                        if not member.joined_at: continue
-                        count = msg_counts.get(member.id, 0)
-                        if count >= row['msg_threshold']:
-                            if member.id in statuses and statuses[member.id]['status'] in ('alerted', 'snoozed'):
-                                updates_to_clear.append(member.id)
-                            skip_threshold += 1
-                            continue
-                        join_ts = int(member.joined_at.timestamp())
-                        if join_ts > cutoff_ts:
-                            skip_too_new += 1
-                            continue
-                        status_info = statuses.get(member.id)
-                        if status_info:
-                            if status_info['status'] in ('forgotten', 'kicked'):
-                                skip_status += 1
-                                continue
-                            if status_info['status'] == 'snoozed' and datetime.now(timezone.utc).timestamp() < status_info['snooze_until']:
-                                skip_status += 1
-                                continue
-                            if status_info['status'] == 'alerted':
-                                skip_status += 1
-                                continue
-                        alerts_to_send.append((member, count))
-                    logger.info(f"[Inactivity] Guild '{guild.name}': skipped {skip_threshold} (met threshold), {skip_too_new} (joined too recently), {skip_status} (status).")
-                    if updates_to_clear:
-                        async with self.db.transaction() as conn:
-                            for uid in updates_to_clear:
-                                await conn.execute("DELETE FROM user_inactivity_status WHERE guild_id = ? AND user_id = ?", (guild.id, uid))
-                    logger.info(f"[Inactivity] Guild '{guild.name}': {len(alerts_to_send)} alerts to send, {len(updates_to_clear)} statuses to clear.")
-                    for member, count in alerts_to_send:
-                        color = discord.Color.red() if (highlight_role and highlight_role in member.roles) else discord.Color.orange()
-                        title = "VIP Inactivity Alert" if (highlight_role and highlight_role in member.roles) else "Inactivity Alert"
-                        embed = discord.Embed(title=title, description=f"**{count}** messages in the last **{row['period_days']}** days (Threshold: {row['msg_threshold']})", color=color)
-                        embed.set_author(name=f"{member.display_name} ({member.name})", icon_url=member.display_avatar.url)
-                        embed.set_thumbnail(url=member.display_avatar.url)
-                        embed.add_field(name="Joined", value=member.joined_at.strftime("%Y-%m-%d"), inline=True)
-                        embed.add_field(name="User ID", value=str(member.id), inline=True)
-                        await log_channel.send(content=member.mention, embed=embed, view=_make_alert_view(member.id, "initial"))
-                        await self.db.execute("INSERT OR REPLACE INTO user_inactivity_status (guild_id, user_id, status, snooze_until) VALUES (?, ?, 'alerted', 0)", (guild.id, member.id))
-                        await asyncio.sleep(2)
+                    await self._run_guild_check(guild, row)
                 except Exception as e:
                     logger.exception(f"[Inactivity] Guild '{guild.name}' check failed: {e}")
                 await asyncio.sleep(1)

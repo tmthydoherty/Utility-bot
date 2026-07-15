@@ -123,42 +123,42 @@
                 }
             },
             "unseen_maps": [
-                "Birnin T'Challa",
-                "Royal Palace",
-                "Symbiotic Surface",
-                "Central Park",
-                "Krakoa",
-                "Lower Manhattan",
-                "Hall of Djalia",
-                "Hell's Heaven",
-                "Shin-Shibuya",
-                "Arakko",
-                "K'un Lun",
-                "Museum of Contemplation",
-                "Celestial Husk"
+                "Hell's Heaven"
             ],
             "seen_maps": [
+                "Birnin T'Challa",
+                "Central Park",
+                "Hall of Djalia",
+                "K'un Lun",
                 "Spider-Islands",
+                "Lower Manhattan",
+                "Arakko",
+                "Krakoa",
+                "Celestial Husk",
                 "Yggdrasil Path",
-                "Midtown"
+                "Museum of Contemplation",
+                "Shin-Shibuya",
+                "Symbiotic Surface",
+                "Midtown",
+                "Royal Palace"
             ],
             "win_history": {
-                "Symbiotic Surface": 2,
-                "Shin-Shibuya": 14,
-                "Spider-Islands": 15,
+                "Symbiotic Surface": 3,
+                "Shin-Shibuya": 17,
+                "Spider-Islands": 16,
                 "Arakko": 6,
                 "Hell's Heaven": 6,
-                "Hall of Djalia": 5,
-                "Central Park": 11,
+                "Hall of Djalia": 6,
+                "Central Park": 12,
                 "Birnin T'Challa": 2,
-                "Midtown": 10,
-                "K'un Lun": 10,
-                "Museum of Contemplation": 7,
-                "Yggdrasil Path": 14,
-                "Royal Palace": 3,
-                "Krakoa": 5,
-                "Lower Manhattan": 9,
-                "Celestial Husk": 2
+                "Midtown": 12,
+                "K'un Lun": 11,
+                "Museum of Contemplation": 11,
+                "Yggdrasil Path": 15,
+                "Royal Palace": 4,
+                "Krakoa": 6,
+                "Lower Manhattan": 10,
+                "Celestial Husk": 3
             },
             "max_votes": 12
         }
@@ -774,8 +774,8 @@
                     }
                 },
                 "391313828237017088": {
-                    "total_votes": 140,
-                    "wins": 76,
+                    "total_votes": 146,
+                    "wins": 80,
                     "map_votes": {
                         "Lotus": 4,
                         "Fracture": 17,
@@ -788,24 +788,24 @@
                         "Abyss": 4,
                         "Bind": 2,
                         "Arakko": 2,
-                        "Spider-Islands": 8,
+                        "Spider-Islands": 9,
                         "Central Park": 6,
                         "Split": 1,
                         "Symbiotic Surface": 2,
-                        "Midtown": 7,
-                        "K'un Lun": 9,
+                        "Midtown": 8,
+                        "K'un Lun": 10,
                         "Shin-Shibuya": 8,
                         "Royal Palace": 3,
-                        "Krakoa": 12,
-                        "Museum of Contemplation": 6,
+                        "Krakoa": 14,
+                        "Museum of Contemplation": 7,
                         "Yggdrasil Path": 8,
                         "Lower Manhattan": 5,
                         "Hall of Djalia": 1
                     }
                 },
                 "1136852950392774686": {
-                    "total_votes": 43,
-                    "wins": 21,
+                    "total_votes": 44,
+                    "wins": 22,
                     "map_votes": {
                         "Lotus": 4,
                         "Split": 4,
@@ -817,7 +817,7 @@
                         "Breeze": 1,
                         "Bind": 4,
                         "Yggdrasil Path": 2,
-                        "Shin-Shibuya": 2,
+                        "Shin-Shibuya": 3,
                         "Central Park": 1,
                         "Spider-Islands": 2,
                         "Symbiotic Surface": 3,
@@ -826,7 +826,7 @@
                     }
                 },
                 "739592205265535007": {
-                    "total_votes": 42,
+                    "total_votes": 44,
                     "wins": 27,
                     "map_votes": {
                         "Lotus": 3,
@@ -834,8 +834,8 @@
                         "Arakko": 1,
                         "Shin-Shibuya": 5,
                         "Museum of Contemplation": 5,
-                        "Yggdrasil Path": 5,
-                        "Central Park": 4,
+                        "Yggdrasil Path": 6,
+                        "Central Park": 5,
                         "Birnin T'Challa": 1,
                         "Midtown": 4,
                         "K'un Lun": 2,
@@ -873,8 +873,8 @@
                     }
                 },
                 "562801560640552980": {
-                    "total_votes": 89,
-                    "wins": 45,
+                    "total_votes": 91,
+                    "wins": 46,
                     "map_votes": {
                         "Bind": 9,
                         "Corrode": 10,
@@ -897,12 +897,13 @@
                         "Celestial Husk": 1,
                         "K'un Lun": 1,
                         "Museum of Contemplation": 1,
-                        "Hall of Djalia": 1
+                        "Hall of Djalia": 2,
+                        "Central Park": 1
                     }
                 },
                 "1053227743040503878": {
-                    "total_votes": 68,
-                    "wins": 38,
+                    "total_votes": 70,
+                    "wins": 39,
                     "map_votes": {
                         "Fracture": 4,
                         "Icebox": 8,
@@ -919,11 +920,11 @@
                         "K'un Lun": 4,
                         "Spider-Islands": 5,
                         "Hell's Heaven": 1,
-                        "Museum of Contemplation": 2,
+                        "Museum of Contemplation": 3,
                         "Yggdrasil Path": 3,
                         "Midtown": 2,
                         "Lower Manhattan": 2,
-                        "Royal Palace": 2
+                        "Royal Palace": 3
                     }
                 },
                 "1006374083451170916": {
@@ -966,8 +967,8 @@
                     }
                 },
                 "1098345785109774397": {
-                    "total_votes": 146,
-                    "wins": 85,
+                    "total_votes": 152,
+                    "wins": 91,
                     "map_votes": {
                         "Ascent": 10,
                         "Sunset": 12,
@@ -983,15 +984,15 @@
                         "Fracture": 1,
                         "Hell's Heaven": 4,
                         "Arakko": 3,
-                        "Shin-Shibuya": 6,
+                        "Shin-Shibuya": 7,
                         "Birnin T'Challa": 1,
                         "Spider-Islands": 5,
-                        "Central Park": 4,
+                        "Central Park": 5,
                         "K'un Lun": 4,
-                        "Yggdrasil Path": 10,
-                        "Museum of Contemplation": 9,
-                        "Midtown": 7,
-                        "Symbiotic Surface": 3,
+                        "Yggdrasil Path": 11,
+                        "Museum of Contemplation": 10,
+                        "Midtown": 8,
+                        "Symbiotic Surface": 4,
                         "Hall of Djalia": 1,
                         "Lower Manhattan": 10,
                         "Celestial Husk": 1,
@@ -1014,8 +1015,8 @@
                     }
                 },
                 "462681318577405952": {
-                    "total_votes": 87,
-                    "wins": 51,
+                    "total_votes": 93,
+                    "wins": 55,
                     "map_votes": {
                         "Pearl": 3,
                         "Abyss": 2,
@@ -1023,18 +1024,18 @@
                         "Fracture": 2,
                         "Krakoa": 2,
                         "K'un Lun": 2,
-                        "Arakko": 3,
+                        "Arakko": 4,
                         "Royal Palace": 5,
                         "Breeze": 1,
                         "Shin-Shibuya": 7,
                         "Split": 3,
-                        "Spider-Islands": 8,
+                        "Spider-Islands": 9,
                         "Symbiotic Surface": 6,
                         "Yggdrasil Path": 8,
-                        "Midtown": 10,
+                        "Midtown": 11,
                         "Haven": 1,
-                        "Museum of Contemplation": 2,
-                        "Central Park": 9,
+                        "Museum of Contemplation": 4,
+                        "Central Park": 10,
                         "Lower Manhattan": 6,
                         "Hell's Heaven": 1,
                         "Lotus": 1,
@@ -1059,8 +1060,8 @@
                     }
                 },
                 "848050994553028608": {
-                    "total_votes": 91,
-                    "wins": 67,
+                    "total_votes": 98,
+                    "wins": 71,
                     "map_votes": {
                         "Haven": 5,
                         "Lotus": 6,
@@ -1070,20 +1071,20 @@
                         "Ascent": 7,
                         "Split": 4,
                         "Sunset": 2,
-                        "Arakko": 2,
-                        "Shin-Shibuya": 5,
-                        "Spider-Islands": 6,
-                        "Central Park": 5,
+                        "Arakko": 3,
+                        "Shin-Shibuya": 6,
+                        "Spider-Islands": 7,
+                        "Central Park": 6,
                         "Royal Palace": 6,
-                        "Hell's Heaven": 1,
+                        "Hell's Heaven": 2,
                         "K'un Lun": 3,
-                        "Museum of Contemplation": 1,
+                        "Museum of Contemplation": 2,
                         "Yggdrasil Path": 8,
                         "Midtown": 5,
                         "Lower Manhattan": 4,
                         "Celestial Husk": 2,
                         "Hall of Djalia": 1,
-                        "Krakoa": 2
+                        "Krakoa": 3
                     }
                 },
                 "588032525960478760": {
@@ -1245,8 +1246,8 @@
                     }
                 },
                 "518224960007831552": {
-                    "total_votes": 48,
-                    "wins": 27,
+                    "total_votes": 49,
+                    "wins": 28,
                     "map_votes": {
                         "Pearl": 2,
                         "Abyss": 4,
@@ -1255,7 +1256,7 @@
                         "Haven": 5,
                         "Sunset": 3,
                         "Icebox": 1,
-                        "Symbiotic Surface": 1,
+                        "Symbiotic Surface": 2,
                         "Shin-Shibuya": 5,
                         "Arakko": 1,
                         "Hall of Djalia": 2,
@@ -1340,8 +1341,8 @@
                     }
                 },
                 "398789704239153152": {
-                    "total_votes": 75,
-                    "wins": 47,
+                    "total_votes": 78,
+                    "wins": 48,
                     "map_votes": {
                         "Split": 3,
                         "Abyss": 1,
@@ -1349,36 +1350,37 @@
                         "Ascent": 1,
                         "Arakko": 3,
                         "Hell's Heaven": 8,
-                        "Shin-Shibuya": 9,
+                        "Shin-Shibuya": 10,
                         "Haven": 2,
                         "Spider-Islands": 6,
                         "Central Park": 7,
                         "Museum of Contemplation": 4,
-                        "Birnin T'Challa": 1,
+                        "Birnin T'Challa": 2,
                         "Midtown": 5,
                         "K'un Lun": 2,
                         "Hall of Djalia": 6,
                         "Lower Manhattan": 3,
                         "Yggdrasil Path": 2,
                         "Symbiotic Surface": 7,
-                        "Celestial Husk": 2,
+                        "Celestial Husk": 3,
                         "Krakoa": 2
                     }
                 },
                 "342775413556248576": {
-                    "total_votes": 8,
-                    "wins": 2,
+                    "total_votes": 9,
+                    "wins": 3,
                     "map_votes": {
                         "Split": 2,
                         "Fracture": 2,
                         "Ascent": 2,
                         "Icebox": 1,
-                        "Pearl": 1
+                        "Pearl": 1,
+                        "Hall of Djalia": 1
                     }
                 },
                 "789180867330834442": {
-                    "total_votes": 11,
-                    "wins": 3,
+                    "total_votes": 12,
+                    "wins": 4,
                     "map_votes": {
                         "Bind": 1,
                         "Ascent": 1,
@@ -1387,12 +1389,13 @@
                         "Fracture": 3,
                         "Pearl": 2,
                         "Haven": 1,
-                        "Museum of Contemplation": 1
+                        "Museum of Contemplation": 1,
+                        "Celestial Husk": 1
                     }
                 },
                 "1023690392689971310": {
-                    "total_votes": 19,
-                    "wins": 14,
+                    "total_votes": 28,
+                    "wins": 22,
                     "map_votes": {
                         "Breeze": 1,
                         "Haven": 1,
@@ -1400,13 +1403,17 @@
                         "Bind": 2,
                         "Arakko": 1,
                         "Birnin T'Challa": 1,
-                        "Shin-Shibuya": 1,
-                        "Central Park": 4,
+                        "Shin-Shibuya": 2,
+                        "Central Park": 5,
                         "Hall of Djalia": 1,
                         "Royal Palace": 1,
                         "Lower Manhattan": 1,
-                        "Yggdrasil Path": 3,
-                        "Museum of Contemplation": 1
+                        "Yggdrasil Path": 4,
+                        "Museum of Contemplation": 2,
+                        "K'un Lun": 1,
+                        "Celestial Husk": 1,
+                        "Midtown": 2,
+                        "Krakoa": 1
                     }
                 },
                 "842436679780401162": {
@@ -1454,8 +1461,8 @@
                     }
                 },
                 "767189722723909642": {
-                    "total_votes": 80,
-                    "wins": 51,
+                    "total_votes": 89,
+                    "wins": 57,
                     "map_votes": {
                         "Split": 2,
                         "Bind": 7,
@@ -1467,21 +1474,22 @@
                         "Abyss": 2,
                         "Arakko": 2,
                         "Spider-Islands": 6,
-                        "Central Park": 4,
-                        "K'un Lun": 4,
+                        "Central Park": 5,
+                        "K'un Lun": 6,
                         "Symbiotic Surface": 1,
                         "Sunset": 1,
-                        "Shin-Shibuya": 4,
-                        "Museum of Contemplation": 5,
+                        "Shin-Shibuya": 5,
+                        "Museum of Contemplation": 7,
                         "Hall of Djalia": 1,
                         "Krakoa": 4,
                         "Lower Manhattan": 3,
                         "Yggdrasil Path": 5,
                         "Midtown": 6,
                         "Hell's Heaven": 2,
-                        "Celestial Husk": 2,
+                        "Celestial Husk": 3,
                         "Corrode": 1,
-                        "Birnin T'Challa": 1
+                        "Birnin T'Challa": 2,
+                        "Royal Palace": 1
                     }
                 },
                 "356774449032331264": {
@@ -1545,8 +1553,8 @@
                     }
                 },
                 "1349783844492148739": {
-                    "total_votes": 29,
-                    "wins": 11,
+                    "total_votes": 43,
+                    "wins": 21,
                     "map_votes": {
                         "Bind": 3,
                         "Icebox": 6,
@@ -1554,9 +1562,17 @@
                         "Haven": 4,
                         "Fracture": 2,
                         "Breeze": 3,
-                        "Krakoa": 1,
+                        "Krakoa": 2,
                         "Celestial Husk": 1,
-                        "Ascent": 1
+                        "Ascent": 1,
+                        "Museum of Contemplation": 4,
+                        "Royal Palace": 2,
+                        "Hall of Djalia": 1,
+                        "Lower Manhattan": 1,
+                        "Central Park": 1,
+                        "K'un Lun": 2,
+                        "Yggdrasil Path": 1,
+                        "Shin-Shibuya": 1
                     }
                 },
                 "1326027822208389121": {
@@ -1607,22 +1623,22 @@
                     }
                 },
                 "691031987112116236": {
-                    "total_votes": 44,
-                    "wins": 12,
+                    "total_votes": 52,
+                    "wins": 13,
                     "map_votes": {
-                        "Hell's Heaven": 3,
+                        "Hell's Heaven": 4,
                         "Museum of Contemplation": 5,
-                        "K'un Lun": 3,
-                        "Spider-Islands": 3,
+                        "K'un Lun": 4,
+                        "Spider-Islands": 4,
                         "Hall of Djalia": 4,
-                        "Birnin T'Challa": 6,
+                        "Birnin T'Challa": 7,
                         "Krakoa": 3,
                         "Celestial Husk": 4,
-                        "Midtown": 1,
+                        "Midtown": 2,
                         "Symbiotic Surface": 3,
-                        "Shin-Shibuya": 4,
+                        "Shin-Shibuya": 6,
                         "Arakko": 2,
-                        "Royal Palace": 2,
+                        "Royal Palace": 3,
                         "Central Park": 1
                     }
                 },
@@ -1635,20 +1651,20 @@
                     }
                 },
                 "566796407143399424": {
-                    "total_votes": 31,
-                    "wins": 18,
+                    "total_votes": 36,
+                    "wins": 20,
                     "map_votes": {
-                        "Shin-Shibuya": 5,
-                        "Museum of Contemplation": 4,
-                        "Hell's Heaven": 4,
+                        "Shin-Shibuya": 6,
+                        "Museum of Contemplation": 5,
+                        "Hell's Heaven": 5,
                         "Midtown": 2,
-                        "Lower Manhattan": 5,
+                        "Lower Manhattan": 6,
                         "Royal Palace": 1,
                         "Yggdrasil Path": 4,
                         "Birnin T'Challa": 1,
                         "Arakko": 2,
                         "Symbiotic Surface": 1,
-                        "Spider-Islands": 2
+                        "Spider-Islands": 3
                     }
                 },
                 "1185336698977132547": {
@@ -1774,10 +1790,10 @@
                     }
                 },
                 "1084931773634453575": {
-                    "total_votes": 6,
-                    "wins": 1,
+                    "total_votes": 7,
+                    "wins": 2,
                     "map_votes": {
-                        "Museum of Contemplation": 1,
+                        "Museum of Contemplation": 2,
                         "Midtown": 2,
                         "Central Park": 1,
                         "Lower Manhattan": 1,
@@ -1866,20 +1882,22 @@
                     }
                 },
                 "889334500977426453": {
-                    "total_votes": 16,
-                    "wins": 9,
+                    "total_votes": 27,
+                    "wins": 17,
                     "map_votes": {
                         "Birnin T'Challa": 1,
-                        "Spider-Islands": 1,
-                        "Shin-Shibuya": 2,
+                        "Spider-Islands": 2,
+                        "Shin-Shibuya": 4,
                         "K'un Lun": 1,
-                        "Arakko": 2,
-                        "Midtown": 1,
-                        "Hell's Heaven": 2,
+                        "Arakko": 3,
+                        "Midtown": 2,
+                        "Hell's Heaven": 3,
                         "Krakoa": 2,
-                        "Lower Manhattan": 2,
+                        "Lower Manhattan": 3,
                         "Hall of Djalia": 1,
-                        "Royal Palace": 1
+                        "Royal Palace": 1,
+                        "Museum of Contemplation": 3,
+                        "Yggdrasil Path": 1
                     }
                 },
                 "761725135023505408": {
@@ -1934,8 +1952,8 @@
                     }
                 },
                 "646714501970001929": {
-                    "total_votes": 7,
-                    "wins": 1,
+                    "total_votes": 8,
+                    "wins": 2,
                     "map_votes": {
                         "Lower Manhattan": 1,
                         "Royal Palace": 1,
@@ -1943,7 +1961,8 @@
                         "Arakko": 1,
                         "Museum of Contemplation": 1,
                         "Central Park": 1,
-                        "Symbiotic Surface": 1
+                        "Symbiotic Surface": 1,
+                        "Hall of Djalia": 1
                     }
                 },
                 "941300258758086727": {
@@ -1984,15 +2003,21 @@
                     }
                 },
                 "756697201136238672": {
-                    "total_votes": 8,
-                    "wins": 6,
+                    "total_votes": 16,
+                    "wins": 10,
                     "map_votes": {
                         "Midtown": 1,
                         "Birnin T'Challa": 1,
                         "Celestial Husk": 1,
                         "Yggdrasil Path": 2,
                         "Spider-Islands": 2,
-                        "Lower Manhattan": 1
+                        "Lower Manhattan": 1,
+                        "Symbiotic Surface": 2,
+                        "Shin-Shibuya": 1,
+                        "Arakko": 1,
+                        "Museum of Contemplation": 1,
+                        "Central Park": 2,
+                        "Royal Palace": 1
                     }
                 },
                 "742222644849541172": {
@@ -2010,12 +2035,18 @@
                     }
                 },
                 "623517252146298891": {
-                    "total_votes": 4,
-                    "wins": 2,
+                    "total_votes": 14,
+                    "wins": 8,
                     "map_votes": {
-                        "Museum of Contemplation": 2,
-                        "Symbiotic Surface": 1,
-                        "Yggdrasil Path": 1
+                        "Museum of Contemplation": 3,
+                        "Symbiotic Surface": 3,
+                        "Yggdrasil Path": 2,
+                        "Hall of Djalia": 1,
+                        "Shin-Shibuya": 1,
+                        "Celestial Husk": 1,
+                        "Midtown": 1,
+                        "Central Park": 1,
+                        "Hell's Heaven": 1
                     }
                 },
                 "1103502008645857290": {
@@ -2039,11 +2070,14 @@
                     }
                 },
                 "347065462175301633": {
-                    "total_votes": 3,
-                    "wins": 2,
+                    "total_votes": 8,
+                    "wins": 6,
                     "map_votes": {
                         "Lower Manhattan": 2,
-                        "Shin-Shibuya": 1
+                        "Shin-Shibuya": 2,
+                        "K'un Lun": 2,
+                        "Midtown": 1,
+                        "Krakoa": 1
                     }
                 },
                 "571437468637986835": {
@@ -2092,14 +2126,102 @@
                     }
                 },
                 "758079808897941505": {
-                    "total_votes": 1,
-                    "wins": 0,
+                    "total_votes": 5,
+                    "wins": 1,
                     "map_votes": {
-                        "Midtown": 1
+                        "Midtown": 1,
+                        "Krakoa": 1,
+                        "K'un Lun": 1,
+                        "Museum of Contemplation": 1,
+                        "Spider-Islands": 1
+                    }
+                },
+                "853582892046090240": {
+                    "total_votes": 8,
+                    "wins": 6,
+                    "map_votes": {
+                        "Museum of Contemplation": 1,
+                        "Royal Palace": 1,
+                        "Shin-Shibuya": 2,
+                        "Spider-Islands": 1,
+                        "Central Park": 1,
+                        "Midtown": 1,
+                        "Yggdrasil Path": 1
+                    }
+                },
+                "1189317871529107561": {
+                    "total_votes": 2,
+                    "wins": 2,
+                    "map_votes": {
+                        "Lower Manhattan": 1,
+                        "Celestial Husk": 1
+                    }
+                },
+                "833404516694622229": {
+                    "total_votes": 5,
+                    "wins": 5,
+                    "map_votes": {
+                        "Lower Manhattan": 1,
+                        "Museum of Contemplation": 2,
+                        "Midtown": 1,
+                        "Krakoa": 1
+                    }
+                },
+                "668831314127880192": {
+                    "total_votes": 1,
+                    "wins": 1,
+                    "map_votes": {
+                        "Shin-Shibuya": 1
+                    }
+                },
+                "578356962761375754": {
+                    "total_votes": 5,
+                    "wins": 4,
+                    "map_votes": {
+                        "Central Park": 1,
+                        "Yggdrasil Path": 1,
+                        "Museum of Contemplation": 1,
+                        "Spider-Islands": 1,
+                        "Hell's Heaven": 1
+                    }
+                },
+                "1146639091685929000": {
+                    "total_votes": 3,
+                    "wins": 2,
+                    "map_votes": {
+                        "Spider-Islands": 1,
+                        "Hall of Djalia": 1,
+                        "Arakko": 1
+                    }
+                },
+                "332557549880737823": {
+                    "total_votes": 3,
+                    "wins": 2,
+                    "map_votes": {
+                        "Midtown": 1,
+                        "Spider-Islands": 1,
+                        "K'un Lun": 1
+                    }
+                },
+                "1083124741470179460": {
+                    "total_votes": 3,
+                    "wins": 1,
+                    "map_votes": {
+                        "Midtown": 1,
+                        "Spider-Islands": 1,
+                        "Symbiotic Surface": 1
+                    }
+                },
+                "241738044984524812": {
+                    "total_votes": 2,
+                    "wins": 1,
+                    "map_votes": {
+                        "Celestial Husk": 1,
+                        "K'un Lun": 1
                     }
                 }
             },
-            "vote_counter": 324,
+            "vote_counter": 343,
             "reserved_maps": {}
         }
     }

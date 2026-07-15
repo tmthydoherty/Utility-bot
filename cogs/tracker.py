@@ -89,8 +89,9 @@ class TrackingDB:
         await self._db.execute("CREATE TABLE IF NOT EXISTS member_events (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, guild_id INTEGER, event_type TEXT, timestamp INTEGER)")
 
         # Inactivity tables (preserve existing)
-        await self._db.execute("CREATE TABLE IF NOT EXISTS inactivity_config (guild_id INTEGER PRIMARY KEY, log_channel_id INTEGER, msg_threshold INTEGER DEFAULT 5, period_days INTEGER DEFAULT 30, highlight_role_id INTEGER)")
+        await self._db.execute("CREATE TABLE IF NOT EXISTS inactivity_config (guild_id INTEGER PRIMARY KEY, log_channel_id INTEGER, msg_threshold INTEGER DEFAULT 5, period_days INTEGER DEFAULT 30, highlight_role_id INTEGER, secondary_msg_threshold INTEGER DEFAULT 5, secondary_period_days INTEGER DEFAULT 90, broad_period_days INTEGER DEFAULT 180, broad_whitelist_msgs INTEGER DEFAULT 25, global_9mo_period_days INTEGER DEFAULT 270)")
         await self._db.execute("CREATE TABLE IF NOT EXISTS user_inactivity_status (guild_id INTEGER, user_id INTEGER, status TEXT, snooze_until INTEGER, PRIMARY KEY (guild_id, user_id))")
+        await self._db.execute("CREATE TABLE IF NOT EXISTS inactivity_alert_log (guild_id INTEGER, user_id INTEGER, rule TEXT, PRIMARY KEY (guild_id, user_id, rule))")
 
         # Indexes
         await self._db.execute("CREATE INDEX IF NOT EXISTS idx_msg_user_time ON message_logs(user_id, timestamp)")

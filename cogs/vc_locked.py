@@ -441,6 +441,18 @@ class VC(commands.Cog):
                             except Exception as e:
                                 shared.logger.error(f"Failed to reconcile permissions for VC {vc_id}: {e}")
 
+                    # Ensure whitelisted bots can always join locked VCs
+                    if vc_data and not vc_data.get('unlocked', False) and not vc_data.get('is_basic', False):
+                        for bot_id in shared.WHITELISTED_BOT_IDS:
+                            bot_member = guild.get_member(bot_id)
+                            if bot_member:
+                                perms = vc.overwrites_for(bot_member)
+                                if perms.connect is not True or perms.view_channel is not True:
+                                    try:
+                                        await self.safe_set_permissions(vc, bot_member, view_channel=True, connect=True, speak=True)
+                                    except Exception as e:
+                                        shared.logger.error(f"Failed to whitelist bot {bot_id} on VC {vc_id}: {e}")
+
                     # Map category text channels for VC visibility tracking
                     if vc.category:
                         for tc in vc.category.text_channels:
@@ -732,6 +744,17 @@ class VC(commands.Cog):
                     issues_found += 1
                     issues_fixed += 1
 
+                # Ensure whitelisted bots can join locked VCs
+                if not expected_connect:
+                    for bot_id in shared.WHITELISTED_BOT_IDS:
+                        bot_member = guild.get_member(bot_id)
+                        if bot_member:
+                            bot_perms = vc.overwrites_for(bot_member)
+                            if bot_perms.connect is not True:
+                                await self.safe_set_permissions(vc, bot_member, view_channel=True, connect=True, speak=True)
+                                issues_found += 1
+                                issues_fixed += 1
+
             # Ensure knock hub embed is up to date for all guilds
             for guild in self.bot.guilds:
                 try:
@@ -739,7 +762,25 @@ class VC(commands.Cog):
                 except Exception as e:
                     shared.logger.error(f"Health check: Failed to update knock hub embed for guild {guild.id}: {e}")
 
-            if issues_found > 0:
+            # Ensure whitelisted bots can join ALL locked VCs (not just tracked ones)
+            for guild in self.bot.guilds:
+                for vc in guild.voice_channels:
+                    everyone_perms = vc.overwrites_for(guild.default_role)
+                    if everyone_perms.connect is not False:
+                        continue  # Not a locked VC
+                    for bot_id in shared.WHITELISTED_BOT_IDS:
+                        bot_member = guild.get_member(bot_id)
+                        if bot_member:
+                            bot_perms = vc.overwrites_for(bot_member)
+                            if bot_perms.connect is not True or bot_perms.view_channel is not True:
+                                try:
+                                    await self.safe_set_permissions(vc, bot_member, view_channel=True, connect=True, speak=True)
+                                    shared.logger.info(f"Whitelisted bot {bot_id} on locked VC {vc.id}")
+                                    issues_fixed += 1
+                                except Exception as e:
+                                    shared.logger.error(f"Failed to whitelist bot {bot_id} on VC {vc.id}: {e}")
+
+            if issues_found > 0 or issues_fixed > 0:
                 shared.logger.info(f"Health check complete: {issues_found} issues found, {issues_fixed} fixed")
                 await self.save_state()
             else:
@@ -3224,7 +3265,7 @@ class VC(commands.Cog):
             return None
 
         clean_name = shared.sanitize_name(owner.display_name, owner.id)[:20]
-        vc_limit, vc_bitrate, vc_bans = 0, 64000, []
+        vc_limit, vc_bitrate, vc_bans = 0, self.get_guild_bitrate_limit(guild), []
 
         if is_spectator:
             vc_name = f"{shared.SPECTATOR_PREFIX}{clean_name}'s VC"
@@ -3250,7 +3291,11 @@ class VC(commands.Cog):
                 owner: discord.PermissionOverwrite(connect=True, move_members=True, manage_channels=True),
                 guild.me: discord.PermissionOverwrite(connect=True, manage_channels=True)
             }
-        
+            for bot_id in shared.WHITELISTED_BOT_IDS:
+                bot_member = guild.get_member(bot_id)
+                if bot_member:
+                    overwrites[bot_member] = discord.PermissionOverwrite(view_channel=True, connect=True, speak=True)
+
         try:
             vc = await guild.create_voice_channel(name=vc_name, category=category, overwrites=overwrites, user_limit=vc_limit, bitrate=vc_bitrate)
 
@@ -3439,6 +3484,12 @@ class VC(commands.Cog):
 
         # Set @everyone: connect=False, reset speak
         await self.safe_set_permissions(vc, guild.default_role, connect=False, speak=None)
+
+        # Whitelist bots that should always be able to join
+        for bot_id in shared.WHITELISTED_BOT_IDS:
+            bot_member = guild.get_member(bot_id)
+            if bot_member:
+                await self.safe_set_permissions(vc, bot_member, view_channel=True, connect=True, speak=True)
 
         # Update data BEFORE renaming
         vc_data['spectator'] = False

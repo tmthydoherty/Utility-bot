@@ -14,6 +14,11 @@ TRIGGER_NAME_SPECTATOR = "➕ Join to create spectator vc"  # Spectator VCs trig
 SPECTATOR_PREFIX = "🤫 "
 BANNED_WORDS = ["badword1", "badword2", "naughty"]
 
+# Bots that should always be able to join locked VCs
+WHITELISTED_BOT_IDS = [
+    1406417971290832966,  # VibeyMusic
+]
+
 # Issue #16 fix: Use constants instead of magic strings for verify_channel_exists results
 VERIFY_FORBIDDEN = "FORBIDDEN"
 VERIFY_ERROR = "ERROR"
@@ -882,6 +887,12 @@ class RulesView(discord.ui.View):
 
             # Update permissions: lock to public
             await cog.safe_set_permissions(vc, interaction.guild.default_role, connect=False)
+
+            # Whitelist bots that should always be able to join
+            for bot_id in WHITELISTED_BOT_IDS:
+                bot_member = interaction.guild.get_member(bot_id)
+                if bot_member:
+                    await cog.safe_set_permissions(vc, bot_member, view_channel=True, connect=True, speak=True)
 
             # Grandfather in existing members with VIP access
             for member in current_members:

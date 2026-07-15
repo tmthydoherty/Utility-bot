@@ -150,6 +150,17 @@
             "resolved_action": "ban",
             "resolved_at": "2026-06-30T18:41:35.915338+00:00",
             "stored_role_ids": []
+        },
+        "853582892046090240_1783315826": {
+            "user_id": 853582892046090240,
+            "rule": "Message Flood / Duplicate Spam",
+            "evidence": "OHHHH\nIK\nOK\nYEAHH\nI SEE YOU SEAN",
+            "timestamp": "2026-07-06T05:30:26.524485+00:00",
+            "resolved": true,
+            "resolved_by": 1053227743040503878,
+            "resolved_action": "ignore",
+            "resolved_at": "2026-07-06T05:32:17.204170+00:00",
+            "stored_role_ids": []
         }
     }
 }

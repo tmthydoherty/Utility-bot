@@ -570,12 +570,14 @@ class IntroCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_member_update(self, before, after):
-        """Detect when a base role is removed externally and clean up tier roles."""
+        """Detect when a base role is added or removed and sync tier roles accordingly."""
         if before.roles == after.roles:
             return
 
         removed_roles = set(r.id for r in before.roles) - set(r.id for r in after.roles)
-        if not removed_roles:
+        added_roles = set(r.id for r in after.roles) - set(r.id for r in before.roles)
+
+        if not removed_roles and not added_roles:
             return
 
         async with aiosqlite.connect(self.db_path) as db:
@@ -583,13 +585,17 @@ class IntroCog(commands.Cog):
             cursor = await db.execute("SELECT base_rank, role_id FROM base_roles")
             base_map = dict(await cursor.fetchall())
 
-            # Check if any removed role is a base role
+            # Check if any changed role is a base role
             removed_base_ranks = [
                 rank for rank, role_id in base_map.items()
                 if role_id in removed_roles
             ]
+            added_base_ranks = [
+                rank for rank, role_id in base_map.items()
+                if role_id in added_roles
+            ]
 
-            if not removed_base_ranks:
+            if not removed_base_ranks and not added_base_ranks:
                 return
 
             # For each removed base rank, strip all its tier roles from the member
@@ -613,8 +619,8 @@ class IntroCog(commands.Cog):
                     except Exception as e:
                         logger.error(f"Failed to remove tier roles for {after.name}: {e}")
 
-            # Now sync tier for their next highest remaining base role
-            # Re-fetch the member to get updated roles after our removal
+            # Sync tier for their current highest base role
+            # Handles both added base roles and cleanup after removal
             try:
                 member = after.guild.get_member(after.id) or await after.guild.fetch_member(after.id)
             except Exception:
@@ -713,6 +719,24 @@ class IntroCog(commands.Cog):
 
         if user_base_rank == 0:
             return
+
+        # Clean up tier roles from all OTHER base ranks (e.g. user switched base roles)
+        for rank in base_map:
+            if rank == user_base_rank:
+                continue
+            cursor = await db.execute("SELECT role_id FROM role_config WHERE base_rank = ?", (rank,))
+            other_tier_rows = await cursor.fetchall()
+            other_roles_to_remove = [
+                member.guild.get_role(row[0])
+                for row in other_tier_rows
+                if member.guild.get_role(row[0]) and member.guild.get_role(row[0]) in member.roles
+            ]
+            if other_roles_to_remove:
+                try:
+                    await member.remove_roles(*other_roles_to_remove)
+                    logger.info(f"Cleaned up tier role(s) from base rank {rank} for {member.name}")
+                except Exception as e:
+                    logger.error(f"Failed to clean up tier roles from rank {rank} for {member.name}: {e}")
 
         cursor = await db.execute("SELECT tier, role_id FROM role_config WHERE base_rank = ?", (user_base_rank,))
         tier_role_map = dict(await cursor.fetchall())
@@ -866,6 +890,25 @@ class IntroCog(commands.Cog):
                             if role:
                                 stale_roles.append(role)
 
+                # Also detect tier roles for a non-highest base rank
+                # (e.g. user gained a higher base role but kept old tier role)
+                if not stale_roles:
+                    # Find member's highest base rank
+                    member_highest_rank = 0
+                    for rank in sorted(base_map.keys(), reverse=True):
+                        if base_map[rank] in member_role_ids:
+                            member_highest_rank = rank
+                            break
+
+                    needs_sync = False
+                    if member_highest_rank > 0:
+                        for rank, tier_ids in tier_roles_by_base.items():
+                            if rank != member_highest_rank and (member_role_ids & tier_ids):
+                                needs_sync = True
+                                break
+                else:
+                    needs_sync = True
+
                 if stale_roles:
                     try:
                         await member.remove_roles(*stale_roles)
@@ -876,7 +919,7 @@ class IntroCog(commands.Cog):
                     except Exception as e:
                         logger.error(f"Audit: failed to remove stale roles from {member.name}: {e}")
 
-                    # Sync to correct tier for their actual highest base role
+                if needs_sync:
                     async with aiosqlite.connect(self.db_path) as db:
                         try:
                             refreshed = guild.get_member(member.id) or await guild.fetch_member(member.id)

@@ -57,3 +57,7 @@ vc/
 
 # Test database copies
 tests/**/test_custommatch.db*
+
+# Claude Code transient settings temp files
+.claude/settings.local.json.tmp.*
+.claude/settings.local.json

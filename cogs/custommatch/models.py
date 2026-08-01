@@ -36,11 +36,23 @@ class Team(Enum):
 # effectively immobile. These values put a match at ~80 points, or roughly one
 # tier per 44 games at a 60% winrate.
 #
-# Placement/learning are only ~2x/1.5x stable rather than the old 4x/2x: players
-# are seeded onto the ladder from their real rank role, so placement only has to
-# correct a misseed of a band or two, not walk someone up from scratch.
-K_FACTOR_PLACEMENT = 320  # Games 1-10 (~160 per even game)
-K_FACTOR_LEARNING = 240   # Games 11-20 (~120 per even game)
+# The schedule is flat. Elo buys climb speed with rating noise, and the cost is
+# steep in team games: the corrective signal for one mis-rated player is diluted
+# across the whole roster. Simulated over 40 games at 6v6, a player of *fixed*
+# true skill drifts a median 336 points at K=160 and 699 at K=320 — against tier
+# widths of 400-1100, the latter is most of a tier of pure noise.
+#
+# An elevated placement K existed to walk new players up from a 1000 default.
+# Players are now seeded onto the ladder from their real rank role, so placement
+# only has to correct a misseed; K=160 still moves +/-80 a game, closing a
+# full band inside the 10 placement games. Paying 699 points of noise to
+# converge faster than that is a bad trade.
+#
+# Consequence to keep in mind: the returning-player and inactivity boosts in
+# get_k_factor now resolve to the same K as everyone else, so they are no-ops.
+# At +/-80 a game a returning player re-converges quickly regardless.
+K_FACTOR_PLACEMENT = 160  # Games 1-10 (~80 per even game)
+K_FACTOR_LEARNING = 160   # Games 11-20 (~80 per even game)
 K_FACTOR_STABLE = 160     # Games 21+ (~80 per even game)
 
 

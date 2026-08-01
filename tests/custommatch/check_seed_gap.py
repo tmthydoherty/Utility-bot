@@ -98,16 +98,23 @@ async def main():
     th = sorted((await DB.get_mmr_roles(GAME_ID)).values())
     lbl = {800: "Bronze", 1200: "Silver", 1800: "Gold", 2500: "Plat",
            3200: "Diamond", 4000: "Master", 4900: "GM", 6000: "Champion"}
-    placement_reach = int(K_FACTOR_PLACEMENT * 0.5) * 10
-    print(f"   placement covers {placement_reach} pts over 10 games\n")
+    # The K schedule is flat, so what matters is not "does placement cover it"
+    # but "how many net wins does a correctly-skilled player need to climb back".
+    per_game = K_FACTOR_STABLE * 0.5
+    MAX_GAMES = 25
+    print(f"   a match moves +/-{per_game:.0f}; a new role should recover in "
+          f"under {MAX_GAMES} net wins\n")
     for m in th:
         s = ow_seed_mmr_for_new_role(m, th)
         gap = m - s
-        ok = gap <= placement_reach
+        games = gap / per_game
+        ok = games <= MAX_GAMES
         print(f"   {lbl[m]:>9} {m:>5} -> {s:>5} ({lbl.get(s,'?'):<8}) "
-              f"gap {gap:>4}  {'recovers in placements' if ok else 'FAIL: too deep'}")
+              f"gap {gap:>4}  {games:>5.0f} net wins  "
+              f"{'ok' if ok else 'FAIL: too deep'}")
         if not ok:
-            fails.append(f"new-role gap {gap} from {m} exceeds placement reach")
+            fails.append(f"new-role gap {gap} from {m} needs {games:.0f} net wins "
+                         f"to recover (max {MAX_GAMES})")
 
     print("\n" + "=" * 70)
     print("4. CLIMB RATES (K-factors read from models.py)")

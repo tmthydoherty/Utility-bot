@@ -11,7 +11,7 @@ from urllib.parse import quote
 
 from .models import normalize_rivals_role
 
-logger = logging.getLogger('custommatch')
+logger = logging.getLogger('cogs.custommatch')
 
 try:
     import google.generativeai as genai

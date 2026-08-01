@@ -42,6 +42,9 @@ WELCOME_COLORS = [
     discord.Color.from_rgb(99, 205, 218),   # Aquamarine
 ]
 
+# Goodbye embed color for kicks made by the inactivity cog
+INACTIVITY_KICK_COLOR = discord.Color.from_rgb(199, 218, 232)  # Pale, desaturated blue
+
 
 # --- Config I/O ---
 def _load_config_sync(file_path: str) -> Dict[str, Any]:
@@ -344,7 +347,9 @@ class Alerts(commands.Cog):
             pass  # No audit log permission
 
         if action_type == "kicked":
-            color = discord.Color.orange()
+            # Inactivity kicks get their own light blue so they stand out
+            # from regular moderator kicks (orange).
+            color = INACTIVITY_KICK_COLOR if is_inactivity_kick else discord.Color.orange()
             footer = f"Kicked by {moderator}"
             if reason:
                 footer += f" — {reason}"

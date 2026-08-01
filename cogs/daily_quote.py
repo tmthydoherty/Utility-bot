@@ -12,6 +12,12 @@ import json
 import logging
 from pathlib import Path
 
+try:
+    from utils.economy_award import award_points
+except ImportError:  # Economy bridge absent — the quote game carries on regardless.
+    def award_points(*args, **kwargs):
+        pass
+
 # =====================================================================================
 # UTILS & CONSTANTS
 # =====================================================================================
@@ -26,7 +32,7 @@ DISTRACTORS_DB_PATH = os.path.join(_cog_dir, '..', 'distractors.db')
 EMBED_COLOR_QUOTE = 0xE67E22  # Orange, distinct from trivia's teal
 POST_TIME = time(19, 0)  # 7 PM CT
 QUOTE_TIMEZONE = ZoneInfo("America/Chicago")
-DEFAULT_LOW_QUOTE_ALERT_DAYS = 30
+DEFAULT_LOW_QUOTE_ALERT_THRESHOLD = 10
 
 def load_config_quote():
     if os.path.exists(CONFIG_FILE_QUOTE):
@@ -212,12 +218,12 @@ class QuotePreviewConfirmDenyView(discord.ui.View):
 
 
 class AlertSettingsModal(discord.ui.Modal, title="Low Quote Alert Settings"):
-    days = discord.ui.TextInput(
-        label="Alert when quotes remaining ≤ X days",
-        placeholder=f"{DEFAULT_LOW_QUOTE_ALERT_DAYS}",
+    threshold = discord.ui.TextInput(
+        label="Alert when quotes remaining ≤ X",
+        placeholder=f"{DEFAULT_LOW_QUOTE_ALERT_THRESHOLD}",
         required=True,
         max_length=4,
-        default=str(DEFAULT_LOW_QUOTE_ALERT_DAYS)
+        default=str(DEFAULT_LOW_QUOTE_ALERT_THRESHOLD)
     )
 
     def __init__(self, cog: "DailyQuote"):
@@ -226,7 +232,7 @@ class AlertSettingsModal(discord.ui.Modal, title="Low Quote Alert Settings"):
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
-            value = int(self.days.value.strip())
+            value = int(self.threshold.value.strip())
             if value < 1 or value > 999:
                 raise ValueError
         except ValueError:
@@ -234,10 +240,10 @@ class AlertSettingsModal(discord.ui.Modal, title="Low Quote Alert Settings"):
 
         async with self.cog.config_lock:
             cfg = self.cog.get_guild_settings(interaction.guild.id)
-            cfg["low_quote_alert_days"] = value
+            cfg["low_quote_alert_threshold"] = value
             self.cog.config_is_dirty = True
 
-        await interaction.response.send_message(f"Low quote alert set to **{value} days**.", ephemeral=True)
+        await interaction.response.send_message(f"Low quote alert set to **{value} quotes**.", ephemeral=True)
 
 
 class ResetAttemptSelectView(discord.ui.View):
@@ -605,7 +611,7 @@ class QuoteAdminPanelView(discord.ui.View):
         used_count = len(global_data.get("used_quote_ids", []))
         remaining = db_total - used_count
         today_attempts = len(global_data.get("daily_interactions", []))
-        alert_days = cfg.get("low_quote_alert_days", DEFAULT_LOW_QUOTE_ALERT_DAYS)
+        alert_threshold = cfg.get("low_quote_alert_threshold", DEFAULT_LOW_QUOTE_ALERT_THRESHOLD)
 
         embed = discord.Embed(title="🎬 Daily Quote Info", color=EMBED_COLOR_QUOTE)
         embed.add_field(
@@ -615,7 +621,7 @@ class QuoteAdminPanelView(discord.ui.View):
                 f"**Enabled:** {cfg.get('enabled', False)}\n"
                 f"**Screening:** {'DM (enabled)' if cfg.get('screening_enabled', True) else 'Disabled'}\n"
                 f"**Last Posted:** {cfg.get('last_posted_date', 'Never')}\n"
-                f"**Low Quote Alert:** {alert_days} days"
+                f"**Low Quote Alert:** {alert_threshold} quotes"
             ),
             inline=False
         )
@@ -638,7 +644,7 @@ class QuoteAdminPanelView(discord.ui.View):
                 f"**Total Quotes:** {db_total:,}\n"
                 f"**Movies/Shows:** {db_titles:,}\n"
                 f"**Used:** {used_count:,}\n"
-                f"**Remaining:** {remaining:,} (~{remaining} days)\n"
+                f"**Remaining:** {remaining:,}\n"
                 f"**Distractors Pool:** {dist_info}"
             ),
             inline=False
@@ -649,7 +655,7 @@ class QuoteAdminPanelView(discord.ui.View):
             inline=False
         )
 
-        if remaining <= alert_days:
+        if remaining <= alert_threshold:
             embed.add_field(
                 name="⚠️ Low Quotes Warning",
                 value=f"Only **{remaining}** quotes remaining! Consider adding more to the database.",
@@ -743,7 +749,7 @@ class DailyQuote(commands.Cog, name="DailyQuote"):
             "enabled": False,
             "gateway_message_id": None,
             "last_posted_date": None,
-            "low_quote_alert_days": DEFAULT_LOW_QUOTE_ALERT_DAYS,
+            "low_quote_alert_threshold": DEFAULT_LOW_QUOTE_ALERT_THRESHOLD,
             "last_low_quote_alert_date": None,
             "screening_enabled": True,
         }
@@ -1422,6 +1428,9 @@ class DailyQuote(commands.Cog, name="DailyQuote"):
                 except (ValueError, KeyError):
                     return await interaction.response.send_message("Question data is corrupted. Please contact an admin.", ephemeral=True)
 
+            # Economy: playing today's quote earns Points (once per day).
+            award_points(self.bot, interaction.user.id, "daily_quote")
+
             # Check primary correct index and any alt correct indices
             alt_correct = q_data.get("alt_correct_indices", [])
             is_correct = (answer_index == correct_index) or (answer_index in alt_correct)
@@ -1676,38 +1685,40 @@ class DailyQuote(commands.Cog, name="DailyQuote"):
 
     async def _check_low_quote_alert(self, guild: discord.Guild):
         cfg = self.get_guild_settings(guild.id)
-        alert_days = cfg.get("low_quote_alert_days", DEFAULT_LOW_QUOTE_ALERT_DAYS)
+        alert_threshold = cfg.get("low_quote_alert_threshold", DEFAULT_LOW_QUOTE_ALERT_THRESHOLD)
         today = datetime.now(QUOTE_TIMEZONE).date().isoformat()
 
         if cfg.get("last_low_quote_alert_date") == today:
             return
 
         remaining = await self._get_remaining_quotes()
-        if remaining > alert_days:
-            return
-
-        channel_id = cfg.get("channel_id")
-        if not channel_id:
+        if remaining > alert_threshold:
             return
 
         try:
-            channel = await self.bot.fetch_channel(channel_id)
+            app_info = await self.bot.application_info()
+            owner = app_info.owner
+            dm = await owner.create_dm()
+        except Exception as e:
+            log_quote.error(f"Cannot DM bot owner for low quote alert: {e}")
+            return
+
+        try:
             embed = discord.Embed(
                 title="⚠️ Low Quotes Alert",
                 description=(
-                    f"Only **{remaining}** quotes remaining in the database!\n"
-                    f"At 1 per day, quotes will run out in **{remaining} days**.\n\n"
+                    f"Only **{remaining}** quotes remaining in the database!\n\n"
                     f"Consider adding more quotes to `quotes.db`."
                 ),
                 color=0xFF6B6B
             )
-            await channel.send(embed=embed)
+            await dm.send(embed=embed)
 
             async with self.config_lock:
                 cfg["last_low_quote_alert_date"] = today
                 self.config_is_dirty = True
 
-            log_quote.warning(f"Low quote alert sent for guild {guild.id}: {remaining} quotes remaining")
+            log_quote.warning(f"Low quote alert sent to DM for guild {guild.id}: {remaining} quotes remaining")
         except discord.HTTPException as e:
             log_quote.error(f"Failed to send low quote alert: {e}")
 

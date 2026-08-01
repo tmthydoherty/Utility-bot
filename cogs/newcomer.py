@@ -2,15 +2,20 @@ import discord
 from discord import app_commands, ui
 from discord.ext import commands, tasks
 import aiosqlite
+import asyncio
 import logging
 import io
 import textwrap
 import datetime
+from dataclasses import dataclass
 from PIL import Image, ImageDraw, ImageFont
 import os
 
 # --- CONFIGURATION ---
 DB_NAME = "intro_system.db"
+# How long an intro discussion thread lives before the bot deletes it (with its
+# Lore Drop banner). The Q&A post in the intro channel is kept as the record.
+INTRO_THREAD_LIFETIME_DAYS = 7
 # Font paths - Noto Sans for broad Unicode coverage
 FONT_PATH_BOLD = "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf"
 FONT_PATH_REG = "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf"
@@ -34,6 +39,67 @@ ACCENT_COLORS = [
 
 logger = logging.getLogger('bot_main')
 
+# Longest display name printed in a list row. Anything past this is clipped so
+# every entry stays on a single line on mobile, where the viewport is narrow.
+MAX_NAME_LEN = 23
+
+
+def shorten_name(name):
+    """Clip a display name to one line's worth of characters."""
+    name = " ".join((name or "").split())
+    return name if len(name) <= MAX_NAME_LEN else name[:MAX_NAME_LEN].rstrip() + "..."
+
+
+def fmt_points(points):
+    """Points as a compact string: 3 not 3.0, 0.5 kept as 0.5."""
+    text = f"{points:.1f}" if isinstance(points, float) else str(points)
+    return text[:-2] if text.endswith(".0") else text
+
+
+@dataclass
+class TierAuditRow:
+    """One member's place in the tier audit."""
+    member: discord.Member
+    earned: int        # points actually earned (these decay)
+    vip_base: int      # permanent floor from a VIP role (never decays)
+    points: int        # earned + vip_base
+    current: int       # tier role they hold right now
+    target: int        # tier their points entitle them to
+
+
+@dataclass
+class TierAuditReport:
+    tracked: int
+    changes: list
+    applied: int = 0
+    failed: int = 0
+
+    # Lines to list in a dry-run summary before it gets too long for a message
+    MAX_LISTED = 20
+
+    def summary(self):
+        promos = [r for r in self.changes if r.target > r.current]
+        demos = [r for r in self.changes if r.target < r.current]
+        lines = [
+            "**Tier audit — dry run**",
+            f"Tracked members: **{self.tracked}**",
+            f"Promotions: **{len(promos)}** · Demotions: **{len(demos)}**",
+            "",
+        ]
+        for row in (demos + promos)[:self.MAX_LISTED]:
+            pts = f"{row.points} pts"
+            if row.vip_base:
+                pts += f" ({row.earned} earned + {row.vip_base} VIP)"
+            lines.append(
+                f"• {row.member.mention} — Tier {row.current} → Tier {row.target} · {pts}"
+            )
+        remaining = len(self.changes) - self.MAX_LISTED
+        if remaining > 0:
+            lines.append(f"…and **{remaining}** more.")
+        lines.append("\nApply these changes?")
+        return "\n".join(lines)
+
+
 class IntroCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -45,6 +111,11 @@ class IntroCog(commands.Cog):
         self._settings_missing = object()
         self.bot.loop.create_task(self.init_db())
         self.decay_task.start()
+        self.thread_cleanup_task.start()
+
+    def cog_unload(self):
+        self.decay_task.cancel()
+        self.thread_cleanup_task.cancel()
 
     async def _get_setting(self, db, key):
         """Cached read of a settings row. Returns the string value or None."""
@@ -81,16 +152,22 @@ class IntroCog(commands.Cog):
             except Exception:
                 pass
 
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS role_config (
-                    base_rank INTEGER,
-                    tier INTEGER,
-                    role_id INTEGER,
-                    PRIMARY KEY (base_rank, tier)
-                )
-            ''')
-            await db.execute('CREATE TABLE IF NOT EXISTS base_roles (base_rank INTEGER PRIMARY KEY, role_id INTEGER)')
             await db.execute('CREATE TABLE IF NOT EXISTS point_config (tier INTEGER PRIMARY KEY, points_required INTEGER)')
+
+            # One-time migration from the old 5-base-role x 3-tier system:
+            # the old Tier 1/2 thresholds become the new global Tier 2/3 thresholds
+            # (the old 3rd upgrade is removed). Reward roles now live in the
+            # Alerts & Colors cog config (alerts_colors_config.json).
+            cursor = await db.execute("SELECT value FROM settings WHERE key='tier_rework_v2'")
+            if not await cursor.fetchone():
+                cursor = await db.execute("SELECT tier, points_required FROM point_config")
+                old = dict(await cursor.fetchall())
+                if 1 in old:
+                    await db.execute("INSERT OR REPLACE INTO point_config (tier, points_required) VALUES (2, ?)", (old[1],))
+                    if 2 in old:
+                        await db.execute("INSERT OR REPLACE INTO point_config (tier, points_required) VALUES (3, ?)", (old[2],))
+                    await db.execute("DELETE FROM point_config WHERE tier = 1")
+                await db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('tier_rework_v2', '1')")
             await db.execute('CREATE TABLE IF NOT EXISTS user_points (user_id INTEGER PRIMARY KEY, points INTEGER DEFAULT 0)')
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS thread_logs (
@@ -141,6 +218,12 @@ class IntroCog(commands.Cog):
                 pass
             try:
                 await db.execute("ALTER TABLE intro_metadata ADD COLUMN intro_channel_id INTEGER")
+            except Exception:
+                pass
+            # Marks a row whose thread has been auto-deleted. The row itself stays
+            # so the one-intro-per-user check still holds after cleanup.
+            try:
+                await db.execute("ALTER TABLE intro_metadata ADD COLUMN cleaned_up INTEGER DEFAULT 0")
             except Exception:
                 pass
 
@@ -569,65 +652,6 @@ class IntroCog(commands.Cog):
                 await self.check_role_upgrade(message.author, db)
 
     @commands.Cog.listener()
-    async def on_member_update(self, before, after):
-        """Detect when a base role is added or removed and sync tier roles accordingly."""
-        if before.roles == after.roles:
-            return
-
-        removed_roles = set(r.id for r in before.roles) - set(r.id for r in after.roles)
-        added_roles = set(r.id for r in after.roles) - set(r.id for r in before.roles)
-
-        if not removed_roles and not added_roles:
-            return
-
-        async with aiosqlite.connect(self.db_path) as db:
-            # Load all configured base roles
-            cursor = await db.execute("SELECT base_rank, role_id FROM base_roles")
-            base_map = dict(await cursor.fetchall())
-
-            # Check if any changed role is a base role
-            removed_base_ranks = [
-                rank for rank, role_id in base_map.items()
-                if role_id in removed_roles
-            ]
-            added_base_ranks = [
-                rank for rank, role_id in base_map.items()
-                if role_id in added_roles
-            ]
-
-            if not removed_base_ranks and not added_base_ranks:
-                return
-
-            # For each removed base rank, strip all its tier roles from the member
-            for rank in removed_base_ranks:
-                cursor = await db.execute(
-                    "SELECT tier, role_id FROM role_config WHERE base_rank = ?", (rank,)
-                )
-                tier_roles = await cursor.fetchall()
-                roles_to_remove = []
-                for _, tier_role_id in tier_roles:
-                    role = after.guild.get_role(tier_role_id)
-                    if role and role in after.roles:
-                        roles_to_remove.append(role)
-
-                if roles_to_remove:
-                    try:
-                        await after.remove_roles(*roles_to_remove)
-                        logger.info(
-                            f"Removed tier role(s) from {after.name} after base rank {rank} was lost"
-                        )
-                    except Exception as e:
-                        logger.error(f"Failed to remove tier roles for {after.name}: {e}")
-
-            # Sync tier for their current highest base role
-            # Handles both added base roles and cleanup after removal
-            try:
-                member = after.guild.get_member(after.id) or await after.guild.fetch_member(after.id)
-            except Exception:
-                member = after
-            await self.sync_tier_role(member, db)
-
-    @commands.Cog.listener()
     async def on_member_remove(self, member):
         """Clean up all intro data when a user leaves the server"""
         async with aiosqlite.connect(self.db_path) as db:
@@ -686,84 +710,167 @@ class IntroCog(commands.Cog):
 
             logger.info(f"Cleaned up intro data for departed member {member.name} ({member.id})")
 
-    async def sync_tier_role(self, member, db):
-        """Set the correct tier role based on current points. Handles upgrades and downgrades."""
-        cursor = await db.execute("SELECT points FROM user_points WHERE user_id = ?", (member.id,))
-        row = await cursor.fetchone()
-        points = row[0] if row else 0
+    @staticmethod
+    def _target_tier(points, t2_req, t3_req):
+        """Map a point total to a reward tier (1 = baseline, no reward role)."""
+        target = 1
+        if t2_req is not None and points >= t2_req:
+            target = 2
+        if t3_req is not None and points >= t3_req:
+            target = 3
+        return target
 
+    def _alerts_cog(self):
+        """The Alerts & Colors cog, which owns every gate/color role mutation."""
+        return self.bot.get_cog("AlertsAndColors")
+
+    async def _thresholds(self, db):
+        """(t2_req, t3_req) from point_config; either may be None."""
         thresholds = {}
         cursor = await db.execute("SELECT tier, points_required FROM point_config")
         async for row in cursor:
             thresholds[row[0]] = row[1]
+        return thresholds.get(2), thresholds.get(3)
 
-        if not thresholds:
+    @staticmethod
+    def vip_base_points(alerts_cog, member, t2_req, t3_req):
+        """Permanent point floor a member's VIP role grants them.
+
+        A Tier 2 VIP role is always worth exactly the current Tier 2 threshold
+        and a Tier 3 VIP role the Tier 3 threshold, so the floor follows the
+        thresholds if an admin changes them. It's virtual: never written to
+        user_points/point_ledger, so it can't decay. Earned points stack on
+        top, which is how a Tier 2 VIP climbs to Tier 3.
+        """
+        if not alerts_cog:
+            return 0
+        vip_tier = alerts_cog.get_vip_tier(member)
+        req = t3_req if vip_tier == 3 else t2_req if vip_tier == 2 else None
+        return req or 0
+
+    async def effective_points(self, member, db, t2_req=None, t3_req=None):
+        """(earned, vip_base, effective) for a member."""
+        if t2_req is None and t3_req is None:
+            t2_req, t3_req = await self._thresholds(db)
+        cursor = await db.execute("SELECT points FROM user_points WHERE user_id = ?", (member.id,))
+        row = await cursor.fetchone()
+        earned = row[0] if row else 0
+        vip_base = self.vip_base_points(self._alerts_cog(), member, t2_req, t3_req)
+        return earned, vip_base, earned + vip_base
+
+    async def sync_tier_role(self, member, db):
+        """Compute the member's reward tier from their effective points (earned
+        + any VIP floor) and hand enforcement to the Alerts & Colors cog.
+
+        That cog owns ALL gate/color role mutations (single serialized,
+        idempotent code path): it grants the new gate before removing the old,
+        DMs on promotion only, and on demotion silently restores the color the
+        member last chose at the tier they land on.
+        """
+        alerts_cog = self._alerts_cog()
+        if not alerts_cog:
             return
 
-        target_tier = 0
-        if points >= thresholds.get(3, 9999): target_tier = 3
-        elif points >= thresholds.get(2, 9999): target_tier = 2
-        elif points >= thresholds.get(1, 9999): target_tier = 1
-
-        base_map = {}
-        cursor = await db.execute("SELECT base_rank, role_id FROM base_roles")
-        async for row in cursor:
-            base_map[row[0]] = row[1]
-
-        user_base_rank = 0
-        for rank in range(5, 0, -1):
-            r_id = base_map.get(rank)
-            if r_id and member.get_role(r_id):
-                user_base_rank = rank
-                break
-
-        if user_base_rank == 0:
+        t2_req, t3_req = await self._thresholds(db)
+        if t2_req is None and t3_req is None:
             return
 
-        # Clean up tier roles from all OTHER base ranks (e.g. user switched base roles)
-        for rank in base_map:
-            if rank == user_base_rank:
-                continue
-            cursor = await db.execute("SELECT role_id FROM role_config WHERE base_rank = ?", (rank,))
-            other_tier_rows = await cursor.fetchall()
-            other_roles_to_remove = [
-                member.guild.get_role(row[0])
-                for row in other_tier_rows
-                if member.guild.get_role(row[0]) and member.guild.get_role(row[0]) in member.roles
-            ]
-            if other_roles_to_remove:
-                try:
-                    await member.remove_roles(*other_roles_to_remove)
-                    logger.info(f"Cleaned up tier role(s) from base rank {rank} for {member.name}")
-                except Exception as e:
-                    logger.error(f"Failed to clean up tier roles from rank {rank} for {member.name}: {e}")
-
-        cursor = await db.execute("SELECT tier, role_id FROM role_config WHERE base_rank = ?", (user_base_rank,))
-        tier_role_map = dict(await cursor.fetchall())
-
-        target_role_id = tier_role_map.get(target_tier)
-        target_role = member.guild.get_role(target_role_id) if target_role_id else None
+        _, _, points = await self.effective_points(member, db, t2_req, t3_req)
 
         try:
-            # Remove any tier roles the member has that aren't the target
-            roles_to_remove = [
-                member.guild.get_role(rid)
-                for t, rid in tier_role_map.items()
-                if member.guild.get_role(rid) and member.guild.get_role(rid) in member.roles
-                and member.guild.get_role(rid) != target_role
-            ]
-            if roles_to_remove:
-                await member.remove_roles(*roles_to_remove)
-                logger.info(f"Removed stale tier role(s) from {member.name}")
-
-            if target_role and target_role not in member.roles:
-                await member.add_roles(target_role)
-                logger.info(f"Set {member.name} to Tier {target_tier}")
+            await alerts_cog.set_member_tier(member, self._target_tier(points, t2_req, t3_req))
         except Exception as e:
-            logger.error(f"Failed to sync tier role for {member.name}: {e}")
+            logger.error(f"Failed to sync tier for {member.name}: {e}", exc_info=True)
+
+    async def resync_member(self, member):
+        """Recompute one member's tier now. Called by the Alerts & Colors cog
+        when a VIP role is added or removed."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await self.sync_tier_role(member, db)
+
+    async def resync_member_id(self, guild, user_id):
+        """resync_member by id; no-op if they aren't in the guild."""
+        member = guild.get_member(user_id) if guild else None
+        if member and not member.bot:
+            await self.resync_member(member)
 
     async def check_role_upgrade(self, member, db):
         await self.sync_tier_role(member, db)
+
+    # Grant lines to print before collapsing the rest into a "…and N more".
+    MAX_GRANT_LINES = 25
+
+    async def build_user_point_view(self, guild, user):
+        """One member's point breakdown: totals, tier standing, and every live
+        grant with the date it decays."""
+        member = guild.get_member(user.id)
+        today = datetime.date.today()
+
+        async with aiosqlite.connect(self.db_path) as db:
+            t2_req, t3_req = await self._thresholds(db)
+            if member:
+                earned, vip_base, effective = await self.effective_points(member, db, t2_req, t3_req)
+            else:
+                cursor = await db.execute("SELECT points FROM user_points WHERE user_id = ?", (user.id,))
+                row = await cursor.fetchone()
+                earned = row[0] if row else 0
+                vip_base, effective = 0, earned
+            cursor = await db.execute(
+                "SELECT expires_at, SUM(points) FROM point_ledger "
+                "WHERE user_id = ? AND decayed = 0 GROUP BY expires_at ORDER BY expires_at",
+                (user.id,),
+            )
+            grants = await cursor.fetchall()
+
+        name = member.display_name if member else user.display_name
+        lines = [f"**Point Breakdown — {name}**"]
+
+        totals = f"Earned **{fmt_points(earned)}**"
+        if vip_base:
+            totals += f" · VIP floor **+{fmt_points(vip_base)}** · Effective **{fmt_points(effective)}**"
+        lines.append(totals)
+
+        tier = self._target_tier(effective, t2_req, t3_req)
+        if t3_req is not None and effective < t3_req and (t2_req is None or effective >= t2_req):
+            lines.append(f"Tier **{tier}** — **{fmt_points(t3_req - effective)}** more for Tier 3.")
+        elif t2_req is not None and effective < t2_req:
+            lines.append(f"Tier **{tier}** — **{fmt_points(t2_req - effective)}** more for Tier 2.")
+        else:
+            lines.append(f"Tier **{tier}** — top tier reached.")
+
+        active_total = sum(g[1] for g in grants)
+        lines.append(f"\n**Active grants ({fmt_points(active_total)} pts)**")
+
+        if not grants:
+            lines.append("No active points — nothing on the clock.")
+
+        for expires_at, points in grants[:self.MAX_GRANT_LINES]:
+            try:
+                exp = datetime.date.fromisoformat(expires_at)
+            except (TypeError, ValueError):
+                lines.append(f"`{fmt_points(points)} pts` — expiry unknown")
+                continue
+            days = (exp - today).days
+            when = "expires today" if days <= 0 else f"in {days}d"
+            lines.append(f"`{fmt_points(points)} pts` — {exp.strftime('%b %d')} · {when}")
+
+        remaining = len(grants) - self.MAX_GRANT_LINES
+        if remaining > 0:
+            lines.append(f"…and **{remaining}** more grant date(s).")
+
+        # Admin point removals don't touch the ledger, so the two can drift.
+        # Say so rather than leaving the mismatch looking like a bug.
+        if active_total != earned:
+            lines.append(
+                f"\n*Note: earned total (**{fmt_points(earned)}**) differs from the ledger "
+                f"(**{fmt_points(active_total)}**) — usually a manual admin adjustment.*"
+            )
+
+        # VIP floor is virtual: it never lands in the ledger and never decays.
+        if vip_base:
+            lines.append(f"*The **+{fmt_points(vip_base)}** VIP floor never decays — it lasts as long as the role.*")
+
+        return "\n".join(lines)
 
     async def repost_sticky_button(self, channel, db=None):
         """Delete old button message and repost at bottom"""
@@ -837,7 +944,7 @@ class IntroCog(commands.Cog):
                             async with aiosqlite.connect(self.db_path) as db:
                                 await self.sync_tier_role(member, db)
 
-            # Audit: find members with tier roles for base ranks they no longer hold
+            # Audit: nobody keeps a tier role without the points for it
             try:
                 await self._audit_stale_tier_roles()
             except Exception as e:
@@ -845,90 +952,171 @@ class IntroCog(commands.Cog):
         except Exception as e:
             await self.bot.error_reporter.report("Newcomer", f"decay_task: {e}")
 
-    async def _audit_stale_tier_roles(self):
-        """Check all members for tier roles whose base role they don't have. Fix any found."""
+    async def _collect_tier_rows(self, guild, t2_req, t3_req, points_map):
+        """Every member the tier system tracks, with their computed target tier.
+
+        Tracked = has a points row, holds a Tier 2/3 gate role, or holds a VIP
+        role. Gate holders are included precisely so a member who no longer has
+        the points (or never did) gets the role taken back; VIP holders are
+        included so their permanent floor still lands even with no points row.
+        """
+        alerts_cog = self._alerts_cog()
+        rows, seen = [], set()
+
+        def add(member):
+            if member.bot or member.id in seen:
+                return
+            seen.add(member.id)
+            earned = points_map.get(member.id, 0)
+            vip_base = self.vip_base_points(alerts_cog, member, t2_req, t3_req)
+            points = earned + vip_base
+            rows.append(TierAuditRow(
+                member=member,
+                earned=earned,
+                vip_base=vip_base,
+                points=points,
+                current=alerts_cog.get_member_tier(member),
+                target=self._target_tier(points, t2_req, t3_req),
+            ))
+
+        for user_id in points_map:
+            member = guild.get_member(user_id)
+            if member:
+                add(member)
+
+        for tier in (2, 3):
+            role_id = alerts_cog.get_gate(guild.id, f"t{tier}")
+            role = guild.get_role(role_id) if role_id else None
+            if role:
+                for member in list(role.members):
+                    add(member)
+
+        for member in list(alerts_cog.iter_vip_members(guild)):
+            add(member)
+
+        return rows
+
+    async def run_tier_audit(self, guild, dry_run=False):
+        """Reconcile every tracked member's tier role in one guild.
+
+        Returns a TierAuditReport, or None if the cog/thresholds aren't set up.
+        With dry_run the report lists what would change and nothing is touched.
+        """
+        alerts_cog = self._alerts_cog()
+        if not alerts_cog:
+            return None
+
         async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute("SELECT base_rank, role_id FROM base_roles")
-            base_map = dict(await cursor.fetchall())
-            if not base_map:
-                return
+            t2_req, t3_req = await self._thresholds(db)
+            if t2_req is None and t3_req is None:
+                return None
+            cursor = await db.execute("SELECT user_id, points FROM user_points")
+            points_map = dict(await cursor.fetchall())
 
-            # Build {base_rank: {tier_role_id, ...}} and a flat set of all tier role IDs
-            tier_roles_by_base = {}
-            all_tier_role_ids = set()
-            for rank in base_map:
-                cursor = await db.execute(
-                    "SELECT role_id FROM role_config WHERE base_rank = ?", (rank,)
-                )
-                ids = {row[0] for row in await cursor.fetchall()}
-                tier_roles_by_base[rank] = ids
-                all_tier_role_ids |= ids
+        rows = await self._collect_tier_rows(guild, t2_req, t3_req, points_map)
+        changes = [r for r in rows if r.current != r.target]
+        report = TierAuditReport(tracked=len(rows), changes=changes)
+        if dry_run:
+            return report
 
-            if not all_tier_role_ids:
-                return
+        # Enforce for every tracked member, not just the changes: set_member_tier
+        # is idempotent and also repairs color drift for members already correct.
+        for row in rows:
+            try:
+                if await alerts_cog.set_member_tier(row.member, row.target):
+                    if row.current != row.target:
+                        report.applied += 1
+                    await asyncio.sleep(0.3)
+                elif row.current != row.target:
+                    report.failed += 1
+            except Exception as e:
+                logger.error(f"Audit: tier sync failed for {row.member.name}: {e}")
+                if row.current != row.target:
+                    report.failed += 1
+        return report
 
+    async def _audit_stale_tier_roles(self):
+        """Hourly self-heal: recompute every tracked member's reward tier from
+        their effective points (earned + VIP floor) and enforce it via the
+        Alerts & Colors cog — adds missed promotions, strips tier roles whose
+        points have expired, restores the right colors."""
         for guild in self.bot.guilds:
-            logger.info(f"Audit: scanning {len(guild.members)} members in {guild.name}")
-            for member in guild.members:
-                if member.bot:
-                    continue
-                member_role_ids = {r.id for r in member.roles}
-
-                # Quick skip: member has no tier roles at all
-                if not member_role_ids & all_tier_role_ids:
-                    continue
-
-                stale_roles = []
-                for rank, base_role_id in base_map.items():
-                    has_base = base_role_id in member_role_ids
-                    if has_base:
-                        continue
-                    # They don't have this base role - any tier roles for it are stale
-                    for tier_role_id in tier_roles_by_base.get(rank, set()):
-                        if tier_role_id in member_role_ids:
-                            role = guild.get_role(tier_role_id)
-                            if role:
-                                stale_roles.append(role)
-
-                # Also detect tier roles for a non-highest base rank
-                # (e.g. user gained a higher base role but kept old tier role)
-                if not stale_roles:
-                    # Find member's highest base rank
-                    member_highest_rank = 0
-                    for rank in sorted(base_map.keys(), reverse=True):
-                        if base_map[rank] in member_role_ids:
-                            member_highest_rank = rank
-                            break
-
-                    needs_sync = False
-                    if member_highest_rank > 0:
-                        for rank, tier_ids in tier_roles_by_base.items():
-                            if rank != member_highest_rank and (member_role_ids & tier_ids):
-                                needs_sync = True
-                                break
-                else:
-                    needs_sync = True
-
-                if stale_roles:
-                    try:
-                        await member.remove_roles(*stale_roles)
-                        logger.info(
-                            f"Audit: removed stale tier role(s) from {member.name} "
-                            f"({', '.join(r.name for r in stale_roles)})"
-                        )
-                    except Exception as e:
-                        logger.error(f"Audit: failed to remove stale roles from {member.name}: {e}")
-
-                if needs_sync:
-                    async with aiosqlite.connect(self.db_path) as db:
-                        try:
-                            refreshed = guild.get_member(member.id) or await guild.fetch_member(member.id)
-                        except Exception:
-                            refreshed = member
-                        await self.sync_tier_role(refreshed, db)
+            report = await self.run_tier_audit(guild, dry_run=False)
+            if report and report.changes:
+                logger.info(
+                    f"Tier audit ({guild.name}): {report.applied}/{len(report.changes)} "
+                    f"member(s) corrected out of {report.tracked} tracked."
+                )
 
     @decay_task.before_loop
     async def before_decay_task(self):
+        await self.bot.wait_until_ready()
+
+    async def _delete_intro_thread(self, thread_id, lore_msg_id, parent_channel_id):
+        """Delete one intro thread and its Lore Drop banner.
+
+        Deleting the banner also takes the thread with it (a thread dies with the
+        message it was started from), so the thread delete below is a fallback for
+        rows with no banner recorded. Anything already gone is treated as done.
+        """
+        if parent_channel_id and lore_msg_id:
+            try:
+                parent_ch = self.bot.get_channel(parent_channel_id) or await self.bot.fetch_channel(parent_channel_id)
+                msg = await parent_ch.fetch_message(lore_msg_id)
+                await msg.delete()
+            except discord.NotFound:
+                pass
+            except Exception as e:
+                logger.warning(f"Cleanup: could not delete lore message {lore_msg_id}: {e}")
+
+        try:
+            thread = self.bot.get_channel(thread_id) or await self.bot.fetch_channel(thread_id)
+            await thread.delete()
+        except discord.NotFound:
+            pass
+        except Exception as e:
+            logger.warning(f"Cleanup: could not delete intro thread {thread_id}: {e}")
+
+    @tasks.loop(hours=1)
+    async def thread_cleanup_task(self):
+        """Runs hourly. Deletes intro threads older than INTRO_THREAD_LIFETIME_DAYS.
+
+        The first run after startup also clears any backlog left from before this
+        existed. The Q&A image in the intro channel is deliberately left alone.
+        """
+        try:
+            cutoff = discord.utils.utcnow() - datetime.timedelta(days=INTRO_THREAD_LIFETIME_DAYS)
+
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute(
+                    "SELECT thread_id, lore_msg_id, parent_channel_id FROM intro_metadata WHERE cleaned_up = 0"
+                )
+                rows = await cursor.fetchall()
+
+            # A thread's id is the id of the Lore Drop message it was created from,
+            # so the snowflake gives us its creation time — no stored timestamp
+            # needed, and it works for rows written before this task existed.
+            expired = [r for r in rows if discord.utils.snowflake_time(r[0]) <= cutoff]
+            if not expired:
+                return
+
+            for thread_id, lore_msg_id, parent_channel_id in expired:
+                await self._delete_intro_thread(thread_id, lore_msg_id, parent_channel_id)
+                async with aiosqlite.connect(self.db_path) as db:
+                    await db.execute("UPDATE intro_metadata SET cleaned_up = 1 WHERE thread_id = ?", (thread_id,))
+                    # Per-thread point caps are meaningless once the thread is gone.
+                    await db.execute("DELETE FROM thread_logs WHERE thread_id = ?", (thread_id,))
+                    await db.commit()
+                await asyncio.sleep(1)
+
+            logger.info(
+                f"Intro cleanup: deleted {len(expired)} thread(s) older than {INTRO_THREAD_LIFETIME_DAYS} days."
+            )
+        except Exception as e:
+            await self.bot.error_reporter.report("Newcomer", f"thread_cleanup_task: {e}")
+
+    @thread_cleanup_task.before_loop
+    async def before_thread_cleanup_task(self):
         await self.bot.wait_until_ready()
 
 # --- UI CLASSES ---
@@ -1038,7 +1226,8 @@ class DynamicIntroModal(ui.Modal):
                     "Thanks for the Lore Drop, {username}!\n\n"
                     "We’ve pinned your intro here so the welcome wagon can say hello without it getting lost in the main chat scroll.\n\n"
                     "**This space is totally optional.** Feel free to chat here, or if you prefer to just jump into the main channels, "
-                    "you can delete this thread instantly using the **Close Thread** button below."
+                    "you can delete this thread instantly using the **Close Thread** button below.\n\n"
+                    f"*This thread is automatically deleted after {INTRO_THREAD_LIFETIME_DAYS} days — your intro post stays up.*"
                 )
                 
                 w_msg = w_res[0] if w_res else w_default
@@ -1264,23 +1453,35 @@ class AdminPanelView(ui.View):
     async def newcomer_role_btn(self, interaction, button):
         await interaction.response.send_message("Select Newcomer Role to Track:", view=NewcomerRoleSelectView(self.cog), ephemeral=True)
 
-    @ui.button(label="Role Config", style=discord.ButtonStyle.secondary, row=1)
+    @ui.button(label="Tier / VIP Roles", style=discord.ButtonStyle.secondary, row=1)
     async def roles_btn(self, interaction, button):
-        await interaction.response.send_message("Configure Roles:", view=RoleConfigMainView(self.cog), ephemeral=True)
+        alerts_cog = self.cog._alerts_cog()
+        if not alerts_cog:
+            return await interaction.response.send_message(
+                "The Alerts & Colors cog is not loaded.", ephemeral=True
+            )
+        await interaction.response.send_message(
+            "Shared with the Alerts & Colors panel. **Tier 2/3 roles** are awarded by points; "
+            "**VIP roles** are a permanent point floor worth their tier's threshold, which "
+            "earned points stack on top of. Selecting nothing in a VIP menu clears it.",
+            view=alerts_cog.make_gate_view(),
+            ephemeral=True,
+        )
 
     @ui.button(label="Points/Tiers", style=discord.ButtonStyle.secondary, row=1)
     async def points_btn(self, interaction, button):
         async with aiosqlite.connect(self.cog.db_path) as db:
             cursor = await db.execute("SELECT tier, points_required FROM point_config")
             rows = await cursor.fetchall()
-            pts = {1: 0, 2: 0, 3: 0}
+            pts = {2: 0, 3: 0}
             for t, p in rows:
-                pts[t] = p
+                if t in pts:
+                    pts[t] = p
             cursor = await db.execute("SELECT value FROM settings WHERE key = 'reply_points'")
             res = await cursor.fetchone()
             reply_pts = res[0] if res else "0.5"
-            
-        await interaction.response.send_modal(PointThresholdModal(self.cog, pts[1], pts[2], pts[3], reply_pts))
+
+        await interaction.response.send_modal(PointThresholdModal(self.cog, pts[2], pts[3], reply_pts))
 
     @ui.button(label="Hourly Cap", style=discord.ButtonStyle.secondary, row=1)
     async def hourly_cap_btn(self, interaction, button):
@@ -1290,11 +1491,19 @@ class AdminPanelView(ui.View):
     async def bl_btn(self, interaction, button):
         await interaction.response.send_message("Select User to Block:", view=UserSelectView(self.cog, "blacklist"), ephemeral=True)
 
-    @ui.button(label="Leaderboard", style=discord.ButtonStyle.secondary, row=2)
+    @ui.button(label="Point List", style=discord.ButtonStyle.secondary, row=2)
     async def history_btn(self, interaction, button):
-        view = LeaderboardPaginatedView(self.cog, interaction.guild)
+        view = PointListView(self.cog, interaction.guild)
         await view.load_data("30days")
         await interaction.response.send_message(content=await view.build_page(), view=view, ephemeral=True)
+
+    @ui.button(label="User Point View", style=discord.ButtonStyle.secondary, row=3)
+    async def user_points_btn(self, interaction, button):
+        await interaction.response.send_message(
+            "Select a member to see their active points and when each grant expires:",
+            view=UserPointSelectView(self.cog),
+            ephemeral=True,
+        )
 
     @ui.button(label="Welcome Message", style=discord.ButtonStyle.success, row=2)
     async def msg_btn(self, interaction, button):
@@ -1408,46 +1617,6 @@ class ShiftConfirmView(ui.View):
             await db.commit()
         await interaction.response.send_message("Deleted and updated.", ephemeral=True)
 
-class RoleConfigMainView(ui.View):
-    def __init__(self, cog):
-        super().__init__()
-        self.cog = cog
-
-    @ui.select(cls=ui.RoleSelect, placeholder="Select BASE Role 1 (Lowest)", min_values=1, max_values=1)
-    async def base1(self, interaction, select): await self.set_base(interaction, 1, select.values[0])
-    @ui.select(cls=ui.RoleSelect, placeholder="Select BASE Role 2", min_values=1, max_values=1)
-    async def base2(self, interaction, select): await self.set_base(interaction, 2, select.values[0])
-    @ui.select(cls=ui.RoleSelect, placeholder="Select BASE Role 3", min_values=1, max_values=1)
-    async def base3(self, interaction, select): await self.set_base(interaction, 3, select.values[0])
-    @ui.select(cls=ui.RoleSelect, placeholder="Select BASE Role 4", min_values=1, max_values=1)
-    async def base4(self, interaction, select): await self.set_base(interaction, 4, select.values[0])
-    @ui.select(cls=ui.RoleSelect, placeholder="Select BASE Role 5 (Highest)", min_values=1, max_values=1)
-    async def base5(self, interaction, select): await self.set_base(interaction, 5, select.values[0])
-
-    async def set_base(self, interaction, rank, role):
-        async with aiosqlite.connect(self.cog.db_path) as db:
-            await db.execute("INSERT OR REPLACE INTO base_roles (base_rank, role_id) VALUES (?, ?)", (rank, role.id))
-            await db.commit()
-        await interaction.response.send_message(f"Base {rank} set to {role.name}. Now select Tiers:", view=TierConfigView(self.cog, rank), ephemeral=True)
-
-class TierConfigView(ui.View):
-    def __init__(self, cog, base_rank):
-        super().__init__()
-        self.cog = cog
-        self.base_rank = base_rank
-    @ui.select(cls=ui.RoleSelect, placeholder="Tier 1 Reward Role", min_values=1, max_values=1)
-    async def t1(self, interaction, select): await self.set_tier(interaction, 1, select.values[0])
-    @ui.select(cls=ui.RoleSelect, placeholder="Tier 2 Reward Role", min_values=1, max_values=1)
-    async def t2(self, interaction, select): await self.set_tier(interaction, 2, select.values[0])
-    @ui.select(cls=ui.RoleSelect, placeholder="Tier 3 Reward Role (Max)", min_values=1, max_values=1)
-    async def t3(self, interaction, select): await self.set_tier(interaction, 3, select.values[0])
-
-    async def set_tier(self, interaction, tier, role):
-        async with aiosqlite.connect(self.cog.db_path) as db:
-            await db.execute("INSERT OR REPLACE INTO role_config (base_rank, tier, role_id) VALUES (?, ?, ?)", (self.base_rank, tier, role.id))
-            await db.commit()
-        await interaction.response.send_message(f"Base {self.base_rank} Tier {tier} set to {role.name}", ephemeral=True)
-
 class NewcomerRoleSelectView(ui.View):
     def __init__(self, cog):
         super().__init__()
@@ -1463,26 +1632,24 @@ class NewcomerRoleSelectView(ui.View):
         await interaction.response.send_message(f"Newcomer role set to {role.name}", ephemeral=True)
 
 class PointThresholdModal(ui.Modal, title="Points Required per Tier"):
-    t1 = ui.TextInput(label="Tier 1 Points", max_length=4)
     t2 = ui.TextInput(label="Tier 2 Points", max_length=4)
     t3 = ui.TextInput(label="Tier 3 Points", max_length=4)
     reply_pts = ui.TextInput(label="Points per Reply", max_length=6)
 
-    def __init__(self, cog, p1, p2, p3, p_reply):
+    def __init__(self, cog, p2, p3, p_reply):
         super().__init__()
         self.cog = cog
-        self.t1.default = str(p1)
         self.t2.default = str(p2)
         self.t3.default = str(p3)
         self.reply_pts.default = str(p_reply)
 
     async def on_submit(self, interaction):
         try:
-            p1, p2, p3 = int(self.t1.value), int(self.t2.value), int(self.t3.value)
+            p2, p3 = int(self.t2.value), int(self.t3.value)
             p_reply = float(self.reply_pts.value)
         except Exception: return await interaction.response.send_message("Must be valid numbers.", ephemeral=True)
         async with aiosqlite.connect(self.cog.db_path) as db:
-            for t, p in [(1, p1), (2, p2), (3, p3)]:
+            for t, p in [(2, p2), (3, p3)]:
                 await db.execute("INSERT OR REPLACE INTO point_config (tier, points_required) VALUES (?, ?)", (t, p))
             await db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('reply_points', ?)", (str(p_reply),))
             await db.commit()
@@ -1589,15 +1756,26 @@ class WipeMemberSelectView(ui.View):
     @ui.select(cls=ui.UserSelect, placeholder="Select Member")
     async def select_member(self, interaction: discord.Interaction, select: ui.UserSelect):
         user = select.values[0]
-        # Get current points
-        async with aiosqlite.connect(self.cog.db_path) as db:
-            cursor = await db.execute("SELECT points FROM user_points WHERE user_id = ?", (user.id,))
-            row = await cursor.fetchone()
-            current_points = row[0] if row else 0
+        member = interaction.guild.get_member(user.id)
 
+        async with aiosqlite.connect(self.cog.db_path) as db:
+            if member:
+                earned, vip_base, effective = await self.cog.effective_points(member, db)
+            else:
+                cursor = await db.execute(
+                    "SELECT points FROM user_points WHERE user_id = ?", (user.id,)
+                )
+                row = await cursor.fetchone()
+                earned, vip_base, effective = (row[0] if row else 0), 0, (row[0] if row else 0)
+
+        # The buttons below only ever touch earned points — the VIP floor is
+        # virtual and comes and goes with the role.
+        line = f"**{user.display_name}** - Current Points: **{earned}**"
+        if vip_base:
+            line += f"\nVIP floor: **+{vip_base}** → effective total **{effective}**"
         await interaction.response.edit_message(
-            content=f"**{user.display_name}** - Current Points: **{current_points}**\nChoose an action:",
-            view=WipeMemberActionView(self.cog, user, current_points)
+            content=f"{line}\nChoose an action:",
+            view=WipeMemberActionView(self.cog, user, earned)
         )
 
 class WipeMemberActionView(ui.View):
@@ -1627,6 +1805,7 @@ class WipeMemberActionView(ui.View):
             await db.execute("DELETE FROM point_ledger WHERE user_id = ?", (self.user.id,))
             await db.execute("DELETE FROM thread_logs WHERE user_id = ?", (self.user.id,))
             await db.commit()
+        await self.cog.resync_member_id(interaction.guild, self.user.id)
         await interaction.response.edit_message(
             content=f"Wiped all points, decay ledger, and thread logs for **{self.user.display_name}**.",
             view=None
@@ -1684,10 +1863,18 @@ class PointAmountModal(ui.Modal, title="Enter Amount"):
                 msg = f"Set **{self.user.display_name}**'s points to **{pts}** (expire in 30 days)."
             await db.commit()
 
+        # Apply the new total to their tier role right away
+        await self.cog.resync_member_id(interaction.guild, self.user.id)
         await interaction.response.send_message(msg, ephemeral=True)
 
-class LeaderboardPaginatedView(ui.View):
-    """Paginated view for showing points leaderboard"""
+class PointListView(ui.View):
+    """Paginated point list.
+
+    Three of the modes rank earned points over a time window. The fourth,
+    "upgrade", ranks by *effective* points (earned + VIP floor) and draws the
+    tier thresholds in as separator rows, so it's readable why a VIP sits where
+    they do.
+    """
     ITEMS_PER_PAGE = 20
 
     def __init__(self, cog, guild, current_mode="30days"):
@@ -1696,12 +1883,22 @@ class LeaderboardPaginatedView(ui.View):
         self.guild = guild
         self.current_mode = current_mode
         self.data = []
+        # Upgrade mode only: entry index -> threshold lines to print before it.
+        self.markers = {}
         self.page = 0
         self.max_page = 0
 
     async def load_data(self, mode):
         self.current_mode = mode
         self.page = 0
+        self.markers = {}
+
+        if mode == "upgrade":
+            await self._load_upgrade_data()
+            self.max_page = max(0, (len(self.data) - 1) // self.ITEMS_PER_PAGE)
+            self.update_buttons()
+            return
+
         async with aiosqlite.connect(self.cog.db_path) as db:
             if mode == "30days":
                 cursor = await db.execute("SELECT user_id, points FROM user_points WHERE points > 0 ORDER BY points DESC")
@@ -1723,14 +1920,68 @@ class LeaderboardPaginatedView(ui.View):
         self.max_page = max(0, (len(self.data) - 1) // self.ITEMS_PER_PAGE)
         self.update_buttons()
 
+    async def _load_upgrade_data(self):
+        """Rank current members by effective points and place the tier lines.
+
+        Members who left aren't included — their roles aren't ours to reason
+        about any more. VIPs with no earned points still appear, since their
+        floor alone can put them over a threshold.
+        """
+        alerts_cog = self.cog._alerts_cog()
+
+        async with aiosqlite.connect(self.cog.db_path) as db:
+            t2_req, t3_req = await self.cog._thresholds(db)
+            cursor = await db.execute("SELECT user_id, points FROM user_points WHERE points > 0")
+            points_map = dict(await cursor.fetchall())
+
+        rows, seen = [], set()
+
+        def add(member):
+            if member.bot or member.id in seen:
+                return
+            seen.add(member.id)
+            earned = points_map.get(member.id, 0)
+            vip_base = self.cog.vip_base_points(alerts_cog, member, t2_req, t3_req)
+            if earned <= 0 and vip_base <= 0:
+                return
+            rows.append((member, earned, vip_base, earned + vip_base))
+
+        for user_id in points_map:
+            member = self.guild.get_member(user_id)
+            if member:
+                add(member)
+
+        if alerts_cog:
+            for member in list(alerts_cog.iter_vip_members(self.guild)):
+                add(member)
+
+        rows.sort(key=lambda r: r[3], reverse=True)
+        self.data = rows
+
+        # A threshold line sits directly after the last member who clears it, so
+        # its index is just how many members do. Tier 3 is registered first so it
+        # prints above Tier 2 when both land in the same spot.
+        for tier, req in ((3, t3_req), (2, t2_req)):
+            if req is None:
+                continue
+            idx = sum(1 for r in rows if r[3] >= req)
+            self.markers.setdefault(idx, []).append(f"**---Tier {tier} ({fmt_points(req)}pts)---**")
+
     def update_buttons(self):
         self.prev_btn.disabled = self.page == 0
         self.next_btn.disabled = self.page >= self.max_page
-        self.mode_30_btn.style = discord.ButtonStyle.primary if self.current_mode == "30days" else discord.ButtonStyle.secondary
-        self.mode_60_btn.style = discord.ButtonStyle.primary if self.current_mode == "60days" else discord.ButtonStyle.secondary
-        self.mode_all_btn.style = discord.ButtonStyle.primary if self.current_mode == "alltime" else discord.ButtonStyle.secondary
+        for btn, mode in (
+            (self.mode_30_btn, "30days"),
+            (self.mode_60_btn, "60days"),
+            (self.mode_all_btn, "alltime"),
+            (self.mode_upgrade_btn, "upgrade"),
+        ):
+            btn.style = discord.ButtonStyle.primary if self.current_mode == mode else discord.ButtonStyle.secondary
 
     async def build_page(self):
+        if self.current_mode == "upgrade":
+            return self._build_upgrade_page()
+
         start = self.page * self.ITEMS_PER_PAGE
         end = start + self.ITEMS_PER_PAGE
         page_data = self.data[start:end]
@@ -1740,19 +1991,41 @@ class LeaderboardPaginatedView(ui.View):
             "60days": "31-60 Days Ago",
             "alltime": "All-Time"
         }
-        title = mode_titles.get(self.current_mode, "Leaderboard")
+        title = mode_titles.get(self.current_mode, "Point List")
 
-        lines = [f"**{title} - Points Leaderboard**\n"]
+        lines = [f"**{title} - Point List**\n"]
 
         if not page_data:
             lines.append("No data available.")
 
         for i, (user_id, points) in enumerate(page_data, start=start + 1):
             member = self.guild.get_member(user_id)
-            name = member.display_name if member else f"User {user_id}"
-            pt_str = f"{points:.1f}" if isinstance(points, float) else str(points)
-            if pt_str.endswith(".0"): pt_str = pt_str[:-2]
-            lines.append(f"`{i}.` **{name}** - {pt_str} pts")
+            name = shorten_name(member.display_name) if member else f"User {user_id}"
+            lines.append(f"`{i}.` **{name}** - {fmt_points(points)} pts")
+
+        lines.append(f"\nPage {self.page + 1}/{self.max_page + 1}")
+        return "\n".join(lines)
+
+    def _build_upgrade_page(self):
+        start = self.page * self.ITEMS_PER_PAGE
+        end = min(start + self.ITEMS_PER_PAGE, len(self.data))
+
+        lines = ["**Upgrade Points List**\n"]
+        if not self.data:
+            lines.append("No data available.")
+
+        for i in range(start, end):
+            lines.extend(self.markers.get(i, []))
+            member, earned, vip_base, _ = self.data[i]
+            line = f"`{i + 1}.` **{shorten_name(member.display_name)}** - {fmt_points(earned)} pts"
+            if vip_base:
+                line += f" (+{fmt_points(vip_base)})"
+            lines.append(line)
+
+        # A threshold everyone on the list clears is marked at index len(data),
+        # i.e. below the final entry.
+        if end >= len(self.data):
+            lines.extend(self.markers.get(len(self.data), []))
 
         lines.append(f"\nPage {self.page + 1}/{self.max_page + 1}")
         return "\n".join(lines)
@@ -1783,6 +2056,22 @@ class LeaderboardPaginatedView(ui.View):
     async def mode_all_btn(self, interaction: discord.Interaction, button: ui.Button):
         await self.load_data("alltime")
         await interaction.response.edit_message(content=await self.build_page(), view=self)
+
+    @ui.button(label="Upgrade List", style=discord.ButtonStyle.secondary, row=1)
+    async def mode_upgrade_btn(self, interaction: discord.Interaction, button: ui.Button):
+        await self.load_data("upgrade")
+        await interaction.response.edit_message(content=await self.build_page(), view=self)
+
+class UserPointSelectView(ui.View):
+    """Pick a member to see every active point grant they hold and its expiry."""
+    def __init__(self, cog):
+        super().__init__(timeout=120)
+        self.cog = cog
+
+    @ui.select(cls=ui.UserSelect, placeholder="Select Member")
+    async def select_member(self, interaction: discord.Interaction, select: ui.UserSelect):
+        content = await self.cog.build_user_point_view(interaction.guild, select.values[0])
+        await interaction.response.edit_message(content=content, view=self)
 
 async def setup(bot):
     await bot.add_cog(IntroCog(bot))

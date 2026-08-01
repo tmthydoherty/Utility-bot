@@ -13,19 +13,20 @@ from .models import (
     Team, Suspension,
     COLOR_WHITE, COLOR_SUCCESS, COLOR_WARNING, COLOR_RED, COLOR_BLUE, COLOR_NEUTRAL,
     RIVALS_ROLES, is_valorant_game, is_rivals_game,
+    is_overwatch_game, OW_ROLES, OW_ROLE_GLYPH,
     safe_display_name, sanitize_for_codeblock, generate_short_id,
     normalize_ign, normalize_rivals_role, _parse_tracker_url,
 )
 from .database import DatabaseHelper
 from .views_settings import (
     BaseMatchView, ConfirmView, GameSelectDropdown, PenaltySettingsView,
-    _resolve_role_emojis,
+    _resolve_role_emojis, seed_mmr_for_rank,
 )
 
 if TYPE_CHECKING:
     from .cog import CustomMatch
 
-logger = logging.getLogger('custommatch')
+logger = logging.getLogger('cogs.custommatch')
 
 
 # =============================================================================
@@ -396,6 +397,18 @@ class AdminPanelView(BaseMatchView):
             return
         view = MMRViewUserSelectView(self.cog, games)
         await interaction.response.send_message("Select a user and game to view their overview:", view=view, ephemeral=True)
+
+    @discord.ui.button(label="Set Platform", style=discord.ButtonStyle.secondary, row=3)
+    async def set_platform_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        games = [g for g in await DatabaseHelper.get_all_games() if g.pc_enabled]
+        if not games:
+            await interaction.response.send_message(
+                "No PC-enabled games. Enable PC players in Game Settings > Toggles first.",
+                ephemeral=True
+            )
+            return
+        view = SetPlatformUserSelectView(self.cog, games)
+        await interaction.response.send_message("Select a user and game to set platform:", view=view, ephemeral=True)
 
     # Row 3: Setup and utilities
     @discord.ui.button(label="IGN", style=discord.ButtonStyle.secondary, row=3)
@@ -1371,13 +1384,6 @@ class FixMatchView(discord.ui.View):
             await self.cog.finalize_match(interaction.guild, match_id, Team(winning_team))
             result_msg += "\n\nMMR has been recalculated with the corrected roster."
 
-            # Update leaderboard
-            if self.game and self.game.leaderboard_channel_id:
-                try:
-                    await self.cog._update_persistent_leaderboard(interaction.guild, self.game)
-                except Exception as e:
-                    logger.warning(f"FixMatch: Failed to update leaderboard: {e}")
-
         await interaction.followup.send(result_msg, ephemeral=True)
 
         # Log the action
@@ -2082,6 +2088,85 @@ class SetMMRUserSelectView(discord.ui.View):
         )
 
 
+async def apply_platform_change(interaction, cog, game_id, user_id, new_platform):
+    """Update a player's platform tag (admin-only label).
+
+    The PC bump is a *one-time seed prior* applied at setup, not a permanent
+    offset, so changing the tag later does NOT re-seed MMR -- a player's rank
+    role drifts up with their bumped MMR, so the pre-bump rank can't be reliably
+    recovered here. To re-seed with the correct bump, re-run "Setup New User"
+    (it re-picks the rank and re-applies the seed cleanly)."""
+    game = await DatabaseHelper.get_game(game_id)
+    stats = await DatabaseHelper.get_player_stats(user_id, game_id)
+    old_platform = stats.platform
+    stats.platform = new_platform
+    await DatabaseHelper.update_player_stats(stats)
+
+    member = interaction.guild.get_member(user_id)
+    name = member.display_name if member else str(user_id)
+
+    msg = f"Set **{name}**'s platform for {game.name}: {old_platform.upper()} → {new_platform.upper()}.\nMMR unchanged ({stats.mmr})."
+    if stats.games_played == 0:
+        msg += "\nTo re-seed their MMR with the new platform's bump, re-run **Setup New User**."
+    await interaction.response.edit_message(content=msg, view=None)
+    await cog.log_action(
+        interaction.guild,
+        f"Platform change: **{name}** ({game.name}) {old_platform.upper()} → {new_platform.upper()} by {interaction.user.display_name}",
+        prefix="❕"
+    )
+
+
+class SetPlatformChoiceView(discord.ui.View):
+    """Console/PC buttons for editing an existing player's platform."""
+
+    def __init__(self, cog: 'CustomMatch', game_id: int, user_id: int):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.game_id = game_id
+        self.user_id = user_id
+
+    @discord.ui.button(label="Console", style=discord.ButtonStyle.primary)
+    async def console_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await apply_platform_change(interaction, self.cog, self.game_id, self.user_id, 'console')
+
+    @discord.ui.button(label="PC", style=discord.ButtonStyle.success)
+    async def pc_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await apply_platform_change(interaction, self.cog, self.game_id, self.user_id, 'pc')
+
+
+class SetPlatformUserSelectView(discord.ui.View):
+    """Select a user then a (PC-enabled) game to edit their platform."""
+
+    def __init__(self, cog: 'CustomMatch', games: List[GameConfig]):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.games = games
+        self.selected_user = None
+
+    @discord.ui.select(cls=discord.ui.UserSelect, placeholder="Select a user...")
+    async def user_select(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
+        self.selected_user = select.values[0]
+
+        async def show_platform_choice(inter: discord.Interaction, game_id: int):
+            stats = await DatabaseHelper.get_player_stats(self.selected_user.id, game_id)
+            view = SetPlatformChoiceView(self.cog, game_id, self.selected_user.id)
+            await inter.response.edit_message(
+                content=(
+                    f"Platform for **{self.selected_user.display_name}** "
+                    f"(currently **{stats.platform.upper()}**, {stats.games_played} games played).\n"
+                    f"Choose their platform:"
+                ),
+                view=view
+            )
+
+        view = discord.ui.View(timeout=60)
+        view.add_item(GameSelectDropdown(self.games, show_platform_choice))
+        await interaction.response.edit_message(
+            content=f"Setting platform for **{self.selected_user.display_name}**\nSelect a game:",
+            view=view
+        )
+
+
 class SetMMRModal(discord.ui.Modal, title="Set Player MMR"):
     mmr_value = discord.ui.TextInput(
         label="MMR Value",
@@ -2106,6 +2191,10 @@ class SetMMRModal(discord.ui.Modal, title="Set Player MMR"):
             member = interaction.guild.get_member(self.user_id)
             name = member.display_name if member else str(self.user_id)
             game = await DatabaseHelper.get_game(self.game_id)
+            # Overwatch balances off per-role MMR, not this column.
+            await DatabaseHelper.sync_ow_role_seed(
+                self.user_id, self.game_id, stats.effective_mmr, game
+            )
 
             await interaction.response.send_message(
                 f"Set **{name}**'s MMR for {game.name} to {mmr}.",
@@ -2189,6 +2278,8 @@ class MMRViewUserSelectView(discord.ui.View):
                     f"**Games Played:** {stats.games_played}\n"
                     f"**W/L:** {stats.wins}/{stats.losses}"
                 )
+                if getattr(game, 'pc_enabled', False):
+                    stats_value += f"\n**Platform:** {stats.platform.upper()}"
                 if tracker_url:
                     stats_value += f"\n[View on Tracker.gg]({tracker_url})"
                 embed.add_field(
@@ -2253,6 +2344,46 @@ class MMRViewUserSelectView(discord.ui.View):
         )
 
 
+async def _setup_advance_to_rank(interaction, cog, game_id, user_id, display_name, platform):
+    """Advance new-user setup to the rank step (or the manual-MMR fallback),
+    carrying the chosen platform through so the PC seed bump can be applied."""
+    mmr_roles = await DatabaseHelper.get_mmr_roles_with_labels(game_id)
+    if mmr_roles:
+        view = SetupUserRankSelectView(cog, game_id, user_id, mmr_roles, platform)
+        await interaction.response.edit_message(
+            content=f"Select rank for **{display_name}**:",
+            view=view
+        )
+    else:
+        # No labeled ranks configured: fall back to manual MMR entry.
+        modal = SetupUserModal(cog, game_id, user_id, platform)
+        await interaction.response.send_modal(modal)
+
+
+class SetupUserPlatformSelectView(discord.ui.View):
+    """New-user setup platform step (Console/PC), shown before rank when a game
+    has PC players enabled."""
+
+    def __init__(self, cog: 'CustomMatch', game_id: int, user_id: int):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.game_id = game_id
+        self.user_id = user_id
+
+    async def _choose(self, interaction: discord.Interaction, platform: str):
+        member = interaction.guild.get_member(self.user_id)
+        name = member.display_name if member else str(self.user_id)
+        await _setup_advance_to_rank(interaction, self.cog, self.game_id, self.user_id, name, platform)
+
+    @discord.ui.button(label="Console", style=discord.ButtonStyle.primary)
+    async def console_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._choose(interaction, 'console')
+
+    @discord.ui.button(label="PC", style=discord.ButtonStyle.success)
+    async def pc_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._choose(interaction, 'pc')
+
+
 class SetupUserGameSelectView(discord.ui.View):
     """Step 1: Select game for new user setup."""
 
@@ -2286,28 +2417,29 @@ class SetupUserSelectView(discord.ui.View):
     @discord.ui.select(cls=discord.ui.UserSelect, placeholder="Select a user...")
     async def user_select(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
         user = select.values[0]
-        mmr_roles = await DatabaseHelper.get_mmr_roles_with_labels(self.game_id)
-        if mmr_roles:
-            view = SetupUserRankSelectView(self.cog, self.game_id, user.id, mmr_roles)
+        game = await DatabaseHelper.get_game(self.game_id)
+        if game and game.pc_enabled:
+            # Crossplay game: ask Console/PC before rank.
+            view = SetupUserPlatformSelectView(self.cog, self.game_id, user.id)
             await interaction.response.edit_message(
-                content=f"Step 3: Select rank for **{user.display_name}**:",
+                content=f"Step 3: Is **{user.display_name}** on Console or PC?",
                 view=view
             )
-        else:
-            # Fallback: no labeled ranks configured, use manual MMR modal
-            modal = SetupUserModal(self.cog, self.game_id, user.id)
-            await interaction.response.send_modal(modal)
+            return
+        # Console-only game: go straight to rank (platform stays 'console').
+        await _setup_advance_to_rank(interaction, self.cog, self.game_id, user.id, user.display_name, 'console')
 
 
 class SetupUserRankSelectView(discord.ui.View):
     """Step 3: Select rank label to assign to the new user."""
 
-    def __init__(self, cog: 'CustomMatch', game_id: int, user_id: int, mmr_roles: Dict[int, dict]):
+    def __init__(self, cog: 'CustomMatch', game_id: int, user_id: int, mmr_roles: Dict[int, dict], platform: str = 'console'):
         super().__init__(timeout=120)
         self.cog = cog
         self.game_id = game_id
         self.user_id = user_id
         self.mmr_roles = mmr_roles  # {role_id: {'mmr': int, 'label': str|None}}
+        self.platform = platform
 
         options = []
         for role_id, data in sorted(mmr_roles.items(), key=lambda x: x[1]['mmr']):
@@ -2325,15 +2457,27 @@ class SetupUserRankSelectView(discord.ui.View):
     async def on_select(self, interaction: discord.Interaction):
         role_id = int(interaction.data["values"][0])
         data = self.mmr_roles[role_id]
-        mmr_val = data['mmr']
-        label_used = data['label'] or f"{mmr_val} MMR"
-
-        # Set MMR
-        stats = await DatabaseHelper.get_player_stats(self.user_id, self.game_id)
-        stats.mmr = mmr_val
-        await DatabaseHelper.update_player_stats(stats)
+        rank_mmr = data['mmr']
+        label_used = data['label'] or f"{rank_mmr} MMR"
 
         game = await DatabaseHelper.get_game(self.game_id)
+
+        # Apply the one-time PC seed bump for PC players in crossplay games.
+        mmr_val = await seed_mmr_for_rank(rank_mmr, game, self.platform)
+        pc_bump = mmr_val - rank_mmr
+
+        # Set MMR + platform
+        stats = await DatabaseHelper.get_player_stats(self.user_id, self.game_id)
+        stats.mmr = mmr_val
+        stats.platform = self.platform
+        await DatabaseHelper.update_player_stats(stats)
+
+        # Overwatch balances off per-role MMR, not this column. Seeded from the
+        # post-PC-bump value so a crossplay PC player keeps their offset.
+        await DatabaseHelper.sync_ow_role_seed(
+            self.user_id, self.game_id, stats.effective_mmr, game
+        )
+
         member = interaction.guild.get_member(self.user_id)
 
         # Give the selected rank role
@@ -2354,14 +2498,20 @@ class SetupUserRankSelectView(discord.ui.View):
         name = member.display_name if member else str(self.user_id)
         lines = [f"Setup complete for **{name}** ({game.name}):"]
         lines.append(f"- Rank: {label_used}")
-        lines.append(f"- MMR: {mmr_val}")
+        if game.pc_enabled:
+            lines.append(f"- Platform: {self.platform.upper()}")
+        if pc_bump > 0:
+            lines.append(f"- MMR: {mmr_val} ({rank_mmr} + {pc_bump} PC seed bump)")
+        else:
+            lines.append(f"- MMR: {mmr_val}")
         if game.verified_role_id:
             lines.append(f"- Verified role assigned")
 
         await interaction.response.edit_message(content="\n".join(lines), view=None)
+        log_platform = f" [{self.platform.upper()}]" if game.pc_enabled else ""
         await self.cog.log_action(
             interaction.guild,
-            f"New user setup: **{name}** registered for **{game.name}** with rank **{label_used}** ({mmr_val} MMR) by {interaction.user.display_name}",
+            f"New user setup: **{name}**{log_platform} registered for **{game.name}** with rank **{label_used}** ({mmr_val} MMR) by {interaction.user.display_name}",
             prefix="\u2755"
         )
 
@@ -2375,23 +2525,31 @@ class SetupUserModal(discord.ui.Modal, title="Setup New User"):
         required=True
     )
 
-    def __init__(self, cog: 'CustomMatch', game_id: int, user_id: int):
+    def __init__(self, cog: 'CustomMatch', game_id: int, user_id: int, platform: str = 'console'):
         super().__init__()
         self.cog = cog
         self.game_id = game_id
         self.user_id = user_id
+        self.platform = platform
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
+            # Manual MMR entry (no rank ladder configured): the entered value is
+            # authoritative, so no PC bump is applied here -- only the platform tag.
             mmr_val = int(self.mmr.value)
 
-            # Set MMR
+            # Set MMR + platform
             stats = await DatabaseHelper.get_player_stats(self.user_id, self.game_id)
             stats.mmr = mmr_val
+            stats.platform = self.platform
             await DatabaseHelper.update_player_stats(stats)
 
             # Give verified role if configured
             game = await DatabaseHelper.get_game(self.game_id)
+            # Overwatch balances off per-role MMR, not this column.
+            await DatabaseHelper.sync_ow_role_seed(
+                self.user_id, self.game_id, stats.effective_mmr, game
+            )
             member = interaction.guild.get_member(self.user_id)
 
             if game.verified_role_id and member:
@@ -2404,6 +2562,8 @@ class SetupUserModal(discord.ui.Modal, title="Setup New User"):
 
             name = member.display_name if member else str(self.user_id)
             lines = [f"Setup complete for **{name}** ({game.name}):"]
+            if game.pc_enabled:
+                lines.append(f"- Platform: {self.platform.upper()}")
             lines.append(f"- MMR: {mmr_val}")
             if game.verified_role_id:
                 lines.append(f"- Verified role assigned")
@@ -2625,6 +2785,24 @@ class SubstituteInPlayerView(discord.ui.View):
                 )
                 return
 
+            # Overwatch: a cross-team swap only preserves strict 2-2-2 when both
+            # players play the same role (a Tank↔Tank swap keeps each team 2-2-2,
+            # but a Tank↔DPS swap breaks both). Block mismatched-role swaps.
+            if is_overwatch_game(game):
+                out_role = out_player_data.get("role")
+                in_role = in_player_data.get("role")
+                if out_role != in_role:
+                    await interaction.edit_original_response(
+                        content=(
+                            f"⚠️ Can't swap — <@{self.out_id}> plays "
+                            f"**{out_role or 'unknown'}** and <@{in_id}> plays "
+                            f"**{in_role or 'unknown'}**. In Overwatch you can only swap two "
+                            f"players of the **same role** (to keep teams 2-2-2). "
+                            f"Use **Shuffle Teams** to rebalance instead."
+                        )
+                    )
+                    return
+
             # Swap teams in DB
             await DatabaseHelper.update_match_player_team(self.match_id, self.out_id, in_team)
             await DatabaseHelper.update_match_player_team(self.match_id, in_id, team)
@@ -2675,16 +2853,48 @@ class SubstituteInPlayerView(discord.ui.View):
                 )
             return
 
-        # Get MMR stats for both players to check if reshuffle is needed
+        # Overwatch: the sub inherits the outgoing player's role so the match
+        # stays a valid 2-2-2 (unless a full reshuffle reassigns below).
+        out_role = None
+        if is_overwatch_game(game):
+            for p in await DatabaseHelper.get_match_players(self.match_id):
+                if p["player_id"] == self.out_id:
+                    out_role = p.get("role")
+                    break
+
+        # Get MMR stats for both players to check if reshuffle is needed.
+        # Always fetched — the substitute log embed reports them further down.
         out_stats = await DatabaseHelper.get_player_stats(self.out_id, match["game_id"])
         in_stats = await DatabaseHelper.get_player_stats(in_id, match["game_id"])
         mmr_diff = abs(in_stats.effective_mmr - out_stats.effective_mmr)
+
+        role_warning = ""
+        if is_overwatch_game(game) and out_role:
+            # Compare the ratings for the slot actually being filled. Overwatch
+            # never updates the aggregate MMR column, so measuring the swap with
+            # it would compare two frozen setup values and never trigger.
+            out_rs = await DatabaseHelper.get_ow_role_stats(
+                self.out_id, match["game_id"], out_role)
+            in_rs = await DatabaseHelper.get_ow_role_stats(
+                in_id, match["game_id"], out_role)
+            mmr_diff = abs(in_rs.effective_mmr - out_rs.effective_mmr)
+
+            # The sub keeps 2-2-2 intact, but nothing guarantees they queue the
+            # role they're inheriting — surface it rather than silently building
+            # them a rating for a role they never picked.
+            in_sel = {r for r, _ in await DatabaseHelper.get_ow_role_selection(
+                in_id, match["game_id"])}
+            if in_sel and out_role not in in_sel:
+                role_warning = (
+                    f"\n⚠️ <@{in_id}> hasn't queued **{out_role}** (plays "
+                    f"{', '.join(sorted(in_sel))}) but is filling that slot to keep 2-2-2."
+                )
 
         # Remove old player, add new
         await DatabaseHelper.remove_match_player(self.match_id, self.out_id)
         await DatabaseHelper.add_match_player(
             self.match_id, in_id, team,
-            was_sub=True, original_player_id=self.out_id
+            was_sub=True, original_player_id=self.out_id, role=out_role
         )
 
         # Remove roles from outgoing player
@@ -2704,13 +2914,21 @@ class SubstituteInPlayerView(discord.ui.View):
             all_players = await DatabaseHelper.get_match_players(self.match_id)
             all_player_ids = [p["player_id"] for p in all_players]
 
-            new_red, new_blue = await self.cog.balance_teams_mmr(all_player_ids, game.game_id)
+            ow_role_map = {}
+            if is_overwatch_game(game):
+                new_red, new_blue, ow_role_map = await self.cog.balance_teams_overwatch(
+                    all_player_ids, game.game_id
+                )
+            else:
+                new_red, new_blue = await self.cog.balance_teams_mmr(all_player_ids, game.game_id)
 
-            # Update team assignments in DB
+            # Update team assignments in DB (and OW role assignments)
             for pid in new_red:
                 await DatabaseHelper.update_match_player_team(self.match_id, pid, "red")
             for pid in new_blue:
                 await DatabaseHelper.update_match_player_team(self.match_id, pid, "blue")
+            for pid, role in ow_role_map.items():
+                await DatabaseHelper.update_match_player_role(self.match_id, pid, role)
 
             # Update Discord roles for all players
             if red_role and blue_role:
@@ -2745,6 +2963,7 @@ class SubstituteInPlayerView(discord.ui.View):
             sub_msg += f"\n\nMMR difference was {mmr_diff} (>200) \u2014 teams have been reshuffled!"
         elif mmr_diff > 200 and self.skip_reshuffle:
             sub_msg += f"\n\nMMR difference was {mmr_diff} (>200) \u2014 reshuffle skipped."
+        sub_msg += role_warning
 
         await interaction.edit_original_response(content=sub_msg)
 
@@ -2763,20 +2982,31 @@ class SubstituteInPlayerView(discord.ui.View):
                     title=f"Substitute \u2014 Match {short_id}",
                     color=COLOR_NEUTRAL
                 )
+                # Overwatch MMR is hidden everywhere else \u2014 report the role slot
+                # instead of leaking a rating into the log channel.
+                ow_log = is_overwatch_game(game)
+                out_tag = f"{OW_ROLE_GLYPH.get(out_role, '')} {out_role}" if ow_log and out_role \
+                    else f"[{out_stats.effective_mmr} MMR]"
+                in_tag = out_tag if ow_log else f"[{in_stats.effective_mmr} MMR]"
                 log_embed.add_field(
                     name="OUT",
-                    value=f"<@{self.out_id}> ({out_name})\n[{out_stats.effective_mmr} MMR]",
+                    value=f"<@{self.out_id}> ({out_name})\n{out_tag}",
                     inline=True
                 )
                 log_embed.add_field(
                     name="IN",
-                    value=f"<@{in_id}> ({in_name})\n[{in_stats.effective_mmr} MMR]",
+                    value=f"<@{in_id}> ({in_name})\n{in_tag}",
                     inline=True
                 )
+                if role_warning:
+                    log_embed.add_field(
+                        name="Role mismatch", value=role_warning.strip(), inline=False
+                    )
                 if reshuffled:
                     log_embed.add_field(
                         name="Reshuffle",
-                        value=f"MMR diff {mmr_diff} > 200 \u2014 teams rebalanced",
+                        value=("Role-MMR diff" if ow_log else "MMR diff")
+                              + f" {mmr_diff} > 200 \u2014 teams rebalanced",
                         inline=False
                     )
                 else:
@@ -2943,17 +3173,35 @@ class SwapPlayer2View(discord.ui.View):
             return
 
         match = await DatabaseHelper.get_match(self.match_id)
+        game = await DatabaseHelper.get_game(match["game_id"])
 
-        # Swap teams in database
+        # Overwatch: a cross-team swap only keeps strict 2-2-2 when both players
+        # share the same role. Block mismatched-role swaps.
+        if is_overwatch_game(game):
+            p1_role = self.p1_data.get("role")
+            p2_role = p2_data.get("role")
+            if p1_role != p2_role:
+                await interaction.response.edit_message(
+                    content=(
+                        f"⚠️ Can't swap — <@{self.p1_id}> plays **{p1_role or 'unknown'}** and "
+                        f"<@{p2_id}> plays **{p2_role or 'unknown'}**. In Overwatch you can only "
+                        f"swap two players of the **same role** (to keep teams 2-2-2). "
+                        f"Use **Shuffle Teams** to rebalance instead."
+                    ),
+                    view=None
+                )
+                return
+
+        # Swap teams in database (preserving each player's OW role record)
         await DatabaseHelper.remove_match_player(self.match_id, self.p1_id)
         await DatabaseHelper.remove_match_player(self.match_id, p2_id)
         await DatabaseHelper.add_match_player(
             self.match_id, self.p1_id, p2_data["team"],
-            was_captain=self.p1_data["was_captain"]
+            was_captain=self.p1_data["was_captain"], role=self.p1_data.get("role")
         )
         await DatabaseHelper.add_match_player(
             self.match_id, p2_id, self.p1_data["team"],
-            was_captain=p2_data["was_captain"]
+            was_captain=p2_data["was_captain"], role=p2_data.get("role")
         )
 
         # Swap roles
@@ -3083,7 +3331,10 @@ class SwapPlayer2View(discord.ui.View):
                 updated_embed.set_footer(text=f"Match {short_id}")
                 updated_embed.add_field(name="Red Team", value="\n".join(red_names_lobby) or "\u2014", inline=True)
                 updated_embed.add_field(name="Blue Team", value="\n".join(blue_names_lobby) or "\u2014", inline=True)
-                await teams_msg.edit(embed=updated_embed)
+                await teams_msg.edit(
+                    embed=updated_embed,
+                    view=self.cog._build_listen_view(self.match_id, match)
+                )
             except Exception as e:
                 logger.warning(f"Failed to edit queue teams embed after swap for match {self.match_id}: {e}")
 
@@ -3229,7 +3480,11 @@ class QueueView(BaseMatchView):
         current_sub = await DatabaseHelper.get_player_subscription(self.queue_id, interaction.user.id)
         queue_state = self.cog.queues.get(self.queue_id)
         player_count = len(queue_state.players) if queue_state else 0
-        view = QueueMenuView(self.cog, self.game_id, self.queue_id, current_sub, player_count)
+        game = await DatabaseHelper.get_game(self.game_id)
+        view = QueueMenuView(
+            self.cog, self.game_id, self.queue_id, current_sub, player_count,
+            is_overwatch=is_overwatch_game(game),
+        )
         if current_sub is not None:
             msg = f"**Queue Menu**\nYou have a DM request active for when **{current_sub}** more needed."
         else:
@@ -3240,12 +3495,24 @@ class QueueView(BaseMatchView):
 class QueueMenuView(BaseMatchView):
     """Ephemeral menu for queue options (DM requests, etc.)."""
 
-    def __init__(self, cog: 'CustomMatch', game_id: int, queue_id: int, current_threshold: Optional[int], player_count: int = 0):
+    def __init__(self, cog: 'CustomMatch', game_id: int, queue_id: int, current_threshold: Optional[int], player_count: int = 0, is_overwatch: bool = False):
         super().__init__(timeout=60)
         self.cog = cog
         self.game_id = game_id
         self.queue_id = queue_id
         self.player_count = player_count
+
+        # Overwatch: let a queued player change their roles without leaving.
+        if is_overwatch:
+            edit_roles_btn = discord.ui.Button(
+                label="Edit Roles",
+                style=discord.ButtonStyle.primary,
+                emoji="\U0001f6e1️",
+                custom_id=f"cm_queue_editroles:{queue_id}",
+                row=2,
+            )
+            edit_roles_btn.callback = self.edit_roles_callback
+            self.add_item(edit_roles_btn)
 
         options = [
             discord.SelectOption(label="Request DM \u2014 1 more needed", value="1", description="DM me when 1 more player is needed"),
@@ -3274,6 +3541,38 @@ class QueueMenuView(BaseMatchView):
             )
             cancel_btn.callback = self.cancel_callback
             self.add_item(cancel_btn)
+
+    async def edit_roles_callback(self, interaction: discord.Interaction):
+        # Roles are locked once the queue leaves "waiting" (ready check / match),
+        # so a mid-check change can't break the teams being formed.
+        queue_state = self.cog.queues.get(self.queue_id)
+        if queue_state and queue_state.state != "waiting":
+            await interaction.response.send_message(
+                "Roles are locked during the ready check — you can change them after this match.",
+                ephemeral=True,
+            )
+            return
+
+        game = await DatabaseHelper.get_game(self.game_id)
+        current = await DatabaseHelper.get_ow_role_selection(interaction.user.id, self.game_id)
+        current_str = (
+            "  ".join(f"{OW_ROLE_GLYPH[r]} {r}" for r, _rank in current)
+            if current else "*none set*"
+        )
+
+        async def after_save(inter: discord.Interaction, ordered):
+            await self.cog.handle_ow_role_edit_while_queued(
+                inter, self.game_id, self.queue_id, ordered
+            )
+
+        view = OWRoleSelectView(
+            self.cog, self.game_id, game.name, rejoin_hint=False, after_save=after_save
+        )
+        await interaction.response.send_message(
+            f"**Current roles:** {current_str}\n\nSelect every role you'll play:",
+            view=view,
+            ephemeral=True,
+        )
 
     async def select_callback(self, interaction: discord.Interaction):
         threshold = int(interaction.data["values"][0])
@@ -3640,6 +3939,61 @@ class IGNRequiredModal(discord.ui.Modal, title="Set Your IGN"):
         )
 
 
+class ListenInView(BaseMatchView):
+    """Grey "Listen In" button on the queue-channel Ongoing Match embed.
+
+    Lets a non-participant join one of the team VCs as a permanently muted
+    spectator. Uses a persistent custom_id so the button keeps working after
+    a bot restart (handled by CustomMatch.on_interaction)."""
+
+    def __init__(self, cog: 'CustomMatch', match_id: int):
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.match_id = match_id
+
+        btn = discord.ui.Button(
+            label="Listen In",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"cm_listen_in:{match_id}"
+        )
+        btn.callback = self.listen_callback
+        self.add_item(btn)
+
+    async def listen_callback(self, interaction: discord.Interaction):
+        await self.cog.handle_listen_in(interaction, self.match_id)
+
+
+class ListenInTeamView(BaseMatchView):
+    """Ephemeral Red/Blue picker shown after clicking Listen In."""
+
+    def __init__(self, cog: 'CustomMatch', match_id: int):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.match_id = match_id
+
+        red_btn = discord.ui.Button(
+            label="Red Team",
+            style=discord.ButtonStyle.danger,
+            custom_id=f"cm_listen_team:{match_id}:red"
+        )
+        red_btn.callback = self.red_callback
+        self.add_item(red_btn)
+
+        blue_btn = discord.ui.Button(
+            label="Blue Team",
+            style=discord.ButtonStyle.primary,
+            custom_id=f"cm_listen_team:{match_id}:blue"
+        )
+        blue_btn.callback = self.blue_callback
+        self.add_item(blue_btn)
+
+    async def red_callback(self, interaction: discord.Interaction):
+        await self.cog.handle_listen_in_team(interaction, self.match_id, "red")
+
+    async def blue_callback(self, interaction: discord.Interaction):
+        await self.cog.handle_listen_in_team(interaction, self.match_id, "blue")
+
+
 class PersistentIGNView(BaseMatchView):
     """Persistent view with a button for users to set their IGN."""
 
@@ -3894,6 +4248,56 @@ class PersistentRoleDropdownView(discord.ui.View):
         self.stop()
 
 
+class OWRoleSelectView(discord.ui.View):
+    """Overwatch flexible role selection.
+
+    One multi-select: the player picks every role they're willing to queue for
+    (1-3). Stored canonically (Tank, DPS, Support) — the 2-2-2 balancer treats it
+    as a willing-set and assigns each player their strongest viable role.
+    """
+
+    def __init__(self, cog: 'CustomMatch', game_id: int, game_name: str,
+                 rejoin_hint: bool = True, after_save=None):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.game_id = game_id
+        self.game_name = game_name
+        self.rejoin_hint = rejoin_hint
+        # Optional async hook(interaction, ordered_roles) that takes over the
+        # response after the selection is saved (used to edit roles while queued).
+        self.after_save = after_save
+
+        select = discord.ui.Select(
+            placeholder="Select every role you'll play (1-3)...",
+            min_values=1,
+            max_values=3,
+            options=[
+                discord.SelectOption(label=r, value=r, emoji=OW_ROLE_GLYPH.get(r))
+                for r in OW_ROLES
+            ],
+        )
+        select.callback = self.on_select
+        self.add_item(select)
+
+    async def on_select(self, interaction: discord.Interaction):
+        chosen = set(interaction.data["values"])
+        # Store in canonical order for stability (balancer ignores order)
+        ordered = [r for r in OW_ROLES if r in chosen]
+        await DatabaseHelper.set_ow_role_selection(interaction.user.id, self.game_id, ordered)
+
+        self.clear_items()
+        if self.after_save:
+            await self.after_save(interaction, ordered)
+        else:
+            desc = "  ".join(f"{OW_ROLE_GLYPH[r]} {r}" for r in ordered)
+            hint = "\n\nClick **Join** again to enter the queue." if self.rejoin_hint else ""
+            await interaction.response.edit_message(
+                content=f"**{self.game_name} roles set:**  {desc}{hint}",
+                view=self,
+            )
+        self.stop()
+
+
 class PersistentRoleView(BaseMatchView):
     """Persistent view with a button for users to set their role preferences."""
 
@@ -4039,27 +4443,69 @@ class ServerStatsToggleView(discord.ui.View):
         )
 
 
-class PersistentLeaderboardView(BaseMatchView):
-    """Persistent view attached to the leaderboard embed in the dedicated channel."""
+class LeaderboardPagerView(discord.ui.View):
+    """Ephemeral paginated leaderboard (20/page) with a Monthly/All-time toggle.
 
-    def __init__(self, cog: 'CustomMatch', game_id: int, is_valorant: bool = False):
-        super().__init__(timeout=None)
+    Opened from the grey Leaderboard button on a match results embed. All buttons grey.
+    """
+
+    def __init__(self, cog: 'CustomMatch', game_id: int, monthly: bool = True):
+        super().__init__(timeout=180)
         self.cog = cog
         self.game_id = game_id
-        self.is_valorant = is_valorant
+        self.monthly = monthly
+        self.page = 0
+        self.total_pages = 1
+        self.sync_buttons()
 
-        # All-time button
-        alltime_btn = discord.ui.Button(
-            label="All-time", style=discord.ButtonStyle.secondary,
-            custom_id=f"cm_lb_alltime:{game_id}"
+    def sync_buttons(self):
+        """Rebuild the buttons to reflect the current page / total / period state."""
+        self.clear_items()
+
+        prev_btn = discord.ui.Button(label="◀", style=discord.ButtonStyle.secondary,
+                                     disabled=self.page <= 0)
+        prev_btn.callback = self.prev_page
+        self.add_item(prev_btn)
+
+        indicator = discord.ui.Button(label=f"{self.page + 1}/{self.total_pages}",
+                                      style=discord.ButtonStyle.secondary, disabled=True)
+        self.add_item(indicator)
+
+        next_btn = discord.ui.Button(label="▶", style=discord.ButtonStyle.secondary,
+                                     disabled=self.page >= self.total_pages - 1)
+        next_btn.callback = self.next_page
+        self.add_item(next_btn)
+
+        toggle_btn = discord.ui.Button(
+            label="All-time" if self.monthly else "Monthly",
+            style=discord.ButtonStyle.secondary
         )
-        alltime_btn.callback = self.alltime_callback
-        self.add_item(alltime_btn)
+        toggle_btn.callback = self.toggle_period
+        self.add_item(toggle_btn)
 
-    async def alltime_callback(self, interaction: discord.Interaction):
-        """Send ephemeral top 20 all-time leaderboard."""
-        embed = await self.cog._build_leaderboard_text_embed(interaction.guild, self.game_id, monthly=False)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+    async def _refresh(self, interaction: discord.Interaction):
+        embed, self.total_pages = await self.cog._build_leaderboard_page_embed(
+            interaction.guild, self.game_id, monthly=self.monthly, page=self.page
+        )
+        # Clamp in case the underlying list shrank
+        self.page = max(0, min(self.page, self.total_pages - 1))
+        self.sync_buttons()
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    async def prev_page(self, interaction: discord.Interaction):
+        if self.page > 0:
+            self.page -= 1
+        await self._refresh(interaction)
+
+    async def next_page(self, interaction: discord.Interaction):
+        if self.page < self.total_pages - 1:
+            self.page += 1
+        await self._refresh(interaction)
+
+    async def toggle_period(self, interaction: discord.Interaction):
+        self.monthly = not self.monthly
+        self.page = 0
+        await self._refresh(interaction)
 
 
 class MatchHistorySelectView(discord.ui.View):

@@ -8,6 +8,7 @@ import os
 import io
 import json
 import re
+import math
 import time as _time
 import types
 from datetime import datetime, timezone, timedelta
@@ -17,6 +18,12 @@ import random
 import itertools
 from zoneinfo import ZoneInfo
 
+try:
+    from utils.economy_award import award_many
+except ImportError:  # Economy bridge absent — custom matches carry on regardless.
+    def award_many(*args, **kwargs):
+        pass
+
 from .models import (
     QueueType, CaptainSelection, Team,
     GameConfig, PlayerIGN, ReadyPenalty, Suspension, PlayerStats, QueueState, MatchState,
@@ -25,8 +32,9 @@ from .models import (
     ROLE_MMR_TOLERANCE, SHAKE_MMR_TOLERANCE, SHAKE_LOOKBACK_MATCHES, SHAKE_OVERLAP_THRESHOLD,
     COLOR_WHITE, COLOR_RED, COLOR_BLUE, COLOR_NEUTRAL, COLOR_SUCCESS, COLOR_WARNING,
     RIVALS_ROLES, RIVALS_ROSTER, FONTS_PATH,
-    is_valorant_game, is_rivals_game, _parse_tracker_url, _streak_bonus_multiplier,
-    _role_diversity_penalty, generate_short_id, parse_duration_to_minutes,
+    is_valorant_game, is_rivals_game, is_overwatch_game, OW_ROLES, OW_ROLE_GLYPH, ow_can_form_222,
+    _parse_tracker_url, _streak_bonus_multiplier,
+    _role_diversity_penalty, generate_short_id, resolve_short_name, parse_duration_to_minutes,
     normalize_ign, find_best_ign_match, resolve_ocr_ign, normalize_rivals_role,
     safe_display_name, sanitize_for_codeblock,
     display_width, pad_to_width, truncate_to_width,
@@ -42,18 +50,19 @@ from .views_settings import (
 from .views_gameplay import (
     AdminPanelView, QueueView, QueueMenuView, ReadyCheckView,
     WinVoteView, AbandonVoteView, IGNModal, IGNRequiredModal,
-    PersistentIGNView, RoleSelectModal, RoleRequiredView,
+    PersistentIGNView, RoleSelectModal, RoleRequiredView, OWRoleSelectView,
     PersistentRoleDropdownView, PersistentRoleView, CaptainDraftView,
-    VerificationTicketView, ServerStatsToggleView, PersistentLeaderboardView,
+    VerificationTicketView, ServerStatsToggleView, LeaderboardPagerView,
     MatchHistorySelectView, PlayerStatsView, StatsSelectDropdown, StatsImageView,
     SimpleStatsSelectDropdown, SimpleStatsImageView,
     FetchStatsModal, RefetchModeSelectView,
     DiscussionNotificationView, IGNSuggestionView,
     ShuffleMatchSelectView, ShuffleStartedCheckView, ShuffleVoteView,
+    ListenInView, ListenInTeamView,
 )
 
 EST = ZoneInfo("America/New_York")
-logger = logging.getLogger('custommatch')
+logger = logging.getLogger('cogs.custommatch')
 
 
 # =============================================================================
@@ -69,12 +78,12 @@ class CustomMatch(commands.Cog):
         self.ready_check_tasks: Dict[int, asyncio.Task] = {}  # queue_id -> task
         self.match_timeout_tasks: Dict[int, asyncio.Task] = {}  # match_id -> task
         self.arcade_end_votes: Dict[int, set] = {}  # match_id -> set of user_ids
+        self._ow_role_assignments: Dict[int, Dict[int, str]] = {}  # match_id -> {player_id: OW role}
         self.queue_timeout_task: Optional[asyncio.Task] = None
         self.penalty_decay_task: Optional[asyncio.Task] = None
         self.queue_schedule_task: Optional[asyncio.Task] = None
         self.orphan_cleanup_task: Optional[asyncio.Task] = None
         self.stats_retry_poll_task: Optional[asyncio.Task] = None
-        self.monthly_reset_task: Optional[asyncio.Task] = None
         self.queue_embed_refresh_task: Optional[asyncio.Task] = None
         self.channel_cleanup_task: Optional[asyncio.Task] = None
         self.vacuum_task: Optional[asyncio.Task] = None
@@ -96,6 +105,7 @@ class CustomMatch(commands.Cog):
         self.lf1_tasks: Dict[int, asyncio.Task] = {}  # game_id -> auto-delete task
         self.lf1_cooldowns: Dict[int, datetime] = {}  # game_id -> last LF1 send time
         self.secondary_alert_sent: set = set()  # legacy, kept for attribute safety
+        self._heal_cooldowns: Dict[int, datetime] = {}  # queue_id -> last stuck-queue heal
 
     async def cog_load(self):
         await init_db()
@@ -109,8 +119,6 @@ class CustomMatch(commands.Cog):
             logger.error(f"Error reconciling player stats: {e}")
         # Restore active queues from database
         await self.restore_queues()
-        # Restore persistent leaderboard views
-        await self.restore_leaderboard_views()
         # Register persistent IGN and Role views
         self.bot.add_view(PersistentIGNView(self))
         self.bot.add_view(PersistentRoleView(self))
@@ -133,8 +141,6 @@ class CustomMatch(commands.Cog):
         self.orphan_cleanup_task = asyncio.create_task(self.orphan_match_cleanup())
         # Start persistent stats retry poll (replaces in-memory retry tasks)
         self.stats_retry_poll_task = asyncio.create_task(self.stats_retry_poll())
-        # Start monthly leaderboard reset check
-        self.monthly_reset_task = asyncio.create_task(self.monthly_leaderboard_check())
         # Start queue embed periodic refresh
         self.queue_embed_refresh_task = asyncio.create_task(self.queue_embed_refresh())
         # Start match channel auto-cleanup (12h after match ends)
@@ -275,21 +281,6 @@ class CustomMatch(commands.Cog):
         except Exception as e:
             logger.error(f"Error restoring queues: {e}")
 
-    async def restore_leaderboard_views(self):
-        """Re-register persistent leaderboard views after restart."""
-        try:
-            games = await DatabaseHelper.get_all_games()
-            count = 0
-            for game in games:
-                if game.leaderboard_channel_id and game.leaderboard_message_id:
-                    is_valorant = 'valorant' in game.name.lower()
-                    view = PersistentLeaderboardView(self, game.game_id, is_valorant=is_valorant)
-                    self.bot.add_view(view, message_id=game.leaderboard_message_id)
-                    count += 1
-            logger.info(f"Restored {count} persistent leaderboard views.")
-        except Exception as e:
-            logger.error(f"Error restoring leaderboard views: {e}")
-
     async def restore_match_timeout_tasks(self):
         """Restore match timeout tasks for active matches after restart."""
         try:
@@ -345,6 +336,126 @@ class CustomMatch(commands.Cog):
         except Exception as e:
             logger.error(f"Error restoring match timeout tasks: {e}")
 
+    # =========================================================================
+    # LISTEN IN (muted spectators)
+    # =========================================================================
+
+    # Everything a listener must never be able to do in a team VC. speak=False is
+    # the hard, server-side gate (Discord refuses their voice packets); the rest
+    # closes the side doors (Go Live, soundboard, priority speaker, activities).
+    LISTEN_OVERWRITE = dict(
+        view_channel=True,
+        connect=True,
+        speak=False,
+        stream=False,
+        use_soundboard=False,
+        use_external_sounds=False,
+        priority_speaker=False,
+        use_embedded_activities=False,
+        request_to_speak=False,
+    )
+
+    def _build_listen_view(self, match_id: int, match: dict) -> Optional[ListenInView]:
+        """Listen In view for a match's queue-channel embed, or None if it has no team VCs."""
+        if not (match.get("red_vc_id") and match.get("blue_vc_id")):
+            return None
+        return ListenInView(self, match_id)
+
+    async def _get_listenable_match(self, interaction: discord.Interaction, match_id: int) -> Optional[dict]:
+        """Validate that this user may listen in on this match. Replies + returns None if not."""
+        match = await DatabaseHelper.get_match(match_id)
+        if not match or match.get("winning_team") or match.get("cancelled"):
+            await interaction.response.send_message("This match is no longer active.", ephemeral=True)
+            return None
+
+        if not match.get("red_vc_id") or not match.get("blue_vc_id"):
+            await interaction.response.send_message(
+                "This match doesn't have team voice channels.", ephemeral=True
+            )
+            return None
+
+        players = await DatabaseHelper.get_match_players(match_id)
+        if any(p["player_id"] == interaction.user.id for p in players):
+            await interaction.response.send_message(
+                "You're playing in this match — you already have access to your team's VC.",
+                ephemeral=True
+            )
+            return None
+
+        return match
+
+    async def handle_listen_in(self, interaction: discord.Interaction, match_id: int):
+        """Listen In button: ask which team's VC they want to spectate."""
+        match = await self._get_listenable_match(interaction, match_id)
+        if not match:
+            return
+
+        await interaction.response.send_message(
+            "**Listen In** — pick which team's voice channel you want to listen to.\n"
+            "You'll be able to hear them, but you'll stay **muted the entire time**.",
+            view=ListenInTeamView(self, match_id),
+            ephemeral=True
+        )
+
+    async def handle_listen_in_team(self, interaction: discord.Interaction, match_id: int, team: str):
+        """Team picked: grant muted-spectator access to that team's VC."""
+        match = await self._get_listenable_match(interaction, match_id)
+        if not match:
+            return
+
+        vc_id = match["red_vc_id"] if team == "red" else match["blue_vc_id"]
+        vc = interaction.guild.get_channel(vc_id)
+        if not isinstance(vc, discord.VoiceChannel):
+            await interaction.response.send_message(
+                "That team's voice channel no longer exists.", ephemeral=True
+            )
+            return
+
+        member = interaction.user
+        try:
+            await vc.set_permissions(
+                member,
+                overwrite=discord.PermissionOverwrite(**self.LISTEN_OVERWRITE),
+                reason=f"Listen In: muted spectator for match {match.get('short_id') or match_id}"
+            )
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "I don't have permission to grant access to that voice channel.", ephemeral=True
+            )
+            return
+
+        # Verify the deny actually took. A member overwrite outranks every role, so
+        # the only way they'd still have Speak is Administrator, which bypasses
+        # overwrites entirely — in that case we can't hold them muted, so don't
+        # pretend we can.
+        if vc.permissions_for(member).speak:
+            await vc.set_permissions(member, overwrite=None, reason="Listen In: cannot enforce mute")
+            await interaction.response.edit_message(
+                content=(
+                    "Your permissions override channel settings (Administrator), so I can't "
+                    "guarantee you'd stay muted in there. Listen In isn't available for you."
+                ),
+                view=None
+            )
+            return
+
+        team_label = "Red Team" if team == "red" else "Blue Team"
+        await interaction.response.edit_message(
+            content=(
+                f"You can now listen in on **{team_label}** — join {vc.mention}.\n\n"
+                "Your mic is **disabled in that channel** — you can hear the team but "
+                "can't talk, and there's no way to unmute. Access disappears with the "
+                "channel when the match ends."
+            ),
+            view=None
+        )
+
+        await self.log_action(
+            interaction.guild,
+            f"**{safe_display_name(member)}** is listening in on {team_label} "
+            f"(Match {match.get('short_id') or match_id})"
+        )
+
     @commands.Cog.listener()
     async def on_interaction(self, interaction: discord.Interaction):
         """Handle orphaned queue interactions that weren't caught by registered views."""
@@ -393,7 +504,8 @@ class CustomMatch(commands.Cog):
                 # Menu button — open ephemeral menu
                 current_sub = await DatabaseHelper.get_player_subscription(queue_id, interaction.user.id)
                 player_count = len(queue_state.players)
-                view = QueueMenuView(self, game.game_id, queue_id, current_sub, player_count)
+                view = QueueMenuView(self, game.game_id, queue_id, current_sub, player_count,
+                                     is_overwatch=is_overwatch_game(game))
                 if current_sub is not None:
                     msg = f"**Queue Menu**\nYou have a DM request active for when **{current_sub}** more needed."
                 else:
@@ -496,8 +608,8 @@ class CustomMatch(commands.Cog):
                     view=None
                 )
 
-        # Handle persistent leaderboard buttons (fallback if view wasn't registered)
-        elif custom_id.startswith("cm_lb_alltime:") or custom_id.startswith("cm_lb_matches:"):
+        # Handle leaderboard / match-browser buttons (persistent across restart)
+        elif custom_id.startswith("cm_lb_open:") or custom_id.startswith("cm_lb_matches:"):
             try:
                 game_id = int(custom_id.split(":")[1])
             except (IndexError, ValueError):
@@ -508,9 +620,14 @@ class CustomMatch(commands.Cog):
                 await interaction.response.send_message("Game not found.", ephemeral=True)
                 return
 
-            if custom_id.startswith("cm_lb_alltime:"):
-                embed = await self._build_leaderboard_text_embed(interaction.guild, game_id, monthly=False)
-                await interaction.response.send_message(embed=embed, ephemeral=True)
+            if custom_id.startswith("cm_lb_open:"):
+                # Open the paginated ephemeral leaderboard (monthly, first page)
+                view = LeaderboardPagerView(self, game_id, monthly=True)
+                embed, view.total_pages = await self._build_leaderboard_page_embed(
+                    interaction.guild, game_id, monthly=True, page=0
+                )
+                view.sync_buttons()
+                await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
             else:
                 # Matches button
                 await interaction.response.defer(ephemeral=True)
@@ -529,6 +646,25 @@ class CustomMatch(commands.Cog):
                 if view:
                     kwargs["view"] = view
                 await interaction.followup.send(**kwargs)
+
+        # Handle Listen In buttons (persistent across restart)
+        elif custom_id.startswith("cm_listen_in:"):
+            try:
+                match_id = int(custom_id.split(":")[1])
+            except (IndexError, ValueError):
+                return
+            await self.handle_listen_in(interaction, match_id)
+
+        elif custom_id.startswith("cm_listen_team:"):
+            parts = custom_id.split(":")
+            try:
+                match_id = int(parts[1])
+                team = parts[2]
+            except (IndexError, ValueError):
+                return
+            if team not in ("red", "blue"):
+                return
+            await self.handle_listen_in_team(interaction, match_id, team)
 
         # Handle discussion thread buttons (persistent across restart)
         elif custom_id.startswith("cm_discussion_join:") or custom_id.startswith("cm_discussion_close:"):
@@ -563,8 +699,6 @@ class CustomMatch(commands.Cog):
             self.orphan_cleanup_task.cancel()
         if self.stats_retry_poll_task:
             self.stats_retry_poll_task.cancel()
-        if self.monthly_reset_task:
-            self.monthly_reset_task.cancel()
         if self.queue_embed_refresh_task:
             self.queue_embed_refresh_task.cancel()
         if self.channel_cleanup_task:
@@ -674,9 +808,6 @@ class CustomMatch(commands.Cog):
                         fingerprints.pop(queue_id, None)
                         continue
                     try:
-                        fp = (len(qs.players), qs.state)
-                        if fingerprints.get(queue_id) == fp:
-                            continue
                         if qs.game_id not in game_cache:
                             game = await DatabaseHelper.get_game(qs.game_id)
                             if not game:
@@ -687,6 +818,19 @@ class CustomMatch(commands.Cog):
                         channel = self.bot.get_channel(qs.channel_id)
                         if not channel:
                             continue
+
+                        # A full queue must never sit in "waiting" — it would show
+                        # Join/Leave instead of Ready and nobody could ready up.
+                        # Checked before the fingerprint short-circuit, because a
+                        # stuck queue's fingerprint never changes.
+                        if await self._heal_stuck_full_queue(channel, game, qs):
+                            fingerprints.pop(queue_id, None)
+                            continue
+
+                        fp = (len(qs.players), qs.state)
+                        if fingerprints.get(queue_id) == fp:
+                            continue
+
                         msg = await channel.fetch_message(qs.message_id)
                         embed = await self.create_queue_embed(game, qs, channel.guild)
                         view = QueueView(self, game.game_id, queue_id)
@@ -1227,6 +1371,66 @@ class CustomMatch(commands.Cog):
         except Exception as e:
             logger.error(f"Error in _do_orphan_cleanup: {e}", exc_info=True)
 
+    async def _heal_stuck_full_queue(self, channel: discord.TextChannel,
+                                      game: GameConfig, qs: QueueState) -> bool:
+        """Pop a full queue that is somehow still sitting in "waiting".
+
+        A full waiting queue shows Join/Leave instead of Ready, so nobody can ready
+        up and an admin has to Force Start. Trim any overflow and start the ready
+        check. Returns True if a ready check was started."""
+        if qs.state != "waiting":
+            return False
+        effective_pc = self._get_effective_player_count(game, qs)
+        if len(qs.players) < effective_pc:
+            return False
+
+        # Overwatch queues are legitimately held full while a 2-2-2 can't form.
+        if is_overwatch_game(game) and not qs.is_secondary and effective_pc == 12:
+            _c, feasible, _d = await self._ow_composition_summary(
+                list(qs.players.keys()), game.game_id
+            )
+            if not feasible:
+                return False
+
+        qid = qs.queue_id
+        # Back off between heals so a queue that fails to start a match (missing
+        # category, etc.) can't be re-popped every refresh tick.
+        last = self._heal_cooldowns.get(qid)
+        now = datetime.now(timezone.utc)
+        if last and (now - last).total_seconds() < 120:
+            return False
+
+        async with self.queue_locks.setdefault(qid, asyncio.Lock()):
+            if qs.state != "waiting" or len(qs.players) < effective_pc:
+                return False
+            overflow = list(qs.players.keys())[effective_pc:]
+            for pid in overflow:
+                qs.players.pop(pid, None)
+                qs.grace_timers.pop(pid, None)
+            qs.state = "ready_check"
+            qs.ready_check_started = now
+            self._heal_cooldowns[qid] = now
+
+        if overflow:
+            logger.warning(
+                f"_heal_stuck_full_queue: queue {qid} was over capacity — dropped {overflow}"
+            )
+            async with DatabaseHelper._get_db() as db:
+                for pid in overflow:
+                    await db.execute(
+                        "DELETE FROM queue_players WHERE queue_id = ? AND player_id = ?",
+                        (qid, pid)
+                    )
+                await db.commit()
+
+        logger.warning(
+            f"_heal_stuck_full_queue: queue {qid} was full ({len(qs.players)}/{effective_pc}) "
+            f"but stuck in waiting — starting ready check"
+        )
+        await self._delete_lf1_message(game.game_id)
+        await self.start_ready_check(channel, game, qs, pre_claimed=True)
+        return True
+
     async def _do_orphan_queue_cleanup(self):
         """Force-restore queues stuck in transient states for too long."""
         try:
@@ -1261,6 +1465,9 @@ class CustomMatch(commands.Cog):
                             f"for {elapsed:.0f}s — restoring to waiting"
                         )
                         await self._restore_queue_to_waiting(channel, game, qs)
+
+                elif qs.state == "waiting":
+                    await self._heal_stuck_full_queue(channel, game, qs)
         except Exception as e:
             logger.error(f"Error in _do_orphan_queue_cleanup: {e}", exc_info=True)
 
@@ -1608,12 +1815,14 @@ class CustomMatch(commands.Cog):
             roles_to_remove = [r for r in member.roles if r.id in all_mmr_role_ids and r.id != target_role_id]
             has_target = any(r.id == target_role_id for r in member.roles)
 
-            if roles_to_remove:
-                await member.remove_roles(*roles_to_remove, reason="MMR role update")
+            # Add before remove: if the second call fails the player is left
+            # holding two rank roles (visible, fixable) rather than none.
             if target_role_id and not has_target:
                 role = guild.get_role(target_role_id)
                 if role:
                     await member.add_roles(role, reason="MMR role update")
+            if roles_to_remove:
+                await member.remove_roles(*roles_to_remove, reason="MMR role update")
         except Exception as e:
             logger.error(f"Error updating MMR roles for player {player_id}: {e}")
 
@@ -1692,6 +1901,48 @@ class CustomMatch(commands.Cog):
         else:
             return code_part
 
+    async def _ow_log_roster_lines(self, guild, match_id, team_value, voter_teams=None):
+        """Build role-annotated roster lines for an Overwatch team (no MMR).
+        Ordered Tank → DPS → Support. Optional voter circles."""
+        players = await DatabaseHelper.get_match_players(match_id)
+        order = {r: i for i, r in enumerate(OW_ROLES)}
+        team = [p for p in players if p["team"] == team_value]
+        team.sort(key=lambda p: order.get(p.get("role"), 99))
+        lines = []
+        for p in team:
+            pid = p["player_id"]
+            member = guild.get_member(pid)
+            name = member.display_name if member else str(pid)
+            name = sanitize_for_codeblock(name, fallback=member.name if member else None)
+            glyph = OW_ROLE_GLYPH.get(p.get("role"), "➖")
+            if voter_teams is not None:
+                voted = voter_teams.get(pid)
+                circle = "🔴" if voted == "red" else ("🔵" if voted == "blue" else "⚫")
+                lines.append(f"{circle} {glyph} `{truncate_to_width(name, 16)}`")
+            else:
+                lines.append(f"{glyph} `{truncate_to_width(name, 16)}`")
+        return lines
+
+    async def _send_ow_teams_to_log(self, channel, game, match_id, short_id,
+                                    red_role, blue_role, reshuffled=False):
+        """Pre-match team embed for Overwatch (rosters + roles, no MMR)."""
+        red_lines = await self._ow_log_roster_lines(channel.guild, match_id, "red")
+        blue_lines = await self._ow_log_roster_lines(channel.guild, match_id, "blue")
+        title = f"Match {short_id} — {game.name}"
+        if reshuffled:
+            title += " (Reshuffled)"
+        embed = discord.Embed(title=title, color=COLOR_NEUTRAL)
+        embed.add_field(
+            name=f"{red_role.name if red_role else 'Red Team'}",
+            value="\n".join(red_lines) or "—", inline=False,
+        )
+        embed.add_field(
+            name=f"{blue_role.name if blue_role else 'Blue Team'}",
+            value="\n".join(blue_lines) or "—", inline=False,
+        )
+        msg = await channel.send(embed=embed)
+        await DatabaseHelper.update_match(match_id, log_msg_id=msg.id)
+
     async def _send_mmr_embed_to_log(
         self, guild: discord.Guild, game: GameConfig, match_id: int,
         red_team: List[int], blue_team: List[int], igns: Dict[int, str],
@@ -1708,6 +1959,14 @@ class CustomMatch(commands.Cog):
             return
 
         short_id = await self._get_match_short_id(match_id)
+
+        # Overwatch: hidden MMR — show role-annotated rosters, no MMR numbers.
+        if is_overwatch_game(game):
+            await self._send_ow_teams_to_log(
+                channel, game, match_id, short_id, red_role, blue_role, reshuffled
+            )
+            return
+
         is_rivals = 'rivals' in game.name.lower()
 
         # Fetch role data for Rivals
@@ -1771,6 +2030,10 @@ class CustomMatch(commands.Cog):
         winner_results: List[tuple], loser_results: List[tuple]
     ):
         """Edit the pre-match log embed to add +/- MMR changes after match result."""
+        # Overwatch hides MMR, so the pre-match embed has no deltas to add.
+        if is_overwatch_game(game):
+            return
+
         match = await DatabaseHelper.get_match(match_id)
         if not match or not match.get("log_msg_id"):
             return
@@ -1979,7 +2242,8 @@ class CustomMatch(commands.Cog):
 
                         teams_embed.add_field(name="Red Team", value="\n".join(red_names) or "—", inline=True)
                         teams_embed.add_field(name="Blue Team", value="\n".join(blue_names) or "—", inline=True)
-                        await teams_msg.edit(embed=teams_embed)
+                        listen_view = self._build_listen_view(match_id, match)
+                        await teams_msg.edit(embed=teams_embed, view=listen_view)
                     except Exception as e:
                         logger.warning(f"Failed to update queue teams embed for match {match_id}: {e}")
 
@@ -2014,7 +2278,26 @@ class CustomMatch(commands.Cog):
             if name not in existing:
                 return name
         return f"{base_name}-new"
-    
+
+    async def _position_under_queue_channel(self, guild: discord.Guild, game: GameConfig,
+                                             channel: discord.abc.GuildChannel,
+                                             category: discord.CategoryChannel):
+        """Move a newly created lobby/draft channel to directly under the game's queue channel.
+
+        Best-effort: only applies when the queue channel exists and shares the category.
+        Positioning failures must never break match creation.
+        """
+        try:
+            if not game.queue_channel_id:
+                return
+            queue_channel = guild.get_channel(game.queue_channel_id)
+            if not queue_channel or queue_channel.category_id != category.id:
+                return
+            await channel.edit(position=queue_channel.position + 1)
+        except Exception as e:
+            logger.warning(f"Could not position channel {getattr(channel, 'id', '?')} "
+                           f"under queue channel for game {game.game_id}: {e}")
+
     # -------------------------------------------------------------------------
     # QUEUE MANAGEMENT
     # -------------------------------------------------------------------------
@@ -2030,6 +2313,68 @@ class CustomMatch(commands.Cog):
         if queue_state.is_secondary and game.secondary_queue_type:
             return game.secondary_queue_type
         return game.queue_type
+
+    async def _ow_composition_summary(self, player_ids, game_id):
+        """Overwatch queue role coverage. Returns (counts, feasible, deficit):
+        counts[role] = how many queued players can fill that role; feasible =
+        whether a strict 2-2-2 can be formed; deficit[role] = shortfall."""
+        player_ids = list(player_ids)
+        raw = await DatabaseHelper.get_bulk_ow_role_selection(player_ids, game_id)
+        sel = {}
+        for pid in player_ids:
+            roles = {r for r, _rank in raw.get(pid, [])}
+            sel[pid] = roles if roles else set(OW_ROLES)  # missing => treat as fill
+        counts = {r: sum(1 for pid in player_ids if r in sel[pid]) for r in OW_ROLES}
+        feasible, deficit = ow_can_form_222(sel)
+        return counts, feasible, deficit
+
+    async def handle_ow_role_edit_while_queued(self, interaction, game_id, queue_id, ordered):
+        """A queued Overwatch player changed their roles from the queue menu.
+        Confirm, refresh the queue embed, and — if the queue is now full and can
+        form 2-2-2 — start the ready check (recovers a queue held by the gate)."""
+        glyphs = "  ".join(f"{OW_ROLE_GLYPH[r]} {r}" for r in ordered) if ordered else "*none*"
+        try:
+            await interaction.response.edit_message(content=f"**Roles updated:** {glyphs}", view=None)
+        except Exception:
+            pass
+
+        queue_state = self.queues.get(queue_id)
+        if not queue_state:
+            return
+        game = await DatabaseHelper.get_game(game_id)
+        if not game:
+            return
+
+        # Refresh the public queue embed (role glyphs + coverage line)
+        channel = self.bot.get_channel(queue_state.channel_id) if queue_state.channel_id else None
+        try:
+            if channel and queue_state.message_id:
+                embed = await self.create_queue_embed(game, queue_state, channel.guild)
+                msg = await channel.fetch_message(queue_state.message_id)
+                await msg.edit(embed=embed)
+        except Exception as e:
+            logger.error(f"OW role edit: failed to refresh queue embed for {queue_id}: {e}")
+
+        # Recover a held full queue: if now full + feasible, start the ready check.
+        if channel is None:
+            return
+        async with self.queue_locks.setdefault(queue_id, asyncio.Lock()):
+            if queue_state.state != "waiting":
+                return
+            effective_pc = self._get_effective_player_count(game, queue_state)
+            if len(queue_state.players) < effective_pc:
+                return
+            # Same scope as every other 2-2-2 gate: the real 6v6 role queue only.
+            # Without this guard a secondary queue (or any non-12 config) would
+            # demand a full 4/4/4 it can never reach, and stall silently.
+            if not queue_state.is_secondary and effective_pc == 12:
+                _c, feasible, _d = await self._ow_composition_summary(
+                    list(queue_state.players.keys()), game_id
+                )
+                if not feasible:
+                    return
+            await self._delete_lf1_message(game_id)
+            await self.start_ready_check(channel, game, queue_state)
 
     async def create_queue_embed(self, game: GameConfig, queue_state: QueueState, guild: discord.Guild = None) -> discord.Embed:
         """Create the queue embed."""
@@ -2060,7 +2405,10 @@ class CustomMatch(commands.Cog):
             # Fetch role emojis for games with role_required
             role_prefs_map = {}
             role_emojis = {}
-            if game.role_required:
+            ow_sel_map = {}
+            if is_overwatch_game(game):
+                ow_sel_map = await DatabaseHelper.get_bulk_ow_role_selection(player_ids, game.game_id)
+            elif game.role_required:
                 role_prefs_map = await DatabaseHelper.get_bulk_role_prefs(player_ids, game.game_id)
                 role_emojis = _resolve_role_emojis(await DatabaseHelper.get_role_emojis(), self.bot)
 
@@ -2072,7 +2420,13 @@ class CustomMatch(commands.Cog):
                 member = guild.get_member(pid) if guild else None
                 name = member.display_name if member else f"<@{pid}>"
                 prefix = ""
-                if role_emojis and game.role_required:
+                if is_overwatch_game(game):
+                    roles = [r for r, _rank in ow_sel_map.get(pid, [])]
+                    if roles:
+                        prefix = "".join(OW_ROLE_GLYPH.get(r, "") for r in roles) + " | "
+                    else:
+                        prefix = "➖ | "
+                elif role_emojis and game.role_required:
                     none_emoji = role_emojis.get("none", "➖")
                     if pid in role_prefs_map:
                         prefs = role_prefs_map[pid]
@@ -2095,6 +2449,18 @@ class CustomMatch(commands.Cog):
                 lines.append(f"- {name}")
             player_list = "\n".join(lines)
             embed.add_field(name="Joined", value=player_list, inline=False)
+
+            # Overwatch: live role coverage + 2-2-2 formability (real 6v6 queue only)
+            if is_overwatch_game(game) and not queue_state.is_secondary and effective_pc == 12:
+                counts, feasible, deficit = await self._ow_composition_summary(player_ids, game.game_id)
+                comp = "  ·  ".join(f"{OW_ROLE_GLYPH[r]} {counts[r]}" for r in OW_ROLES)
+                if player_count >= effective_pc:
+                    if feasible:
+                        comp += "\n✅ 2-2-2 ready"
+                    else:
+                        need = ", ".join(f"+{n} {r}" for r, n in deficit.items() if n > 0)
+                        comp += f"\n⚠️ can't form 2-2-2 — need {need}"
+                embed.add_field(name="Role Coverage", value=comp, inline=False)
 
         # Add banner image if configured (secondary queue can override)
         banner = game.secondary_banner_url if queue_state.is_secondary and game.secondary_banner_url else game.banner_url
@@ -2430,20 +2796,33 @@ class CustomMatch(commands.Cog):
 
         # Check role requirement before deferring
         if game.role_required:
-            existing_prefs = await DatabaseHelper.get_player_role_prefs(user.id, game.game_id)
-            if not existing_prefs:
-                view = RoleRequiredView(self, game.game_id, game.name)
-                await interaction.response.send_message(
-                    f"**You need to set your role to join {game.name} queue.**\n\n"
-                    "Select your **primary role** below:",
-                    view=view,
-                    ephemeral=True
-                )
-                return
+            if is_overwatch_game(game):
+                existing_sel = await DatabaseHelper.get_ow_role_selection(user.id, game.game_id)
+                if not existing_sel:
+                    view = OWRoleSelectView(self, game.game_id, game.name)
+                    await interaction.response.send_message(
+                        f"**Select your roles to join {game.name}.**\n"
+                        "Pick every role you're willing to play — matches form strict 2-2-2 from these.",
+                        view=view,
+                        ephemeral=True
+                    )
+                    return
+            else:
+                existing_prefs = await DatabaseHelper.get_player_role_prefs(user.id, game.game_id)
+                if not existing_prefs:
+                    view = RoleRequiredView(self, game.game_id, game.name)
+                    await interaction.response.send_message(
+                        f"**You need to set your role to join {game.name} queue.**\n\n"
+                        "Select your **primary role** below:",
+                        view=view,
+                        ephemeral=True
+                    )
+                    return
 
         # Defer early to prevent timeout - we'll do DB operations next
         await interaction.response.defer()
 
+        queue_full = False  # also read by the except handler below
         try:
             # Check if schedule says queue should be closed
             if game.schedule_enabled and not self._is_currently_open(game):
@@ -2474,6 +2853,10 @@ class CustomMatch(commands.Cog):
                     old_mmr = stats.mmr
                     stats.mmr = expected_mmr
                     await DatabaseHelper.update_player_stats(stats)
+                    # Overwatch balances off per-role MMR, not this column.
+                    await DatabaseHelper.sync_ow_role_seed(
+                        user.id, game_id, stats.effective_mmr
+                    )
                     log_channel_id = await DatabaseHelper.get_config("log_channel_id")
                     if log_channel_id:
                         log_ch = interaction.guild.get_channel(int(log_channel_id))
@@ -2591,7 +2974,6 @@ class CustomMatch(commands.Cog):
             # Without this re-check a 10th-and-11th concurrent joiner both pass the
             # outer guard then add themselves, producing 11 players in a 10-player queue
             # and triggering _restore_queue_to_waiting which wipes the whole ready check.
-            queue_full = False
             join_rejected_in_lock = False
             join_rejected_msg = "Queue is no longer accepting players."
             async with self.queue_locks.setdefault(queue_id, asyncio.Lock()):
@@ -2624,6 +3006,16 @@ class CustomMatch(commands.Cog):
                     # Check if queue is full (must be checked atomically with add)
                     effective_pc = self._get_effective_player_count(game, queue_state)
                     queue_full = len(queue_state.players) >= effective_pc
+
+                    if queue_full:
+                        # Claim the pop *inside* the lock. Without this, a second
+                        # player could join between here and start_ready_check's
+                        # player-count guard, pushing the queue to 11/10 — the guard
+                        # would then abort and _restore_queue_to_waiting would leave
+                        # a full queue parked in "waiting" with no Ready buttons,
+                        # forcing an admin Force Start.
+                        queue_state.state = "ready_check"
+                        queue_state.ready_check_started = datetime.now(timezone.utc)
 
             if join_rejected_in_lock:
                 # Clean up the DB entry we inserted before acquiring the lock —
@@ -2658,12 +3050,47 @@ class CustomMatch(commands.Cog):
 
             # Start ready check when queue fills
             if queue_full:
-                # Clean up LF1 notification since queue is now full
-                await self._delete_lf1_message(game.game_id)
-                await self.start_ready_check(interaction.channel, game, queue_state)
+                # Overwatch viability gate: only pop if a strict 2-2-2 can form.
+                # Only applies to the real 6v6 role queue (12 players, non-secondary);
+                # any other config can't form 2-2-2 and must not be held hostage.
+                ow_hold = False
+                if is_overwatch_game(game) and not queue_state.is_secondary and effective_pc == 12:
+                    _counts, feasible, deficit = await self._ow_composition_summary(
+                        list(queue_state.players.keys()), game.game_id
+                    )
+                    if not feasible:
+                        ow_hold = True
+                        need = ", ".join(f"+{n} {r}" for r, n in deficit.items() if n > 0) or "a different role mix"
+                        try:
+                            await interaction.channel.send(
+                                f"⚠️ **{game.name} queue is full but can't form a 2-2-2 match** — need {need}. "
+                                f"Someone please leave so a differently-rolled player can join."
+                            )
+                        except Exception as e:
+                            logger.error(f"OW composition notice failed for game {game.game_id}: {e}")
+
+                if ow_hold:
+                    # Release the claim we took in the lock — the queue keeps
+                    # collecting players until a 2-2-2 becomes possible.
+                    async with self.queue_locks.setdefault(queue_id, asyncio.Lock()):
+                        if queue_state.state == "ready_check":
+                            queue_state.state = "waiting"
+                            queue_state.ready_check_started = None
+                else:
+                    # Clean up LF1 notification since queue is now full
+                    await self._delete_lf1_message(game.game_id)
+                    await self.start_ready_check(
+                        interaction.channel, game, queue_state, pre_claimed=True
+                    )
 
         except Exception as e:
             logger.error(f"Error in handle_queue_join: {e}", exc_info=True)
+            # The pop claim must not outlive a failed join, or the queue is stuck
+            # in ready_check with no Ready buttons.
+            if queue_full and queue_state.state == "ready_check" \
+                    and queue_id not in self.ready_check_tasks:
+                queue_state.state = "waiting"
+                queue_state.ready_check_started = None
             try:
                 await interaction.followup.send(
                     "An error occurred while joining the queue. Please try again.",
@@ -2744,9 +3171,12 @@ class CustomMatch(commands.Cog):
             except Exception:
                 pass
     
-    async def start_ready_check(self, channel: discord.TextChannel, game: GameConfig, 
-                                 queue_state: QueueState):
-        """Start the ready check phase."""
+    async def start_ready_check(self, channel: discord.TextChannel, game: GameConfig,
+                                 queue_state: QueueState, pre_claimed: bool = False):
+        """Start the ready check phase.
+
+        pre_claimed=True means the caller already flipped state to "ready_check"
+        while holding the queue lock, so no further joins can change the roster."""
         # Guard: verify player count is still correct before committing to ready-check.
         # A concurrent start_ready_check from another game's queue may have removed
         # one of our players in the window between queue_full being set and this call.
@@ -2763,9 +3193,12 @@ class CustomMatch(commands.Cog):
         # Acquire ready_check_lock for the state transition to prevent races
         # with concurrent handle_ready or timeout tasks.
         async with self.ready_check_lock:
-            if queue_state.state != "waiting":
+            expected = "ready_check" if pre_claimed else "waiting"
+            if queue_state.state != expected:
                 # Another coroutine already transitioned this queue
-                logger.warning(f"start_ready_check: state is {queue_state.state}, expected waiting — aborting")
+                logger.warning(
+                    f"start_ready_check: state is {queue_state.state}, expected {expected} — aborting"
+                )
                 return
             queue_state.state = "ready_check"
             queue_state.ready_check_started = datetime.now(timezone.utc)
@@ -3285,12 +3718,14 @@ class CustomMatch(commands.Cog):
             await self._restore_queue_to_waiting(channel, game, queue_state)
             return
 
-        # Get category — use per-game override if set, fall back to global config
-        if game.category_id:
-            category_id = str(game.category_id)
-        else:
+        # Resolve the match category from the queue channel's own category, so lobbies/VCs
+        # are created in the same category as (and directly under) the queue channel they
+        # came from. Fall back to the configured global category if the queue channel is
+        # not inside any category.
+        category = channel.category
+        if category is None:
             category_id = await DatabaseHelper.get_config("category_id")
-        category = guild.get_channel(int(category_id)) if category_id else None
+            category = guild.get_channel(int(category_id)) if category_id else None
 
         if not category:
             await channel.send("Error: Category not configured. Contact an admin.")
@@ -3329,7 +3764,17 @@ class CustomMatch(commands.Cog):
                 await self.start_captain_draft(guild, category, game, match_id, player_ids, red_role, blue_role)
             else:
                 # MMR or Random - balance teams and create match channel
-                if effective_qt == QueueType.MMR:
+                ow_roles_for_match = None
+                if is_overwatch_game(game) and not queue_state.is_secondary and len(player_ids) == 12:
+                    # Overwatch: strict 2-2-2 weighted balancer (regardless of the
+                    # configured MMR/random type). Stash the role map so match
+                    # creation can persist each player's assigned role.
+                    red_team, blue_team, ow_role_map = await self.balance_teams_overwatch(
+                        player_ids, game.game_id
+                    )
+                    self._ow_role_assignments[match_id] = ow_role_map
+                    ow_roles_for_match = ow_role_map
+                elif effective_qt == QueueType.MMR:
                     red_team, blue_team = await self.balance_teams_mmr(player_ids, game.game_id)
                 else:
                     random.shuffle(player_ids)
@@ -3338,7 +3783,8 @@ class CustomMatch(commands.Cog):
                     blue_team = player_ids[mid:]
 
                 await self.create_match_channel(guild, category, game, match_id,
-                                                 red_team, blue_team, red_role, blue_role)
+                                                 red_team, blue_team, red_role, blue_role,
+                                                 ow_roles=ow_roles_for_match)
 
             # Match creation succeeded - clean up old queue and start new one.
             # Start new queue FIRST so there's always a queue available, then clean up old.
@@ -3620,6 +4066,226 @@ class CustomMatch(commands.Cog):
         blue_team = [p for p in pid_list if p not in red_frozen]
         return red_team, blue_team
 
+    @staticmethod
+    def _ow_best_team_assignment(
+        team_pids: List[int],
+        sel_map: Dict[int, set],
+        role_mmr: Dict[Tuple[int, str], int],
+        weights: Dict[str, float],
+    ) -> Tuple[Optional[float], Optional[Dict[int, str]]]:
+        """Best (max weighted-strength) strict 2-2-2 assignment for a team of 6.
+
+        Each player is placed only in a role they selected; the lineup that
+        maximizes the team's weighted strength is returned (best foot forward).
+        Returns (strength, {pid: role}) or (None, None) if no valid 2-2-2 exists.
+        """
+        best_strength: Optional[float] = None
+        best_assign: Optional[Dict[int, str]] = None
+        for tanks in itertools.combinations(team_pids, 2):
+            if not all('Tank' in sel_map.get(p, ()) for p in tanks):
+                continue
+            rest = [p for p in team_pids if p not in tanks]
+            for dps in itertools.combinations(rest, 2):
+                if not all('DPS' in sel_map.get(p, ()) for p in dps):
+                    continue
+                supports = [p for p in rest if p not in dps]
+                if not all('Support' in sel_map.get(p, ()) for p in supports):
+                    continue
+                strength = (
+                    weights['Tank'] * sum(role_mmr[(p, 'Tank')] for p in tanks)
+                    + weights['DPS'] * sum(role_mmr[(p, 'DPS')] for p in dps)
+                    + weights['Support'] * sum(role_mmr[(p, 'Support')] for p in supports)
+                )
+                if best_strength is None or strength > best_strength:
+                    best_strength = strength
+                    best_assign = {}
+                    for p in tanks:
+                        best_assign[p] = 'Tank'
+                    for p in dps:
+                        best_assign[p] = 'DPS'
+                    for p in supports:
+                        best_assign[p] = 'Support'
+        return best_strength, best_assign
+
+    async def balance_teams_overwatch(
+        self, player_ids: List[int], game_id: int,
+        force_shuffle_from: Optional[Dict[int, str]] = None,
+        min_swap_pct: float = 0.0,
+    ) -> Tuple[List[int], List[int], Dict[int, str]]:
+        """Strict 2-2-2 balancer for Overwatch (hidden per-role MMR).
+
+        Enumerates 6v6 splits; for each, computes the best weighted 2-2-2 lineup
+        per team (weighting tank/support gaps heavier than dps) and keeps the
+        split whose two lineups are closest in weighted strength, with the same
+        top/bottom separation and anti-repeat tiebreakers as balance_teams_mmr.
+
+        Returns (red_team, blue_team, {player_id: assigned_role}). Falls back to
+        the single-MMR balancer (empty role map) only if no valid 2-2-2 split
+        exists — the viability gate should prevent that.
+        """
+        n = len(player_ids)
+
+        # Role selections -> set of allowed roles per player (empty => treat as fill)
+        raw_sel = await DatabaseHelper.get_bulk_ow_role_selection(player_ids, game_id)
+        sel_map: Dict[int, set] = {}
+        for pid in player_ids:
+            roles = {r for r, _rank in raw_sel.get(pid, [])}
+            if not roles:
+                logger.warning(
+                    f"balance_teams_overwatch: player {pid} has no OW role selection; "
+                    f"treating as fill (all roles)"
+                )
+                roles = set(OW_ROLES)
+            sel_map[pid] = roles
+
+        # Per-role effective MMR for each selectable role
+        role_mmr: Dict[Tuple[int, str], int] = {}
+        for pid in player_ids:
+            for role in sel_map[pid]:
+                stats = await DatabaseHelper.get_ow_role_stats(pid, game_id, role)
+                role_mmr[(pid, role)] = stats.effective_mmr
+
+        weights = await DatabaseHelper.get_ow_role_weights(game_id)
+
+        # Guard: an even 6v6 is required for strict 2-2-2
+        if n != 12:
+            logger.warning(
+                f"balance_teams_overwatch: expected 12 players, got {n}; "
+                f"falling back to single-MMR balancer"
+            )
+            red, blue = await self.balance_teams_mmr(player_ids, game_id)
+            return red, blue, {}
+
+        team_size = 6
+
+        # Per-player peak weighted value for top/bottom separation
+        peak_val = {
+            pid: max(weights[r] * role_mmr[(pid, r)] for r in sel_map[pid])
+            for pid in player_ids
+        }
+        sorted_by_val = sorted(player_ids, key=lambda p: peak_val[p], reverse=True)
+        top1, top2 = sorted_by_val[0], sorted_by_val[1]
+        bottom1, bottom2 = sorted_by_val[-1], sorted_by_val[-2]
+        apply_bottom_sep = (
+            bottom1 not in (top1, top2) and bottom2 not in (top1, top2)
+        )
+
+        prev_map = await DatabaseHelper.get_previous_team_assignment(
+            player_ids, game_id,
+            overlap_threshold=SHAKE_OVERLAP_THRESHOLD,
+            lookback=SHAKE_LOOKBACK_MATCHES,
+        )
+
+        # Memoize each 6-subset's best lineup (each subset scored once)
+        assign_cache: Dict[frozenset, Tuple[Optional[float], Optional[Dict[int, str]]]] = {}
+
+        def _team_assignment(pids_tuple):
+            key = frozenset(pids_tuple)
+            if key not in assign_cache:
+                assign_cache[key] = self._ow_best_team_assignment(
+                    list(pids_tuple), sel_map, role_mmr, weights
+                )
+            return assign_cache[key]
+
+        # candidates: (weighted_diff, repeat_penalty, red_frozen, role_map)
+        candidates = []
+        for red_group in itertools.combinations(player_ids, team_size):
+            red_set = set(red_group)
+            # top-2 separation
+            if (top1 in red_set) == (top2 in red_set):
+                continue
+            # bottom-2 separation
+            if apply_bottom_sep and (bottom1 in red_set) == (bottom2 in red_set):
+                continue
+            blue_group = tuple(p for p in player_ids if p not in red_set)
+
+            red_str, red_assign = _team_assignment(red_group)
+            if red_assign is None:
+                continue
+            blue_str, blue_assign = _team_assignment(blue_group)
+            if blue_assign is None:
+                continue
+
+            diff = abs(red_str - blue_str)
+            if prev_map:
+                repeat_penalty = (
+                    sum(1 for p in red_group if prev_map.get(p) == 'red')
+                    + sum(1 for p in blue_group if prev_map.get(p) == 'blue')
+                )
+            else:
+                repeat_penalty = 0
+            role_map = {**red_assign, **blue_assign}
+            candidates.append((diff, repeat_penalty, frozenset(red_group), role_map))
+
+        # Retry without bottom-2 constraint if it over-constrained
+        if not candidates and apply_bottom_sep:
+            logger.warning(
+                f"balance_teams_overwatch: bottom-2 separation over-constrained for "
+                f"game {game_id}, retrying without it"
+            )
+            for red_group in itertools.combinations(player_ids, team_size):
+                red_set = set(red_group)
+                if (top1 in red_set) == (top2 in red_set):
+                    continue
+                blue_group = tuple(p for p in player_ids if p not in red_set)
+                red_str, red_assign = _team_assignment(red_group)
+                if red_assign is None:
+                    continue
+                blue_str, blue_assign = _team_assignment(blue_group)
+                if blue_assign is None:
+                    continue
+                diff = abs(red_str - blue_str)
+                repeat_penalty = 0
+                if prev_map:
+                    repeat_penalty = (
+                        sum(1 for p in red_group if prev_map.get(p) == 'red')
+                        + sum(1 for p in blue_group if prev_map.get(p) == 'blue')
+                    )
+                candidates.append((diff, repeat_penalty, frozenset(red_group),
+                                   {**red_assign, **blue_assign}))
+
+        if not candidates:
+            logger.error(
+                f"balance_teams_overwatch: no valid 2-2-2 split for game {game_id} "
+                f"(roster cannot form two teams); falling back to single-MMR balancer"
+            )
+            red, blue = await self.balance_teams_mmr(player_ids, game_id)
+            return red, blue, {}
+
+        # Filter by minimum swap percentage when force-shuffling
+        if force_shuffle_from and min_swap_pct > 0:
+            def _swap_pct(cand):
+                red_frozen = cand[2]
+                changed = sum(
+                    1 for p in player_ids
+                    if (p in red_frozen) != (force_shuffle_from.get(p) == 'red')
+                )
+                return changed / len(player_ids)
+            filtered = [c for c in candidates if _swap_pct(c) >= min_swap_pct]
+            if filtered:
+                candidates = filtered
+
+        # Tier 1: within SHAKE_MMR_TOLERANCE of the best weighted diff
+        best_diff = min(c[0] for c in candidates)
+        tier1 = [c for c in candidates if c[0] <= best_diff + SHAKE_MMR_TOLERANCE]
+        # Tier 2: repeat penalty — maximize change when force-shuffling, else minimize
+        if force_shuffle_from:
+            best_repeat = max(c[1] for c in tier1)
+        else:
+            best_repeat = min(c[1] for c in tier1)
+        tier2 = [c for c in tier1 if c[1] == best_repeat]
+
+        logger.debug(
+            f"balance_teams_overwatch: {len(candidates)} candidates, {len(tier1)} tier1, "
+            f"{len(tier2)} tier2, best_weighted_diff={best_diff:.0f}"
+        )
+
+        chosen = random.choice(tier2)
+        red_frozen, role_map = chosen[2], chosen[3]
+        red_team = [p for p in player_ids if p in red_frozen]
+        blue_team = [p for p in player_ids if p not in red_frozen]
+        return red_team, blue_team, role_map
+
     def _balance_teams_legacy(
         self,
         players_with_mmr: List[Tuple[int, int]],
@@ -3686,8 +4352,13 @@ class CustomMatch(commands.Cog):
                                    game: GameConfig, match_id: int, player_ids: List[int],
                                    red_role: discord.Role, blue_role: discord.Role):
         """Start the captain draft phase."""
-        # Create draft channel
-        channel_name = await self.get_next_channel_suffix(guild, category, "draft-lobby")
+        # Create draft channel — prefixed with the game short name and match code
+        short_name = resolve_short_name(game)
+        match_data = await DatabaseHelper.get_match(match_id)
+        short_id = match_data.get("short_id", str(match_id)) if match_data else str(match_id)
+        channel_name = await self.get_next_channel_suffix(
+            guild, category, f"{short_name}-draft{short_id}"
+        )
         
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
@@ -3705,6 +4376,9 @@ class CustomMatch(commands.Cog):
         
         draft_channel = await category.create_text_channel(name=channel_name, overwrites=overwrites)
         await DatabaseHelper.update_match(match_id, draft_channel_id=draft_channel.id)
+
+        # Position the draft lobby directly under the game's queue channel (same category only)
+        await self._position_under_queue_channel(guild, game, draft_channel, category)
         
         # Select captains based on method
         if game.captain_selection == CaptainSelection.HIGHEST_MMR:
@@ -4020,14 +4694,25 @@ class CustomMatch(commands.Cog):
                                     game: GameConfig, match_id: int,
                                     red_team: List[int], blue_team: List[int],
                                     red_role: discord.Role, blue_role: discord.Role,
-                                    draft_channel: discord.TextChannel = None):
-        """Create the match channel and assign roles."""
+                                    draft_channel: discord.TextChannel = None,
+                                    ow_roles: Optional[Dict[int, str]] = None):
+        """Create the match channel and assign roles.
+
+        ``ow_roles`` carries the strict-2-2-2 assignment straight from the
+        balancer. Passing it explicitly keeps the map off the in-memory
+        ``_ow_role_assignments`` stash, which would be lost on a restart between
+        balancing and persisting — dropping the match into the no-recorded-role
+        fallback. The stash remains the fallback for callers that don't pass it.
+        """
         # Get match short_id for naming
         match_data = await DatabaseHelper.get_match(match_id)
         short_id = match_data.get("short_id", str(match_id)) if match_data else str(match_id)
 
-        # Create channel named "lobby-{short_id}"
-        channel_name = f"lobby-{short_id}"
+        # Per-game prefix keeps lobbies distinguishable within the shared category
+        short_name = resolve_short_name(game)
+
+        # Create channel named "{short_name}-lobby{short_id}" (e.g. rivals-lobby9P83E)
+        channel_name = f"{short_name}-lobby{short_id}"
 
         # Get mod roles and admin role for permissions
         mod_role_ids = await DatabaseHelper.get_mod_roles()
@@ -4068,6 +4753,9 @@ class CustomMatch(commands.Cog):
         match_channel = await category.create_text_channel(name=channel_name, overwrites=overwrites)
         await DatabaseHelper.update_match(match_id, channel_id=match_channel.id)
 
+        # Position the lobby directly under the game's queue channel (same category only)
+        await self._position_under_queue_channel(guild, game, match_channel, category)
+
         # Create team VCs if enabled
         red_vc_id = None
         blue_vc_id = None
@@ -4088,16 +4776,16 @@ class CustomMatch(commands.Cog):
                     red_role: discord.PermissionOverwrite(view_channel=False, connect=False, speak=False)
                 }
 
-                # Name VCs after the team role (e.g., "Red 72KW9" or "Blue 72KW9")
+                # Prefix VCs with the game short name (e.g., "rivals-red9P83E" / "rivals-blue9P83E")
                 red_vc = None
                 blue_vc = None
                 try:
                     red_vc = await category.create_voice_channel(
-                        name=red_role.name,
+                        name=f"{short_name}-red{short_id}",
                         overwrites=red_vc_overwrites
                     )
                     blue_vc = await category.create_voice_channel(
-                        name=blue_role.name,
+                        name=f"{short_name}-blue{short_id}",
                         overwrites=blue_vc_overwrites
                     )
                     red_vc_id = red_vc.id
@@ -4120,13 +4808,18 @@ class CustomMatch(commands.Cog):
             existing_players = await DatabaseHelper.get_match_players(match_id)
             existing_player_ids = {p["player_id"] for p in existing_players}
 
+            # Overwatch: the strict-2-2-2 balancer assigned each player a role;
+            # persist it (silent record; NULL for all other games).
+            if ow_roles is None:
+                ow_roles = self._ow_role_assignments.get(match_id, {})
+
             for pid in red_team:
                 member = guild.get_member(pid)
                 if member:
                     await member.add_roles(red_role)
                 # Check if already added (captains)
                 if pid not in existing_player_ids:
-                    await DatabaseHelper.add_match_player(match_id, pid, "red")
+                    await DatabaseHelper.add_match_player(match_id, pid, "red", role=ow_roles.get(pid))
                     existing_player_ids.add(pid)
 
             for pid in blue_team:
@@ -4134,8 +4827,11 @@ class CustomMatch(commands.Cog):
                 if member:
                     await member.add_roles(blue_role)
                 if pid not in existing_player_ids:
-                    await DatabaseHelper.add_match_player(match_id, pid, "blue")
+                    await DatabaseHelper.add_match_player(match_id, pid, "blue", role=ow_roles.get(pid))
                     existing_player_ids.add(pid)
+
+            # Role map persisted — drop it to avoid leaking match state
+            self._ow_role_assignments.pop(match_id, None)
         except Exception as e:
             logger.error(f"create_match_channel: role assignment failed for match #{match_id}: {e}")
             # Clean up created channels to avoid ghost channels
@@ -4611,7 +5307,8 @@ class CustomMatch(commands.Cog):
                                 blue_names.append(member.display_name if member else f"<@{pid}>")
                         teams_embed.add_field(name="Red Team", value="\n".join(red_names) or "—", inline=True)
                         teams_embed.add_field(name="Blue Team", value="\n".join(blue_names) or "—", inline=True)
-                    teams_msg = await queue_channel.send(embed=teams_embed)
+                    listen_view = ListenInView(self, match_id) if (red_vc_id and blue_vc_id) else None
+                    teams_msg = await queue_channel.send(embed=teams_embed, view=listen_view)
                     await DatabaseHelper.update_match(match_id, queue_teams_msg_id=teams_msg.id)
 
                     # Bump the active queue message so it's always the newest in the channel
@@ -4805,6 +5502,201 @@ class CustomMatch(commands.Cog):
         async with self.match_finalize_locks[match_id]:
             await self._finalize_match_inner(guild, match_id, winning_team)
 
+    async def _finalize_standard_mmr(self, match_id, game, winners, losers, all_stats, winning_team, now):
+        """Single per-game Elo path (all non-Overwatch games). Mutates all_stats,
+        writes player_game_stats + mmr_history, and marks the match decided."""
+        # Detect returning players (42+ days inactive) and grant boosted K-factor games
+        for pid in winners + losers:
+            stats = all_stats[pid]
+            if stats.last_played and stats.returning_games_remaining == 0:
+                days_inactive = (now - stats.last_played).days
+                if days_inactive >= 42:
+                    stats.returning_games_remaining = 5
+                    logger.info(
+                        f"Returning player detected: {pid} (game {game.game_id}), "
+                        f"{days_inactive} days inactive, granting 5 boosted games"
+                    )
+
+        avg_winner_mmr = sum(all_stats[pid].effective_mmr for pid in winners) / len(winners) if winners else 1000
+        avg_loser_mmr = sum(all_stats[pid].effective_mmr for pid in losers) / len(losers) if losers else 1000
+
+        # Calculate expected scores (ELO formula — divisor 600 for 500-6000 MMR range)
+        expected_winner = 1 / (1 + 10 ** ((avg_loser_mmr - avg_winner_mmr) / 600))
+        expected_loser = 1 - expected_winner
+
+        # Fetch current win streaks for bonus calculation
+        win_streaks = await DatabaseHelper.get_current_win_streaks_batch(winners, game.game_id)
+
+        # Pre-compute all MMR changes
+        winner_stats_list = []
+        for pid in winners:
+            stats = all_stats[pid]
+            k = stats.get_k_factor()
+            mmr_change = int(k * (1 - expected_winner))
+            # Win streak bonus: current streak from DB is pre-this-game, so +1 for this win
+            current_streak = win_streaks.get(pid, 0) + 1
+            mmr_change = int(mmr_change * _streak_bonus_multiplier(current_streak))
+            mmr_change = max(1, mmr_change)
+            old_mmr = stats.mmr
+            stats.mmr += mmr_change
+            stats.wins += 1
+            stats.games_played += 1
+            stats.last_played = now
+            winner_stats_list.append((pid, old_mmr, stats))
+
+        # Floor at the game's own lowest rank band; a floor below it strands
+        # players where update_mmr_roles can find no role to grant.
+        mmr_floor = await DatabaseHelper.get_mmr_floor(game.game_id)
+
+        loser_stats_list = []
+        for pid in losers:
+            stats = all_stats[pid]
+            k = stats.get_k_factor()
+            mmr_change = int(k * (0 - expected_loser))
+            old_mmr = stats.mmr
+            stats.mmr = max(mmr_floor, stats.mmr + mmr_change)
+            stats.losses += 1
+            stats.games_played += 1
+            stats.last_played = now
+            loser_stats_list.append((pid, old_mmr, stats))
+
+        # Decrement returning player counters after MMR is computed
+        for pid in winners + losers:
+            stats = all_stats[pid]
+            if stats.returning_games_remaining > 0:
+                stats.returning_games_remaining -= 1
+
+        # Single atomic transaction for all MMR writes + match winner (all-or-nothing)
+        async with DatabaseHelper._get_db() as _mmr_db:
+            # Mark match as decided within the same transaction as MMR writes
+            await _mmr_db.execute(
+                "UPDATE matches SET winning_team = ?, ended_at = ? WHERE match_id = ?",
+                (winning_team.value, now.isoformat(), match_id)
+            )
+            for pid, old_mmr, stats in winner_stats_list + loser_stats_list:
+                await _mmr_db.execute(
+                    """INSERT OR REPLACE INTO player_game_stats
+                       (player_id, game_id, mmr, games_played, wins, losses, admin_offset, last_played, returning_games_remaining, platform)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (stats.player_id, stats.game_id, stats.mmr, stats.games_played,
+                     stats.wins, stats.losses, stats.admin_offset,
+                     stats.last_played.isoformat() if stats.last_played else None,
+                     stats.returning_games_remaining, stats.platform)
+                )
+                await _mmr_db.execute(
+                    """INSERT INTO mmr_history (player_id, game_id, match_id, mmr_before, mmr_after, change)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (pid, game.game_id, match_id, old_mmr, stats.mmr, stats.mmr - old_mmr)
+                )
+            await _mmr_db.commit()
+
+        # (player_id, old_mmr, change) for the results/log embeds
+        winner_results = [(pid, old_mmr, stats.mmr - old_mmr) for pid, old_mmr, stats in winner_stats_list]
+        loser_results = [(pid, old_mmr, stats.mmr - old_mmr) for pid, old_mmr, stats in loser_stats_list]
+        return winner_results, loser_results
+
+    async def _finalize_overwatch_mmr(self, match_id, game, players, winners, losers, winning_team, now):
+        """Per-role Elo for Overwatch (hidden). The rating for the role each
+        player was assigned (match_players.role) moves on team-average-vs-team-
+        average Elo, reusing the same K-factor, streak bonus and 500 floor.
+        Aggregate wins/losses are also written to player_game_stats so the
+        role-agnostic leaderboard works; the aggregate MMR column is left alone."""
+        # Role each player actually played (silent record from the 2-2-2 balancer)
+        role_by_pid = {p["player_id"]: p.get("role") for p in players}
+
+        role_stats = {}
+        for pid in winners + losers:
+            role = role_by_pid.get(pid)
+            if not role:
+                # Sub or missing assignment: fall back to their top selected role
+                sel = await DatabaseHelper.get_ow_role_selection(pid, game.game_id)
+                role = sel[0][0] if sel else "Tank"
+                logger.warning(
+                    f"OW finalize: no recorded role for player {pid} in match {match_id}; "
+                    f"crediting '{role}'"
+                )
+            role_stats[pid] = await DatabaseHelper.get_ow_role_stats(pid, game.game_id, role)
+
+        # Returning-player boost keyed on that role's own activity
+        for pid in winners + losers:
+            rs = role_stats[pid]
+            if rs.last_played and rs.returning_games_remaining == 0:
+                if (now - rs.last_played).days >= 42:
+                    rs.returning_games_remaining = 5
+
+        avg_winner = sum(role_stats[pid].effective_mmr for pid in winners) / len(winners) if winners else 1000
+        avg_loser = sum(role_stats[pid].effective_mmr for pid in losers) / len(losers) if losers else 1000
+        expected_winner = 1 / (1 + 10 ** ((avg_loser - avg_winner) / 600))
+        expected_loser = 1 - expected_winner
+
+        win_streaks = await DatabaseHelper.get_current_win_streaks_batch(winners, game.game_id)
+
+        # Floor at the game's own lowest rank band (800 for OW, not the old 500)
+        mmr_floor = await DatabaseHelper.get_mmr_floor(game.game_id)
+
+        for pid in winners:
+            rs = role_stats[pid]
+            change = int(rs.get_k_factor() * (1 - expected_winner))
+            change = int(change * _streak_bonus_multiplier(win_streaks.get(pid, 0) + 1))
+            rs.mmr += max(1, change)
+            rs.wins += 1
+            rs.games_played += 1
+            rs.last_played = now
+        for pid in losers:
+            rs = role_stats[pid]
+            change = int(rs.get_k_factor() * (0 - expected_loser))
+            rs.mmr = max(mmr_floor, rs.mmr + change)
+            rs.losses += 1
+            rs.games_played += 1
+            rs.last_played = now
+        for pid in winners + losers:
+            rs = role_stats[pid]
+            if rs.returning_games_remaining > 0:
+                rs.returning_games_remaining -= 1
+
+        # Aggregate wins/losses (leaderboard). MMR column untouched (hidden for OW).
+        agg = {pid: await DatabaseHelper.get_player_stats(pid, game.game_id) for pid in winners + losers}
+        for pid in winners:
+            agg[pid].wins += 1
+            agg[pid].games_played += 1
+            agg[pid].last_played = now
+        for pid in losers:
+            agg[pid].losses += 1
+            agg[pid].games_played += 1
+            agg[pid].last_played = now
+
+        # Atomic: mark decided + per-role stats + aggregate stats
+        async with DatabaseHelper._get_db() as _db:
+            await _db.execute(
+                "UPDATE matches SET winning_team = ?, ended_at = ? WHERE match_id = ?",
+                (winning_team.value, now.isoformat(), match_id)
+            )
+            for pid in winners + losers:
+                rs = role_stats[pid]
+                await _db.execute(
+                    """INSERT OR REPLACE INTO ow_role_stats
+                       (player_id, game_id, role, mmr, games_played, wins, losses,
+                        admin_offset, last_played, returning_games_remaining)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (rs.player_id, rs.game_id, rs.role, rs.mmr, rs.games_played, rs.wins,
+                     rs.losses, rs.admin_offset,
+                     rs.last_played.isoformat() if rs.last_played else None,
+                     rs.returning_games_remaining)
+                )
+                a = agg[pid]
+                await _db.execute(
+                    """INSERT OR REPLACE INTO player_game_stats
+                       (player_id, game_id, mmr, games_played, wins, losses, admin_offset, last_played, returning_games_remaining, platform)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (a.player_id, a.game_id, a.mmr, a.games_played, a.wins, a.losses,
+                     a.admin_offset, a.last_played.isoformat() if a.last_played else None,
+                     a.returning_games_remaining, a.platform)
+                )
+            await _db.commit()
+
+        # Overwatch MMR is hidden — no per-player deltas surface in the results embeds.
+        return [], []
+
     async def _finalize_match_inner(self, guild: discord.Guild, match_id: int, winning_team: Team):
         """Core finalize logic — caller MUST hold self.match_finalize_locks[match_id]."""
         match = await DatabaseHelper.get_match(match_id)
@@ -4818,6 +5710,10 @@ class CustomMatch(commands.Cog):
         # Determine winners and losers
         winners = [p["player_id"] for p in players if p["team"] == winning_team.value]
         losers = [p["player_id"] for p in players if p["team"] != winning_team.value]
+
+        # Economy: pay everyone who played. Guarded above by the already-decided
+        # early return, so a match can only pay out once.
+        award_many(self.bot, winners + losers, "custom_match", match_id=match_id)
 
         # Single-pass: fetch all player stats once, compute averages + changes from that
         all_stats = {}
@@ -4844,110 +5740,19 @@ class CustomMatch(commands.Cog):
             await self.cleanup_match(guild, match)
             return
         else:
-            # Standard queue: full MMR calculation
-
-            # Detect returning players (42+ days inactive) and grant boosted K-factor games
-            for pid in winners + losers:
-                stats = all_stats[pid]
-                if stats.last_played and stats.returning_games_remaining == 0:
-                    days_inactive = (now - stats.last_played).days
-                    if days_inactive >= 42:
-                        stats.returning_games_remaining = 5
-                        logger.info(
-                            f"Returning player detected: {pid} (game {game.game_id}), "
-                            f"{days_inactive} days inactive, granting 5 boosted games"
-                        )
-
-            avg_winner_mmr = sum(all_stats[pid].effective_mmr for pid in winners) / len(winners) if winners else 1000
-            avg_loser_mmr = sum(all_stats[pid].effective_mmr for pid in losers) / len(losers) if losers else 1000
-
-            # Calculate expected scores (ELO formula — divisor 600 for 500-6000 MMR range)
-            expected_winner = 1 / (1 + 10 ** ((avg_loser_mmr - avg_winner_mmr) / 600))
-            expected_loser = 1 - expected_winner
-
-            # Fetch current win streaks for bonus calculation
-            win_streaks = await DatabaseHelper.get_current_win_streaks_batch(winners, game.game_id)
-
-            # Pre-compute all MMR changes
-            winner_results = []  # (player_id, old_mmr, mmr_change)
-            winner_stats_list = []
-            for pid in winners:
-                stats = all_stats[pid]
-                k = stats.get_k_factor()
-                mmr_change = int(k * (1 - expected_winner))
-                # Win streak bonus: current streak from DB is pre-this-game, so +1 for this win
-                current_streak = win_streaks.get(pid, 0) + 1
-                mmr_change = int(mmr_change * _streak_bonus_multiplier(current_streak))
-                mmr_change = max(1, mmr_change)
-                old_mmr = stats.mmr
-                stats.mmr += mmr_change
-                stats.wins += 1
-                stats.games_played += 1
-                stats.last_played = now
-                winner_results.append((pid, old_mmr, mmr_change))
-                winner_stats_list.append((pid, old_mmr, stats))
-
-            loser_results = []  # (player_id, old_mmr, mmr_change)
-            loser_stats_list = []
-            for pid in losers:
-                stats = all_stats[pid]
-                k = stats.get_k_factor()
-                mmr_change = int(k * (0 - expected_loser))
-                old_mmr = stats.mmr
-                stats.mmr = max(500, stats.mmr + mmr_change)  # Floor at 500 — minimum MMR tier
-                actual_change = stats.mmr - old_mmr
-                stats.losses += 1
-                stats.games_played += 1
-                stats.last_played = now
-                loser_results.append((pid, old_mmr, actual_change))
-                loser_stats_list.append((pid, old_mmr, stats))
-
-            # Decrement returning player counters after MMR is computed
-            for pid in winners + losers:
-                stats = all_stats[pid]
-                if stats.returning_games_remaining > 0:
-                    stats.returning_games_remaining -= 1
-
-            # Single atomic transaction for all MMR writes + match winner (all-or-nothing)
-            async with DatabaseHelper._get_db() as _mmr_db:
-                # Mark match as decided within the same transaction as MMR writes
-                await _mmr_db.execute(
-                    "UPDATE matches SET winning_team = ?, ended_at = ? WHERE match_id = ?",
-                    (winning_team.value, now.isoformat(), match_id)
+            # Standard queue: full stat calculation. Overwatch uses a separate
+            # per-role Elo engine (hidden MMR); every other game uses the single
+            # per-game Elo path. Both write wins/losses so the leaderboard works.
+            if is_overwatch_game(game):
+                winner_results, loser_results = await self._finalize_overwatch_mmr(
+                    match_id, game, players, winners, losers, winning_team, now
                 )
-                for pid, old_mmr, stats in winner_stats_list:
-                    await _mmr_db.execute(
-                        """INSERT OR REPLACE INTO player_game_stats
-                           (player_id, game_id, mmr, games_played, wins, losses, admin_offset, last_played, returning_games_remaining)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (stats.player_id, stats.game_id, stats.mmr, stats.games_played,
-                         stats.wins, stats.losses, stats.admin_offset,
-                         stats.last_played.isoformat() if stats.last_played else None,
-                         stats.returning_games_remaining)
-                    )
-                    await _mmr_db.execute(
-                        """INSERT INTO mmr_history (player_id, game_id, match_id, mmr_before, mmr_after, change)
-                           VALUES (?, ?, ?, ?, ?, ?)""",
-                        (pid, game.game_id, match_id, old_mmr, stats.mmr, stats.mmr - old_mmr)
-                    )
-                for pid, old_mmr, stats in loser_stats_list:
-                    await _mmr_db.execute(
-                        """INSERT OR REPLACE INTO player_game_stats
-                           (player_id, game_id, mmr, games_played, wins, losses, admin_offset, last_played, returning_games_remaining)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (stats.player_id, stats.game_id, stats.mmr, stats.games_played,
-                         stats.wins, stats.losses, stats.admin_offset,
-                         stats.last_played.isoformat() if stats.last_played else None,
-                         stats.returning_games_remaining)
-                    )
-                    await _mmr_db.execute(
-                        """INSERT INTO mmr_history (player_id, game_id, match_id, mmr_before, mmr_after, change)
-                           VALUES (?, ?, ?, ?, ?, ?)""",
-                        (pid, game.game_id, match_id, old_mmr, stats.mmr, stats.mmr - old_mmr)
-                    )
-                await _mmr_db.commit()
+            else:
+                winner_results, loser_results = await self._finalize_standard_mmr(
+                    match_id, game, winners, losers, all_stats, winning_team, now
+                )
 
-            # Update rivalries
+            # Update rivalries (used by both paths — drives storylines for OW)
             for winner_id in winners:
                 for loser_id in losers:
                     await DatabaseHelper.update_rivalry(winner_id, loser_id, game.game_id)
@@ -4958,10 +5763,16 @@ class CustomMatch(commands.Cog):
                 decided_at=datetime.now(timezone.utc).isoformat()
             )
 
-            # Update MMR roles for all players (Discord API, safe outside lock)
+            # Update MMR roles for all players (Discord API, safe outside lock).
+            # Overwatch ranks off the player's highest role MMR.
             for pid in winners + losers:
-                stats = await DatabaseHelper.get_player_stats(pid, game.game_id)
-                await self.update_mmr_roles(guild, pid, game.game_id, stats.effective_mmr)
+                if is_overwatch_game(game):
+                    role_mmr = await DatabaseHelper.get_ow_player_peak_mmr(pid, game.game_id)
+                    if role_mmr is not None:
+                        await self.update_mmr_roles(guild, pid, game.game_id, role_mmr)
+                else:
+                    stats = await DatabaseHelper.get_player_stats(pid, game.game_id)
+                    await self.update_mmr_roles(guild, pid, game.game_id, stats.effective_mmr)
 
             # Cancel timeout task
             if match_id in self.match_timeout_tasks:
@@ -5027,13 +5838,6 @@ class CustomMatch(commands.Cog):
                 except Exception as e:
                     logger.error(f"Error editing pre-match log embed: {e}")
 
-        # Update persistent leaderboard
-        if game.leaderboard_channel_id:
-            try:
-                await self._update_persistent_leaderboard(guild, game)
-            except Exception as e:
-                logger.error(f"Error updating persistent leaderboard: {e}")
-
         # Clean up. For Rivals, keep the match text channel alive so players can
         # still upload the scoreboard screenshot — but tear down VCs, roles,
         # draft channel, and the queue-channel teams embed immediately.
@@ -5043,70 +5847,6 @@ class CustomMatch(commands.Cog):
             await self.cleanup_match(guild, match, skip_match_channel=True)
         else:
             await self.cleanup_match(guild, match)
-
-    async def _refresh_stale_leaderboards(self):
-        """Check each game's leaderboard message; refresh if it's showing a past month."""
-        try:
-            now = datetime.now(timezone.utc)
-            current_month = now.strftime('%B')
-            games = await DatabaseHelper.get_all_games()
-            for game in games:
-                if not game.leaderboard_channel_id:
-                    continue
-                channel = self.bot.get_channel(game.leaderboard_channel_id)
-                if not channel:
-                    continue
-                needs_refresh = False
-                if game.leaderboard_message_id:
-                    try:
-                        msg = await channel.fetch_message(game.leaderboard_message_id)
-                        if msg.embeds and current_month not in (msg.embeds[0].title or ''):
-                            needs_refresh = True
-                    except discord.NotFound:
-                        needs_refresh = True  # Message deleted; self-heal
-                    except Exception as e:
-                        logger.error(f"Error fetching leaderboard message for {game.name}: {e}")
-                else:
-                    needs_refresh = True
-                if needs_refresh:
-                    logger.info(f"Stale leaderboard detected for {game.name}, refreshing for {current_month}.")
-                    try:
-                        await self._update_persistent_leaderboard(channel.guild, game)
-                    except Exception as e:
-                        logger.error(f"Error refreshing stale leaderboard for {game.name}: {e}")
-        except Exception as e:
-            logger.error(f"Error in _refresh_stale_leaderboards: {e}")
-
-    async def monthly_leaderboard_check(self):
-        """Background task: at the start of each new month, refresh all leaderboard embeds."""
-        await self.bot.wait_until_ready()
-        # Immediately check for stale leaderboards (handles bot restarts after month change)
-        await self._refresh_stale_leaderboards()
-        last_month = datetime.now(EST).month
-        while not self.bot.is_closed():
-            try:
-                await asyncio.sleep(3600)  # Check every hour
-                now = datetime.now(EST)
-                if now.month != last_month:
-                    last_month = now.month
-                    month_name = now.strftime('%B')
-                    logger.info(f"New month detected ({month_name}), refreshing all leaderboard embeds.")
-                    games = await DatabaseHelper.get_all_games()
-                    for game in games:
-                        if not game.leaderboard_channel_id:
-                            continue
-                        channel = self.bot.get_channel(game.leaderboard_channel_id)
-                        if not channel:
-                            continue
-                        try:
-                            await self._update_persistent_leaderboard(channel.guild, game)
-                            logger.info(f"Leaderboard refreshed for {game.name} ({month_name})")
-                        except Exception as e:
-                            logger.error(f"Error refreshing leaderboard for {game.name}: {e}")
-            except asyncio.CancelledError:
-                return
-            except Exception as e:
-                logger.error(f"Error in monthly_leaderboard_check: {e}")
 
     async def stats_retry_poll(self):
         """Background poll loop: fetch Valorant stats for matches with pending retries."""
@@ -6866,6 +7606,10 @@ class CustomMatch(commands.Cog):
         Used by the Rivals flow on winner-call so players can still upload
         the scoreboard screenshot after VCs/roles/queue embeds are gone.
         """
+        # Drop any stashed Overwatch role map (normally popped at match creation;
+        # this covers matches that were cancelled/failed before persistence).
+        self._ow_role_assignments.pop(match.get("match_id"), None)
+
         # Delete match channel
         if match["channel_id"] and not skip_match_channel:
             try:
@@ -6956,6 +7700,16 @@ class CustomMatch(commands.Cog):
 
         # Get vote data for colored circle prefixes
         voter_teams = await DatabaseHelper.get_win_voter_teams(match_id)
+
+        # Overwatch: hidden MMR — show role-annotated rosters, no MMR/deltas.
+        if is_overwatch_game(game):
+            winner_lines = await self._ow_log_roster_lines(guild, match_id, winning_team.value, voter_teams)
+            loser_lines = await self._ow_log_roster_lines(guild, match_id, loser_team, voter_teams)
+            embed = discord.Embed(title=f"Match {short_id} — {game.name}", color=embed_color)
+            embed.add_field(name=f"🏆 {winner_team_name}", value="\n".join(winner_lines) or "—", inline=False)
+            embed.add_field(name=loser_team_name, value="\n".join(loser_lines) or "—", inline=False)
+            await channel.send(embed=embed)
+            return
 
         def fmt_line(pid: int, old_mmr: int, change: int) -> str:
             member = guild.get_member(pid)
@@ -7136,7 +7890,18 @@ class CustomMatch(commands.Cog):
             inline=True
         )
 
-        await channel.send(embed=embed)
+        # Only Rivals and Valorant have per-player stats worth pointing at;
+        # Overwatch runs on hidden MMR with nothing to show.
+        if is_rivals_game(game) or is_valorant_game(game):
+            embed.set_footer(text="Use /cm_stats to view your stats")
+
+        # Attach a grey Leaderboard button (handled by on_interaction, survives restarts)
+        view = discord.ui.View(timeout=None)
+        view.add_item(discord.ui.Button(
+            label="Leaderboard", style=discord.ButtonStyle.secondary,
+            custom_id=f"cm_lb_open:{game.game_id}"
+        ))
+        await channel.send(embed=embed, view=view)
 
     # -------------------------------------------------------------------------
     # LEADERBOARD & STATS
@@ -8032,65 +8797,51 @@ class CustomMatch(commands.Cog):
             'generated_at': now.strftime('%Y-%m-%d %H:%M UTC'),
         }
 
-    async def _build_leaderboard_text_embed(self, guild: discord.Guild, game_id: int,
-                                             monthly: bool = True) -> discord.Embed:
-        """Build a text-based leaderboard embed (top 20)."""
+    LEADERBOARD_PAGE_SIZE = 20
+
+    async def _build_leaderboard_page_embed(self, guild: discord.Guild, game_id: int,
+                                             monthly: bool = True, page: int = 0
+                                             ) -> Tuple[discord.Embed, int]:
+        """Build one page of the leaderboard. Returns (embed, total_pages)."""
+        per_page = self.LEADERBOARD_PAGE_SIZE
         game = await DatabaseHelper.get_game(game_id)
-        leaderboard = await DatabaseHelper.get_leaderboard(game_id, monthly=monthly, limit=20)
+        # Fetch a generous slice so we can paginate client-side
+        entries = await DatabaseHelper.get_leaderboard(game_id, monthly=monthly, limit=500)
         now = datetime.now(timezone.utc)
 
+        game_name = game.name if game else "Game"
         if monthly:
-            title = f"{game.name} Leaderboard — {now.strftime('%B')}"
+            title = f"{game_name} Leaderboard — {now.strftime('%B')}"
         else:
-            title = f"{game.name} Leaderboard — All-time"
+            title = f"{game_name} Leaderboard — All-time"
+
+        total_pages = max(1, math.ceil(len(entries) / per_page))
+        page = max(0, min(page, total_pages - 1))
 
         embed = discord.Embed(title=title, color=COLOR_NEUTRAL)
 
-        if not leaderboard:
+        if not entries:
             embed.description = "No matches played yet."
-        else:
-            lines = []
-            for i, entry in enumerate(leaderboard, 1):
-                player_id = entry["player_id"]
-                member = guild.get_member(player_id)
-                name = member.display_name if member else str(player_id)
-                wins = entry["wins"]
-                losses = entry["losses"]
-                total = wins + losses
-                winrate = round((wins / total * 100)) if total > 0 else 0
-                lines.append(f"**{i}) {name}**\n> -# {wins}W - {losses}L {winrate}% W/L")
-            embed.description = "\n".join(lines)
+            return embed, total_pages
 
-        return embed
+        start = page * per_page
+        page_entries = entries[start:start + per_page]
+        lines = []
+        for offset, entry in enumerate(page_entries):
+            rank = start + offset + 1
+            player_id = entry["player_id"]
+            member = guild.get_member(player_id)
+            name = member.display_name if member else str(player_id)
+            wins = entry["wins"]
+            losses = entry["losses"]
+            total = wins + losses
+            winrate = round((wins / total * 100)) if total > 0 else 0
+            lines.append(f"**`{rank}` {name}**\n> -# {wins}W - {losses}L {winrate}% W/L")
+        embed.description = "\n".join(lines)
+        if total_pages > 1:
+            embed.set_footer(text=f"Page {page + 1}/{total_pages}")
 
-    async def _update_persistent_leaderboard(self, guild: discord.Guild, game: 'GameConfig'):
-        """Edit the persistent leaderboard message with fresh data. Self-healing if deleted."""
-        channel = guild.get_channel(game.leaderboard_channel_id)
-        if not channel:
-            return
-
-        embed = await self._build_leaderboard_text_embed(guild, game.game_id, monthly=True)
-        is_valorant = 'valorant' in game.name.lower()
-        view = PersistentLeaderboardView(self, game.game_id, is_valorant=is_valorant)
-
-        msg = None
-        if game.leaderboard_message_id:
-            try:
-                msg = await channel.fetch_message(game.leaderboard_message_id)
-                await msg.edit(embed=embed, view=view)
-                return
-            except discord.NotFound:
-                pass  # Message was deleted, send a new one
-
-        # Self-heal: send new message and save its ID
-        try:
-            msg = await channel.send(embed=embed, view=view)
-            await DatabaseHelper.update_game(game.game_id, leaderboard_message_id=msg.id)
-            self.bot.add_view(view, message_id=msg.id)
-            # Update the in-memory game config too
-            game.leaderboard_message_id = msg.id
-        except discord.Forbidden:
-            logger.warning(f"No permission to send leaderboard in channel {channel.id}")
+        return embed, total_pages
 
     async def _generate_match_scoreboard(self, guild: discord.Guild, match_id: int) -> Tuple[discord.Embed, Optional[discord.File]]:
         """Generate a scoreboard image for a match. Returns (embed, file_or_none)."""
@@ -8335,10 +9086,9 @@ class CustomMatch(commands.Cog):
             for g in games:
                 ch = interaction.guild.get_channel(g.queue_channel_id) if g.queue_channel_id else None
                 ch_str = ch.mention if ch else "No channel"
-                cat = interaction.guild.get_channel(g.category_id) if g.category_id else None
-                cat_str = f" | cat: **{cat.name}**" if cat else ""
-                game_lines.append(f"**{g.name}** — {g.player_count}p, {g.queue_type.value}, {ch_str}{cat_str}")
-            embed.add_field(name="Games (set per-game category via Games → Set Category)", value="\n".join(game_lines), inline=False)
+                prefix = resolve_short_name(g)
+                game_lines.append(f"**{g.name}** — {g.player_count}p, {g.queue_type.value}, {ch_str} | prefix: `{prefix}`")
+            embed.add_field(name="Games (set channel prefix via Games → Short Name)", value="\n".join(game_lines), inline=False)
         else:
             embed.add_field(name="Games", value="No games configured.", inline=False)
         
@@ -9485,18 +10235,28 @@ class CustomMatch(commands.Cog):
         short_id = match.get("short_id") or str(match_id)
 
         # Get new teams with forced shuffle (min 40% swap)
-        new_red, new_blue = await self.balance_teams_mmr(
-            player_ids, game.game_id,
-            force_shuffle_from=current_map,
-            min_swap_pct=0.4,
-        )
+        ow_role_map = {}
+        if is_overwatch_game(game):
+            new_red, new_blue, ow_role_map = await self.balance_teams_overwatch(
+                player_ids, game.game_id,
+                force_shuffle_from=current_map,
+                min_swap_pct=0.4,
+            )
+        else:
+            new_red, new_blue = await self.balance_teams_mmr(
+                player_ids, game.game_id,
+                force_shuffle_from=current_map,
+                min_swap_pct=0.4,
+            )
         new_red_set = set(new_red)
 
-        # Update DB team assignments
+        # Update DB team assignments (and OW role assignments)
         for pid in new_red:
             await DatabaseHelper.update_match_player_team(match_id, pid, "red")
         for pid in new_blue:
             await DatabaseHelper.update_match_player_team(match_id, pid, "blue")
+        for pid, role in ow_role_map.items():
+            await DatabaseHelper.update_match_player_role(match_id, pid, role)
 
         # Swap Discord roles
         red_role = guild.get_role(match["red_role_id"]) if match.get("red_role_id") else None

@@ -9,13 +9,15 @@ from contextlib import asynccontextmanager
 from zoneinfo import ZoneInfo
 
 from .models import (
-    GameConfig, PlayerIGN, ReadyPenalty, Suspension, PlayerStats,
+    GameConfig, PlayerIGN, ReadyPenalty, Suspension, PlayerStats, PlayerRoleStats,
     QueueState, MatchState, QueueType, CaptainSelection, Team,
     K_FACTOR_PLACEMENT, K_FACTOR_LEARNING, K_FACTOR_STABLE,
     PLACEMENT_GAMES, LEARNING_GAMES, RIVALRY_MIN_GAMES,
+    OW_ROLES, OW_DEFAULT_ROLE_WEIGHTS, ow_seed_mmr_for_new_role,
+    is_overwatch_game,
 )
 
-logger = logging.getLogger('custommatch')
+logger = logging.getLogger('cogs.custommatch')
 
 # =============================================================================
 # DATABASE SETUP
@@ -44,7 +46,9 @@ CREATE TABLE IF NOT EXISTS games (
     schedule_open_days TEXT,
     schedule_open_time TEXT,
     schedule_close_time TEXT,
-    schedule_down_message_id INTEGER
+    schedule_down_message_id INTEGER,
+    pc_enabled INTEGER DEFAULT 0,
+    pc_offset_tiers REAL DEFAULT 1.0
 );
 
 -- MMR roles per game
@@ -73,6 +77,7 @@ CREATE TABLE IF NOT EXISTS player_game_stats (
     admin_offset INTEGER DEFAULT 0,
     last_played TIMESTAMP,
     returning_games_remaining INTEGER DEFAULT 0,
+    platform TEXT DEFAULT 'console',
     PRIMARY KEY (player_id, game_id),
     FOREIGN KEY (game_id) REFERENCES games(game_id) ON DELETE CASCADE
 );
@@ -357,6 +362,43 @@ CREATE TABLE IF NOT EXISTS player_role_prefs (
     FOREIGN KEY (game_id) REFERENCES games(game_id) ON DELETE CASCADE
 );
 
+-- Overwatch: per-role MMR (hidden matchmaking engine; only used for OW games).
+-- Separate from player_game_stats so no other game is affected.
+CREATE TABLE IF NOT EXISTS ow_role_stats (
+    player_id INTEGER NOT NULL,
+    game_id   INTEGER NOT NULL,
+    role      TEXT NOT NULL,          -- 'Tank' | 'DPS' | 'Support'
+    mmr       INTEGER DEFAULT 1000,
+    games_played INTEGER DEFAULT 0,
+    wins      INTEGER DEFAULT 0,
+    losses    INTEGER DEFAULT 0,
+    admin_offset INTEGER DEFAULT 0,
+    last_played TIMESTAMP,
+    returning_games_remaining INTEGER DEFAULT 0,
+    PRIMARY KEY (player_id, game_id, role),
+    FOREIGN KEY (game_id) REFERENCES games(game_id) ON DELETE CASCADE
+);
+
+-- Overwatch: flexible role selection (a set of roles a player will queue for).
+-- pref_rank: 1=main, higher=less preferred; used as a soft balancer tiebreaker.
+CREATE TABLE IF NOT EXISTS ow_role_selection (
+    player_id INTEGER NOT NULL,
+    game_id   INTEGER NOT NULL,
+    role      TEXT NOT NULL,
+    pref_rank INTEGER DEFAULT 1,
+    PRIMARY KEY (player_id, game_id, role),
+    FOREIGN KEY (game_id) REFERENCES games(game_id) ON DELETE CASCADE
+);
+
+-- Overwatch: per-game role weight multipliers for team balancing (tunable).
+CREATE TABLE IF NOT EXISTS ow_role_weights (
+    game_id INTEGER NOT NULL,
+    role    TEXT NOT NULL,
+    weight  REAL NOT NULL DEFAULT 1.0,
+    PRIMARY KEY (game_id, role),
+    FOREIGN KEY (game_id) REFERENCES games(game_id) ON DELETE CASCADE
+);
+
 -- Secondary queue game modes
 CREATE TABLE IF NOT EXISTS secondary_modes (
     mode_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -377,6 +419,8 @@ CREATE INDEX IF NOT EXISTS idx_matches_winning_cancelled ON matches(winning_team
 CREATE INDEX IF NOT EXISTS idx_match_players_player_id ON match_players(player_id);
 CREATE INDEX IF NOT EXISTS idx_player_game_stats_game_id ON player_game_stats(game_id);
 CREATE INDEX IF NOT EXISTS idx_mmr_history_player_game ON mmr_history(player_id, game_id);
+CREATE INDEX IF NOT EXISTS idx_ow_role_stats_game ON ow_role_stats(game_id);
+CREATE INDEX IF NOT EXISTS idx_ow_role_selection_game ON ow_role_selection(game_id);
 """
 
 async def init_db():
@@ -437,6 +481,10 @@ async def migrate_db():
             ("secondary_queue_match_limit", "INTEGER"),
             ("secondary_mapvote_game", "TEXT"),
             ("secondary_banner_url", "TEXT"),
+            ("short_name", "TEXT"),  # Per-game prefix for lobby/VC channel names
+            # Crossplay PC-player support
+            ("pc_enabled", "INTEGER DEFAULT 0"),
+            ("pc_offset_tiers", "REAL DEFAULT 1.0"),
         ]
 
         for col_name, col_def in game_migrations:
@@ -503,6 +551,8 @@ async def migrate_db():
 
         pgs_migrations = [
             ("returning_games_remaining", "INTEGER DEFAULT 0"),
+            # 'console' | 'pc' -- existing rows auto-backfill to 'console' via DEFAULT
+            ("platform", "TEXT DEFAULT 'console'"),
         ]
 
         for col_name, col_def in pgs_migrations:
@@ -651,6 +701,13 @@ async def migrate_db():
         if 'is_mirror' not in sm_columns:
             await db.execute("ALTER TABLE secondary_modes ADD COLUMN is_mirror INTEGER DEFAULT 0")
             logger.info("Added column is_mirror to secondary_modes table")
+
+        # Add role column to match_players (Overwatch silent role record; NULL for other games)
+        async with db.execute("PRAGMA table_info(match_players)") as cursor:
+            mp_columns = {row[1] for row in await cursor.fetchall()}
+        if 'role' not in mp_columns:
+            await db.execute("ALTER TABLE match_players ADD COLUMN role TEXT")
+            logger.info("Added column role to match_players table")
 
         await db.commit()
 
@@ -807,6 +864,9 @@ class DatabaseHelper:
             secondary_schedule_times=json.loads(row["secondary_schedule_times"]) if "secondary_schedule_times" in row.keys() and row["secondary_schedule_times"] else None,
             secondary_queue_match_limit=row["secondary_queue_match_limit"] if "secondary_queue_match_limit" in row.keys() and row["secondary_queue_match_limit"] else None,
             secondary_banner_url=row["secondary_banner_url"] if "secondary_banner_url" in row.keys() else None,
+            short_name=row["short_name"] if "short_name" in row.keys() and row["short_name"] else None,
+            pc_enabled=bool(row["pc_enabled"]) if "pc_enabled" in row.keys() else False,
+            pc_offset_tiers=row["pc_offset_tiers"] if ("pc_offset_tiers" in row.keys() and row["pc_offset_tiers"] is not None) else 1.0,
         )
 
     @staticmethod
@@ -826,7 +886,19 @@ class DatabaseHelper:
                 (name, player_count, queue_type, captain_selection)
             )
             await db.commit()
-            return cursor.lastrowid
+            game_id = cursor.lastrowid
+        # Overwatch needs role selection (for the 2-2-2 join gate), an MMR-style
+        # queue (strict 2-2-2 balancing), and seeded role weights so the balancer
+        # has a full weight set from game 1.
+        if 'overwatch' in name.lower():
+            async with DatabaseHelper._get_db() as db:
+                await db.execute(
+                    "UPDATE games SET role_required = 1, queue_type = 'mmr' WHERE game_id = ?",
+                    (game_id,)
+                )
+                await db.commit()
+            await DatabaseHelper.seed_ow_role_weights(game_id)
+        return game_id
 
     # Valid column names for games table - prevents SQL injection
     VALID_GAME_COLUMNS = {
@@ -848,6 +920,8 @@ class DatabaseHelper:
         'secondary_queue_type', 'secondary_queue_channel_id', 'secondary_schedule_times',
         'secondary_queue_match_limit',
         'secondary_banner_url',
+        'short_name',
+        'pc_enabled', 'pc_offset_tiers',
     }
 
     VALID_MATCH_COLUMNS = {
@@ -904,7 +978,8 @@ class DatabaseHelper:
                     losses=row[5],
                     admin_offset=row[6],
                     last_played=datetime.fromisoformat(row[7]) if row[7] else None,
-                    returning_games_remaining=row[8] if len(row) > 8 and row[8] else 0
+                    returning_games_remaining=row[8] if len(row) > 8 and row[8] else 0,
+                    platform=row[9] if len(row) > 9 and row[9] else 'console'
                 )
 
     @staticmethod
@@ -912,12 +987,12 @@ class DatabaseHelper:
         async with DatabaseHelper._get_db() as db:
             await db.execute(
                 """INSERT OR REPLACE INTO player_game_stats
-                   (player_id, game_id, mmr, games_played, wins, losses, admin_offset, last_played, returning_games_remaining)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (player_id, game_id, mmr, games_played, wins, losses, admin_offset, last_played, returning_games_remaining, platform)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (stats.player_id, stats.game_id, stats.mmr, stats.games_played,
                  stats.wins, stats.losses, stats.admin_offset,
                  stats.last_played.isoformat() if stats.last_played else None,
-                 stats.returning_games_remaining)
+                 stats.returning_games_remaining, stats.platform)
             )
             await db.commit()
 
@@ -931,6 +1006,24 @@ class DatabaseHelper:
             ) as cursor:
                 rows = await cursor.fetchall()
                 return {row[0]: row[1] for row in rows}
+
+    @staticmethod
+    async def get_mmr_floor(game_id: int, default: int = 500) -> int:
+        """Lowest configured rank-band MMR for a game — the floor losses clamp to.
+
+        A hardcoded floor strands players below the bottom rank: update_mmr_roles
+        finds no band at or under their MMR, so it strips their current rank role
+        and grants nothing. Valorant and Rivals happen to start at 500 so they
+        never hit it, but Overwatch starts at 800. Deriving the floor from the
+        game's own ladder keeps every game's lowest band reachable and terminal.
+        """
+        async with DatabaseHelper._get_db() as db:
+            async with db.execute(
+                "SELECT MIN(mmr_value) FROM game_mmr_roles WHERE game_id = ?",
+                (game_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                return int(row[0]) if row and row[0] is not None else default
 
     @staticmethod
     async def set_mmr_role(game_id: int, role_id: int, mmr_value: int, label: str = None):
@@ -1100,13 +1193,14 @@ class DatabaseHelper:
     @staticmethod
     async def add_match_player(match_id: int, player_id: int, team: str,
                                was_captain: bool = False, was_sub: bool = False,
-                               original_player_id: Optional[int] = None):
+                               original_player_id: Optional[int] = None,
+                               role: Optional[str] = None):
         async with DatabaseHelper._get_db() as db:
             await db.execute(
                 """INSERT OR REPLACE INTO match_players
-                   (match_id, player_id, team, was_captain, was_sub, original_player_id)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (match_id, player_id, team, int(was_captain), int(was_sub), original_player_id)
+                   (match_id, player_id, team, was_captain, was_sub, original_player_id, role)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (match_id, player_id, team, int(was_captain), int(was_sub), original_player_id, role)
             )
             await db.commit()
 
@@ -1177,6 +1271,16 @@ class DatabaseHelper:
             await db.execute(
                 "UPDATE match_players SET team = ? WHERE match_id = ? AND player_id = ?",
                 (team, match_id, player_id)
+            )
+            await db.commit()
+
+    @staticmethod
+    async def update_match_player_role(match_id: int, player_id: int, role: Optional[str]):
+        """Update a player's Overwatch role for a match (silent record)."""
+        async with DatabaseHelper._get_db() as db:
+            await db.execute(
+                "UPDATE match_players SET role = ? WHERE match_id = ? AND player_id = ?",
+                (role, match_id, player_id)
             )
             await db.commit()
 
@@ -1785,6 +1889,220 @@ class DatabaseHelper:
             ) as cursor:
                 rows = await cursor.fetchall()
                 return {row[0]: (row[1], row[2]) for row in rows}
+
+    # ------------------------------------------------------------------
+    # Overwatch: flexible role selection (set of roles a player will queue)
+    # ------------------------------------------------------------------
+    @staticmethod
+    async def set_ow_role_selection(player_id: int, game_id: int, roles: List[str]):
+        """Replace a player's OW role selection. ``roles`` is an ordered list
+        (most-preferred first); order is stored as pref_rank 1..N."""
+        async with DatabaseHelper._get_db() as db:
+            await db.execute(
+                "DELETE FROM ow_role_selection WHERE player_id = ? AND game_id = ?",
+                (player_id, game_id)
+            )
+            for rank, role in enumerate(roles, start=1):
+                await db.execute(
+                    """INSERT OR REPLACE INTO ow_role_selection
+                       (player_id, game_id, role, pref_rank) VALUES (?, ?, ?, ?)""",
+                    (player_id, game_id, role, rank)
+                )
+            await db.commit()
+
+    @staticmethod
+    async def get_ow_role_selection(player_id: int, game_id: int) -> List[Tuple[str, int]]:
+        """Get a player's OW role selection as [(role, pref_rank), ...] ordered by rank."""
+        async with DatabaseHelper._get_db() as db:
+            async with db.execute(
+                """SELECT role, pref_rank FROM ow_role_selection
+                   WHERE player_id = ? AND game_id = ? ORDER BY pref_rank""",
+                (player_id, game_id)
+            ) as cursor:
+                return [(row[0], row[1]) for row in await cursor.fetchall()]
+
+    @staticmethod
+    async def get_bulk_ow_role_selection(player_ids: List[int], game_id: int) -> Dict[int, List[Tuple[str, int]]]:
+        """Batch fetch OW role selections. Returns {player_id: [(role, pref_rank), ...]}."""
+        if not player_ids:
+            return {}
+        async with DatabaseHelper._get_db() as db:
+            placeholders = ",".join("?" for _ in player_ids)
+            async with db.execute(
+                f"""SELECT player_id, role, pref_rank FROM ow_role_selection
+                    WHERE game_id = ? AND player_id IN ({placeholders})
+                    ORDER BY player_id, pref_rank""",
+                [game_id] + list(player_ids)
+            ) as cursor:
+                out: Dict[int, List[Tuple[str, int]]] = {}
+                for pid, role, rank in await cursor.fetchall():
+                    out.setdefault(pid, []).append((role, rank))
+                return out
+
+    # ------------------------------------------------------------------
+    # Overwatch: per-role MMR (hidden matchmaking engine)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _row_to_role_stats(row) -> PlayerRoleStats:
+        return PlayerRoleStats(
+            player_id=row[0], game_id=row[1], role=row[2], mmr=row[3],
+            games_played=row[4], wins=row[5], losses=row[6], admin_offset=row[7],
+            last_played=datetime.fromisoformat(row[8]) if row[8] else None,
+            returning_games_remaining=row[9] if len(row) > 9 and row[9] else 0,
+        )
+
+    @staticmethod
+    async def get_ow_role_stats(player_id: int, game_id: int, role: str) -> PlayerRoleStats:
+        """Get per-role MMR for a player. If the role has no row yet, seed it 2
+        rank bands below the player's best existing role (placement K then finds
+        the true rank). Not persisted until the player actually plays the role."""
+        async with DatabaseHelper._get_db() as db:
+            async with db.execute(
+                "SELECT * FROM ow_role_stats WHERE player_id = ? AND game_id = ? AND role = ?",
+                (player_id, game_id, role)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    return DatabaseHelper._row_to_role_stats(row)
+            # No row: seed from the player's best existing role, if any.
+            async with db.execute(
+                "SELECT MAX(mmr + admin_offset) FROM ow_role_stats WHERE player_id = ? AND game_id = ?",
+                (player_id, game_id)
+            ) as cursor:
+                best = (await cursor.fetchone())[0]
+        if best is None:
+            # Brand new to OW entirely: first role starts at the default.
+            return PlayerRoleStats(player_id=player_id, game_id=game_id, role=role, is_new=True)
+        thresholds = list((await DatabaseHelper.get_mmr_roles(game_id)).values())
+        # NOTE: Do NOT apply the PC seed bump here. This seeds a *new* role from the
+        # player's existing best role, which was already PC-adjusted at first setup.
+        # The offset is inherited via `best`; re-applying it would double-count.
+        seed = ow_seed_mmr_for_new_role(int(best), thresholds)
+        return PlayerRoleStats(
+            player_id=player_id, game_id=game_id, role=role, mmr=seed, is_new=True
+        )
+
+    @staticmethod
+    async def get_ow_player_peak_mmr(player_id: int, game_id: int) -> Optional[int]:
+        """Highest effective role MMR across a player's OW roles (drives rank
+        roles). Returns None if the player has no per-role rows yet."""
+        async with DatabaseHelper._get_db() as db:
+            async with db.execute(
+                "SELECT MAX(mmr + admin_offset) FROM ow_role_stats WHERE player_id = ? AND game_id = ?",
+                (player_id, game_id)
+            ) as cursor:
+                row = await cursor.fetchone()
+                return int(row[0]) if row and row[0] is not None else None
+
+    @staticmethod
+    async def upsert_ow_role_stats(stats: PlayerRoleStats):
+        async with DatabaseHelper._get_db() as db:
+            await db.execute(
+                """INSERT OR REPLACE INTO ow_role_stats
+                   (player_id, game_id, role, mmr, games_played, wins, losses,
+                    admin_offset, last_played, returning_games_remaining)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (stats.player_id, stats.game_id, stats.role, stats.mmr,
+                 stats.games_played, stats.wins, stats.losses, stats.admin_offset,
+                 stats.last_played.isoformat() if stats.last_played else None,
+                 stats.returning_games_remaining)
+            )
+            await db.commit()
+
+    @staticmethod
+    async def seed_ow_role_stats_from_rank(player_id: int, game_id: int,
+                                           mmr: int) -> List[str]:
+        """Seed a player's per-role Overwatch MMR from their rank band.
+
+        Overwatch keeps a rating per role in ow_role_stats; the rank-role setup
+        flow only ever wrote player_game_stats.mmr, which the 2-2-2 balancer
+        never reads. Without this a Grandmaster and a Bronze both entered the
+        balancer at the 1000 default on every role.
+
+        Only seeds roles with no row yet, so ratings the player actually earned
+        are never clobbered and re-running (e.g. a backfill) is safe. Rows land
+        with games_played=0 so placement K-factor corrects a wrong self-report
+        quickly. Returns the roles that were seeded.
+        """
+        seeded: List[str] = []
+        async with DatabaseHelper._get_db() as db:
+            async with db.execute(
+                "SELECT role FROM ow_role_stats WHERE player_id = ? AND game_id = ?",
+                (player_id, game_id)
+            ) as cursor:
+                existing = {row[0] for row in await cursor.fetchall()}
+            for role in OW_ROLES:
+                if role in existing:
+                    continue
+                await db.execute(
+                    """INSERT INTO ow_role_stats
+                       (player_id, game_id, role, mmr, games_played, wins, losses,
+                        admin_offset, last_played, returning_games_remaining)
+                       VALUES (?, ?, ?, ?, 0, 0, 0, 0, NULL, 0)""",
+                    (player_id, game_id, role, mmr)
+                )
+                seeded.append(role)
+            if seeded:
+                await db.commit()
+        return seeded
+
+    @staticmethod
+    async def sync_ow_role_seed(player_id: int, game_id: int, mmr: int,
+                                game: Optional[GameConfig] = None) -> List[str]:
+        """Mirror a rank-derived MMR into Overwatch's per-role ratings.
+
+        No-op for every other game. Call this from any path that seeds a
+        player's MMR from their rank: Overwatch balances off ow_role_stats, so
+        a player with no rows there walks into the 2-2-2 balancer at the 1000
+        default no matter what player_game_stats says about them.
+
+        Pass ``game`` if the caller already has it, to skip the lookup.
+        Returns the roles seeded (empty for non-OW games and for players whose
+        per-role ratings already exist).
+        """
+        if game is None:
+            game = await DatabaseHelper.get_game(game_id)
+        if not game or not is_overwatch_game(game):
+            return []
+        return await DatabaseHelper.seed_ow_role_stats_from_rank(player_id, game_id, mmr)
+
+    # ------------------------------------------------------------------
+    # Overwatch: per-game role weights (tunable balancer multipliers)
+    # ------------------------------------------------------------------
+    @staticmethod
+    async def get_ow_role_weights(game_id: int) -> Dict[str, float]:
+        """Return {role: weight}. Any role without a stored row falls back to
+        the module default so the balancer always has a full set."""
+        weights = dict(OW_DEFAULT_ROLE_WEIGHTS)
+        async with DatabaseHelper._get_db() as db:
+            async with db.execute(
+                "SELECT role, weight FROM ow_role_weights WHERE game_id = ?", (game_id,)
+            ) as cursor:
+                for role, weight in await cursor.fetchall():
+                    weights[role] = weight
+        return weights
+
+    @staticmethod
+    async def set_ow_role_weight(game_id: int, role: str, weight: float):
+        async with DatabaseHelper._get_db() as db:
+            await db.execute(
+                """INSERT OR REPLACE INTO ow_role_weights (game_id, role, weight)
+                   VALUES (?, ?, ?)""",
+                (game_id, role, weight)
+            )
+            await db.commit()
+
+    @staticmethod
+    async def seed_ow_role_weights(game_id: int):
+        """Seed default role weights for a game (idempotent — only inserts missing)."""
+        async with DatabaseHelper._get_db() as db:
+            for role, weight in OW_DEFAULT_ROLE_WEIGHTS.items():
+                await db.execute(
+                    """INSERT OR IGNORE INTO ow_role_weights (game_id, role, weight)
+                       VALUES (?, ?, ?)""",
+                    (game_id, role, weight)
+                )
+            await db.commit()
 
     @staticmethod
     async def get_player_puuid(player_id: int, game_id: int) -> Optional[str]:

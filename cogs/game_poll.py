@@ -18,6 +18,12 @@ try:
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
 
+try:
+    from utils.economy_award import award_many
+except ImportError:  # Economy bridge absent — game night carries on regardless.
+    def award_many(*args, **kwargs):
+        pass
+
 EASTERN = ZoneInfo("America/New_York")
 
 logger = logging.getLogger('bot_main.game_poll')
@@ -1680,11 +1686,23 @@ class GamePoll(commands.Cog):
                             "INSERT INTO vc_sessions (user_id, total_seconds, join_time) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET total_seconds = total_seconds + ?, join_time = ?",
                             (user_id, elapsed, now, elapsed, now))
                         self.vc_join_times[user_id] = now  # Reset join time so we don't double-count
+
+                    # Snapshot before promoting so we can pay only the people who
+                    # just crossed the threshold, not everyone every minute.
+                    async with db.execute("SELECT user_id FROM returning_players") as cur:
+                        before = {row[0] for row in await cur.fetchall()}
+
                     await db.execute(f"""
                         INSERT OR IGNORE INTO returning_players (user_id)
                         SELECT user_id FROM vc_sessions WHERE total_seconds >= {MIN_VC_SECONDS}
                     """)
                     await db.commit()
+
+                    async with db.execute("SELECT user_id FROM returning_players") as cur:
+                        after = {row[0] for row in await cur.fetchall()}
+
+                # Economy: pay attendance the moment they qualify, not next week.
+                award_many(self.bot, after - before, "game_night")
         except Exception as e:
             await self.bot.error_reporter.report("GamePoll", f"vc_monitor: {e}")
 

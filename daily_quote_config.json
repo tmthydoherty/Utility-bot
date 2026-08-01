@@ -2,82 +2,86 @@
     "global_data": {
         "scores": {
             "350399886950268941": {
-                "score": 12,
-                "timestamp": "2026-07-15T00:09:35.655680+00:00"
+                "score": 22,
+                "timestamp": "2026-07-27T00:22:22.010964+00:00"
             },
             "356774449032331264": {
-                "score": 10,
-                "timestamp": "2026-07-15T00:46:55.686421+00:00"
+                "score": 18,
+                "timestamp": "2026-08-01T00:26:08.225223+00:00"
             },
             "676148847147483137": {
-                "score": 12,
-                "timestamp": "2026-07-15T02:35:32.931876+00:00"
+                "score": 21,
+                "timestamp": "2026-07-31T04:22:23.851558+00:00"
             },
             "739592205265535007": {
-                "score": 14,
-                "timestamp": "2026-07-15T00:39:57.697511+00:00"
+                "score": 23,
+                "timestamp": "2026-07-31T02:09:16.486969+00:00"
             },
             "560914996549386242": {
-                "score": 12,
-                "timestamp": "2026-07-15T00:52:50.975094+00:00"
+                "score": 28,
+                "timestamp": "2026-08-01T00:24:30.586669+00:00"
             },
             "756992075353948243": {
-                "score": 6,
-                "timestamp": "2026-07-15T00:41:37.626636+00:00"
+                "score": 11,
+                "timestamp": "2026-07-28T15:09:18.981587+00:00"
             },
             "629824074268278795": {
-                "score": 9,
-                "timestamp": "2026-07-15T00:00:26.372261+00:00"
+                "score": 12,
+                "timestamp": "2026-07-24T10:32:23.649312+00:00"
             },
             "495858386936791040": {
-                "score": 5,
-                "timestamp": "2026-07-15T18:43:06.079085+00:00"
+                "score": 12,
+                "timestamp": "2026-07-31T05:21:35.917893+00:00"
             },
             "562801560640552980": {
                 "score": 1,
                 "timestamp": "2026-07-10T00:35:09.431001+00:00"
             },
             "732384312200003605": {
-                "score": 1,
-                "timestamp": "2026-07-12T16:39:08.960863+00:00"
+                "score": 3,
+                "timestamp": "2026-07-21T21:34:10.790322+00:00"
+            },
+            "280095356195438592": {
+                "score": 0,
+                "timestamp": null
             }
         },
         "user_stats": {
             "356774449032331264": {
-                "correct": 39,
-                "incorrect": 28,
+                "correct": 47,
+                "incorrect": 35,
                 "current_streak": 1,
                 "longest_streak": 6,
-                "all_time_score": 39,
-                "all_time_timestamp": "2026-07-15T00:46:55.686421+00:00",
-                "streak_achieved_at": "2026-07-15T00:46:55.686407+00:00"
+                "all_time_score": 47,
+                "all_time_timestamp": "2026-08-01T00:26:08.225223+00:00",
+                "streak_achieved_at": "2026-08-01T00:26:08.225198+00:00"
             },
             "350399886950268941": {
-                "correct": 43,
-                "incorrect": 21,
-                "current_streak": 3,
+                "correct": 53,
+                "incorrect": 28,
+                "current_streak": 0,
                 "longest_streak": 9,
-                "all_time_score": 43,
-                "all_time_timestamp": "2026-07-15T00:09:35.655680+00:00",
-                "streak_achieved_at": "2026-07-15T00:09:35.655664+00:00"
+                "all_time_score": 53,
+                "all_time_timestamp": "2026-07-27T00:22:22.010964+00:00",
+                "streak_achieved_at": null
             },
             "739592205265535007": {
-                "correct": 53,
-                "incorrect": 13,
-                "current_streak": 15,
+                "correct": 62,
+                "incorrect": 21,
+                "current_streak": 0,
                 "longest_streak": 15,
-                "all_time_score": 53,
-                "all_time_timestamp": "2026-07-15T00:39:57.697511+00:00",
-                "streak_achieved_at": "2026-07-15T00:39:57.697491+00:00"
+                "all_time_score": 62,
+                "all_time_timestamp": "2026-07-31T02:09:16.486969+00:00",
+                "streak_achieved_at": null
             },
             "560914996549386242": {
-                "correct": 54,
-                "incorrect": 12,
-                "current_streak": 12,
-                "longest_streak": 12,
-                "all_time_score": 54,
-                "all_time_timestamp": "2026-07-15T00:52:50.975094+00:00",
-                "streak_achieved_at": "2026-07-15T00:52:50.975075+00:00"
+                "correct": 70,
+                "incorrect": 13,
+                "current_streak": 1,
+                "longest_streak": 27,
+                "all_time_score": 70,
+                "all_time_timestamp": "2026-08-01T00:24:30.586669+00:00",
+                "streak_achieved_at": "2026-08-01T00:24:30.586651+00:00"
             },
             "298607678073208832": {
                 "correct": 26,
@@ -89,13 +93,13 @@
                 "streak_achieved_at": null
             },
             "676148847147483137": {
-                "correct": 43,
-                "incorrect": 22,
-                "current_streak": 1,
+                "correct": 52,
+                "incorrect": 30,
+                "current_streak": 0,
                 "longest_streak": 10,
-                "all_time_score": 43,
-                "all_time_timestamp": "2026-07-15T02:35:32.931876+00:00",
-                "streak_achieved_at": "2026-07-15T02:35:32.931858+00:00"
+                "all_time_score": 52,
+                "all_time_timestamp": "2026-07-31T04:22:23.851558+00:00",
+                "streak_achieved_at": null
             },
             "453901510968082432": {
                 "correct": 16,
@@ -108,7 +112,7 @@
             },
             "562801560640552980": {
                 "correct": 17,
-                "incorrect": 12,
+                "incorrect": 13,
                 "current_streak": 0,
                 "longest_streak": 3,
                 "all_time_score": 17,
@@ -116,31 +120,31 @@
                 "streak_achieved_at": null
             },
             "495858386936791040": {
-                "correct": 33,
-                "incorrect": 12,
+                "correct": 40,
+                "incorrect": 14,
                 "current_streak": 1,
                 "longest_streak": 6,
-                "all_time_score": 33,
-                "all_time_timestamp": "2026-07-15T18:43:06.079085+00:00",
-                "streak_achieved_at": "2026-07-15T18:43:06.079066+00:00"
+                "all_time_score": 40,
+                "all_time_timestamp": "2026-07-31T05:21:35.917893+00:00",
+                "streak_achieved_at": "2026-07-31T05:21:35.917865+00:00"
             },
             "732384312200003605": {
-                "correct": 5,
-                "incorrect": 10,
+                "correct": 7,
+                "incorrect": 11,
                 "current_streak": 0,
                 "longest_streak": 2,
-                "all_time_score": 5,
-                "all_time_timestamp": "2026-07-12T16:39:08.960863+00:00",
+                "all_time_score": 7,
+                "all_time_timestamp": "2026-07-21T21:34:10.790322+00:00",
                 "streak_achieved_at": null
             },
             "756992075353948243": {
-                "correct": 22,
-                "incorrect": 14,
-                "current_streak": 1,
+                "correct": 27,
+                "incorrect": 19,
+                "current_streak": 0,
                 "longest_streak": 3,
-                "all_time_score": 22,
-                "all_time_timestamp": "2026-07-15T00:41:37.626636+00:00",
-                "streak_achieved_at": "2026-07-15T00:41:37.626621+00:00"
+                "all_time_score": 27,
+                "all_time_timestamp": "2026-07-28T15:09:18.981587+00:00",
+                "streak_achieved_at": null
             },
             "385986637437468683": {
                 "correct": 0,
@@ -162,7 +166,7 @@
             },
             "280095356195438592": {
                 "correct": 14,
-                "incorrect": 10,
+                "incorrect": 11,
                 "current_streak": 0,
                 "longest_streak": 4,
                 "all_time_score": 14,
@@ -188,97 +192,97 @@
                 "streak_achieved_at": null
             },
             "629824074268278795": {
-                "correct": 11,
-                "incorrect": 2,
-                "current_streak": 2,
+                "correct": 14,
+                "incorrect": 7,
+                "current_streak": 0,
                 "longest_streak": 5,
-                "all_time_score": 11,
-                "all_time_timestamp": "2026-07-15T00:00:26.372261+00:00",
-                "streak_achieved_at": "2026-07-15T00:00:26.372241+00:00"
+                "all_time_score": 14,
+                "all_time_timestamp": "2026-07-24T10:32:23.649312+00:00",
+                "streak_achieved_at": null
             }
         },
         "daily_question_data": {
-            "quote": "Those who want respect, give respect.",
-            "character": "Tony Soprano",
-            "movie_title": "The Sopranos",
-            "genre": "Crime, Drama",
-            "difficulty": "medium",
-            "correct": "The Sopranos",
+            "quote": "The only power I have is that I believe we can do better.",
+            "character": "Sam Wilson",
+            "movie_title": "The Falcon and the Winter Soldier",
+            "genre": "Action, Adventure, Sci-Fi",
+            "difficulty": "easy",
+            "correct": "The Falcon and the Winter Soldier",
             "answers": [
-                "The Wire",
-                "Ozark",
-                "The Sopranos",
-                "Boardwalk Empire"
+                "Ms. Marvel",
+                "Loki",
+                "The Falcon and the Winter Soldier",
+                "Hawkeye"
             ],
             "correct_index": 2,
             "question_type": "movie",
-            "quote_id": 409,
+            "quote_id": 474,
             "guild_id": 1431565435010289778,
             "approved": true
         },
         "daily_interactions": [
             {
-                "user_id": "629824074268278795",
-                "answer_index": 2,
-                "correct": true,
+                "user_id": "739592205265535007",
+                "answer_index": 3,
+                "correct": false,
                 "snapshot": {
                     "streak": 1,
-                    "longest_streak": 5,
-                    "streak_achieved_at": "2026-07-14T01:31:52.725762+00:00",
-                    "correct": 10,
-                    "incorrect": 2,
-                    "all_time_score": 10,
-                    "all_time_timestamp": "2026-07-14T01:31:52.725779+00:00",
-                    "monthly_score": 8,
-                    "monthly_timestamp": "2026-07-14T01:31:52.725779+00:00"
-                }
-            },
-            {
-                "user_id": "350399886950268941",
-                "answer_index": 2,
-                "correct": true,
-                "snapshot": {
-                    "streak": 2,
-                    "longest_streak": 9,
-                    "streak_achieved_at": "2026-07-14T01:53:19.072456+00:00",
-                    "correct": 42,
-                    "incorrect": 21,
-                    "all_time_score": 42,
-                    "all_time_timestamp": "2026-07-14T01:53:19.072476+00:00",
-                    "monthly_score": 11,
-                    "monthly_timestamp": "2026-07-14T01:53:19.072476+00:00"
-                }
-            },
-            {
-                "user_id": "739592205265535007",
-                "answer_index": 2,
-                "correct": true,
-                "snapshot": {
-                    "streak": 14,
                     "longest_streak": 15,
-                    "streak_achieved_at": "2026-07-14T00:07:43.129399+00:00",
-                    "correct": 52,
-                    "incorrect": 13,
-                    "all_time_score": 52,
-                    "all_time_timestamp": "2026-07-14T00:07:43.129413+00:00",
-                    "monthly_score": 13,
-                    "monthly_timestamp": "2026-07-14T00:07:43.129413+00:00"
+                    "streak_achieved_at": "2026-07-31T02:09:16.486950+00:00",
+                    "correct": 62,
+                    "incorrect": 20,
+                    "all_time_score": 62,
+                    "all_time_timestamp": "2026-07-31T02:09:16.486969+00:00",
+                    "monthly_score": 23,
+                    "monthly_timestamp": "2026-07-31T02:09:16.486969+00:00"
                 }
             },
             {
-                "user_id": "756992075353948243",
+                "user_id": "732384312200003605",
+                "answer_index": 1,
+                "correct": false,
+                "snapshot": {
+                    "streak": 0,
+                    "longest_streak": 2,
+                    "streak_achieved_at": null,
+                    "correct": 7,
+                    "incorrect": 10,
+                    "all_time_score": 7,
+                    "all_time_timestamp": "2026-07-21T21:34:10.790322+00:00",
+                    "monthly_score": 3,
+                    "monthly_timestamp": "2026-07-21T21:34:10.790322+00:00"
+                }
+            },
+            {
+                "user_id": "560914996549386242",
                 "answer_index": 2,
                 "correct": true,
                 "snapshot": {
                     "streak": 0,
-                    "longest_streak": 3,
+                    "longest_streak": 27,
                     "streak_achieved_at": null,
-                    "correct": 21,
-                    "incorrect": 14,
-                    "all_time_score": 21,
-                    "all_time_timestamp": "2026-07-11T03:58:47.321421+00:00",
-                    "monthly_score": 5,
-                    "monthly_timestamp": "2026-07-11T03:58:47.321421+00:00"
+                    "correct": 69,
+                    "incorrect": 13,
+                    "all_time_score": 69,
+                    "all_time_timestamp": "2026-07-30T00:17:45.035128+00:00",
+                    "monthly_score": 27,
+                    "monthly_timestamp": "2026-07-30T00:17:45.035128+00:00"
+                }
+            },
+            {
+                "user_id": "350399886950268941",
+                "answer_index": 0,
+                "correct": false,
+                "snapshot": {
+                    "streak": 0,
+                    "longest_streak": 9,
+                    "streak_achieved_at": null,
+                    "correct": 53,
+                    "incorrect": 27,
+                    "all_time_score": 53,
+                    "all_time_timestamp": "2026-07-27T00:22:22.010964+00:00",
+                    "monthly_score": 22,
+                    "monthly_timestamp": "2026-07-27T00:22:22.010964+00:00"
                 }
             },
             {
@@ -289,86 +293,53 @@
                     "streak": 0,
                     "longest_streak": 6,
                     "streak_achieved_at": null,
-                    "correct": 38,
-                    "incorrect": 28,
-                    "all_time_score": 38,
-                    "all_time_timestamp": "2026-07-13T00:03:35.008510+00:00",
-                    "monthly_score": 9,
-                    "monthly_timestamp": "2026-07-13T00:03:35.008510+00:00"
-                }
-            },
-            {
-                "user_id": "560914996549386242",
-                "answer_index": 2,
-                "correct": true,
-                "snapshot": {
-                    "streak": 11,
-                    "longest_streak": 11,
-                    "streak_achieved_at": "2026-07-14T00:01:07.788638+00:00",
-                    "correct": 53,
-                    "incorrect": 12,
-                    "all_time_score": 53,
-                    "all_time_timestamp": "2026-07-14T00:01:07.788659+00:00",
-                    "monthly_score": 11,
-                    "monthly_timestamp": "2026-07-14T00:01:07.788659+00:00"
+                    "correct": 46,
+                    "incorrect": 35,
+                    "all_time_score": 46,
+                    "all_time_timestamp": "2026-07-28T00:49:49.778905+00:00",
+                    "monthly_score": 17,
+                    "monthly_timestamp": "2026-07-28T00:49:49.778905+00:00"
                 }
             },
             {
                 "user_id": "676148847147483137",
-                "answer_index": 2,
-                "correct": true,
+                "answer_index": 3,
+                "correct": false,
                 "snapshot": {
-                    "streak": 0,
+                    "streak": 1,
                     "longest_streak": 10,
-                    "streak_achieved_at": null,
-                    "correct": 42,
-                    "incorrect": 22,
-                    "all_time_score": 42,
-                    "all_time_timestamp": "2026-07-13T02:40:32.634909+00:00",
-                    "monthly_score": 11,
-                    "monthly_timestamp": "2026-07-13T02:40:32.634909+00:00"
-                }
-            },
-            {
-                "user_id": "495858386936791040",
-                "answer_index": 2,
-                "correct": true,
-                "snapshot": {
-                    "streak": 0,
-                    "longest_streak": 6,
-                    "streak_achieved_at": null,
-                    "correct": 32,
-                    "incorrect": 12,
-                    "all_time_score": 32,
-                    "all_time_timestamp": "2026-07-13T18:13:24.408410+00:00",
-                    "monthly_score": 4,
-                    "monthly_timestamp": "2026-07-13T18:13:24.408410+00:00"
+                    "streak_achieved_at": "2026-07-31T04:22:23.851525+00:00",
+                    "correct": 52,
+                    "incorrect": 29,
+                    "all_time_score": 52,
+                    "all_time_timestamp": "2026-07-31T04:22:23.851558+00:00",
+                    "monthly_score": 21,
+                    "monthly_timestamp": "2026-07-31T04:22:23.851558+00:00"
                 }
             }
         ],
         "daily_answer_times": [],
         "used_quote_ids": [
-            373,
-            409,
-            404
+            474,
+            451
         ],
         "blocked_users": [],
         "pending_question_data": {
-            "quote": "Earn this.",
-            "character": "Captain Miller",
-            "movie_title": "Saving Private Ryan",
-            "genre": "War, Drama",
-            "difficulty": "hard",
-            "correct": "Saving Private Ryan",
+            "quote": "If you feel it, chase it.",
+            "character": "Tyler Owens",
+            "movie_title": "Twisters",
+            "genre": "Action, Adventure, Thriller",
+            "difficulty": "easy",
+            "correct": "Twisters",
             "answers": [
-                "Saving Private Ryan",
-                "Hacksaw Ridge",
-                "Dunkirk",
-                "The Thin Red Line"
+                "Moonfall",
+                "Twisters",
+                "Greenland",
+                "San Andreas"
             ],
-            "correct_index": 0,
+            "correct_index": 1,
             "question_type": "movie",
-            "quote_id": 404,
+            "quote_id": 451,
             "guild_id": 1431565435010289778,
             "approved": true
         }
@@ -377,12 +348,12 @@
         "1431565435010289778": {
             "channel_id": 1463938795131895868,
             "enabled": true,
-            "gateway_message_id": 1526740081996595221,
-            "last_posted_date": "2026-07-14",
+            "gateway_message_id": 1532900676340940966,
+            "last_posted_date": "2026-07-31",
             "last_winner_announcement": null,
-            "low_quote_alert_days": 30,
-            "last_low_quote_alert_date": "2026-07-14",
-            "screening_enabled": true
+            "last_low_quote_alert_date": "2026-07-27",
+            "screening_enabled": true,
+            "low_quote_alert_threshold": 10
         }
     }
 }

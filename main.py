@@ -17,6 +17,17 @@ if not logger.handlers:
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
 
+    # Cog modules log under 'cogs.<name>' and discord.py swallows UI/view
+    # exceptions into its own 'discord.*' loggers — neither had a handler,
+    # so those errors were invisible. Surface both in journald.
+    for _name, _level in (('cogs', logging.INFO), ('discord', logging.WARNING)):
+        _lg = logging.getLogger(_name)
+        if not _lg.handlers:
+            _h = logging.StreamHandler()
+            _h.setFormatter(formatter)
+            _lg.addHandler(_h)
+            _lg.setLevel(_level)
+
 # --- BOT SETUP ---
 ADMIN_ROLE_ID = 1431565435819528302  # Role treated as admin by the bot
 

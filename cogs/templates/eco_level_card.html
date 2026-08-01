@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        @font-face {{
+            font-family: 'NotoSans';
+            src: url('file://{font_path}/NotoSans-Regular.ttf') format('truetype');
+            font-weight: 400;
+        }}
+        @font-face {{
+            font-family: 'NotoSans';
+            src: url('file://{font_path}/NotoSans-Bold.ttf') format('truetype');
+            font-weight: 700;
+        }}
+
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+
+        body {{
+            width: 920px;
+            font-family: 'NotoSans', 'Segoe UI', sans-serif;
+            background: #07080b;
+            color: #ffffff;
+            -webkit-font-smoothing: antialiased;
+        }}
+
+        .card {{
+            position: relative;
+            margin: 14px;
+            border-radius: 20px;
+            overflow: hidden;
+            background:
+                radial-gradient(900px 320px at 12% -10%, {accent_glow} 0%, rgba(0,0,0,0) 62%),
+                linear-gradient(160deg, #17191f 0%, #101218 46%, #0b0c11 100%);
+            border: 1px solid rgba(255, 255, 255, 0.075);
+            box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+        }}
+
+        /* A single hairline of accent along the very top edge. */
+        .card::before {{
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            height: 2px;
+            background: linear-gradient(90deg, rgba(0,0,0,0) 0%, {accent} 22%, {accent} 62%, rgba(0,0,0,0) 100%);
+            opacity: 0.85;
+        }}
+
+        /* ---------------------------------------------------- HERO ------ */
+        .hero {{
+            display: flex;
+            align-items: center;
+            gap: 24px;
+            padding: 30px 34px 26px 34px;
+        }}
+
+        .avatar-wrap {{
+            position: relative;
+            width: 126px;
+            height: 126px;
+            flex-shrink: 0;
+        }}
+
+        /* Progress ring: the conic sweep is the XP into the current level.
+           The unfilled remainder stays clearly visible as a track. */
+        .avatar-ring {{
+            position: absolute;
+            inset: 0;
+            border-radius: 50%;
+            background: conic-gradient(
+                from -90deg,
+                {accent} 0deg,
+                {accent_light} {ring_deg}deg,
+                rgba(255,255,255,0.10) {ring_deg}deg,
+                rgba(255,255,255,0.10) 360deg
+            );
+            box-shadow: 0 0 30px {accent_glow};
+        }}
+
+        .avatar-mask {{
+            position: absolute;
+            inset: 8px;
+            border-radius: 50%;
+            background: #0c0e13;
+            box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+        }}
+
+        .avatar {{
+            position: absolute;
+            inset: 12px;
+            width: 102px;
+            height: 102px;
+            border-radius: 50%;
+            object-fit: cover;
+        }}
+
+        /* Percentage chip riding the bottom of the ring. */
+        .ring-chip {{
+            position: absolute;
+            left: 50%;
+            bottom: -9px;
+            transform: translateX(-50%);
+            padding: 3px 10px;
+            border-radius: 20px;
+            background: #14161c;
+            border: 1px solid {accent_border};
+            font-size: 11px;
+            font-weight: 700;
+            color: {accent_light};
+            letter-spacing: 0.3px;
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
+        }}
+
+        .hero-info {{
+            flex: 1;
+            min-width: 0;
+        }}
+
+        .display-name {{
+            font-size: 34px;
+            font-weight: 700;
+            letter-spacing: -0.6px;
+            line-height: 1.1;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }}
+
+        .username {{
+            font-size: 15px;
+            color: #8b909c;
+            margin-top: 4px;
+        }}
+
+        .hero-tags {{
+            display: flex;
+            gap: 8px;
+            margin-top: 14px;
+        }}
+
+        .tag {{
+            display: flex;
+            align-items: baseline;
+            gap: 7px;
+            padding: 7px 13px;
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.045);
+            border: 1px solid rgba(255, 255, 255, 0.07);
+        }}
+
+        .tag-label {{
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 1.1px;
+            text-transform: uppercase;
+            color: #7c818d;
+        }}
+
+        .tag-value {{
+            font-size: 15px;
+            font-weight: 700;
+            color: #e9eaee;
+            font-variant-numeric: tabular-nums;
+        }}
+
+        .tag.accent {{
+            background: {accent_faint};
+            border-color: {accent_border};
+        }}
+
+        .tag.accent .tag-value {{ color: {accent_light}; }}
+
+        /* Level plate on the right of the hero. */
+        .level-plate {{
+            flex-shrink: 0;
+            text-align: center;
+            padding: 16px 26px;
+            border-radius: 16px;
+            background: linear-gradient(155deg, {accent_faint} 0%, rgba(255,255,255,0.02) 100%);
+            border: 1px solid {accent_border};
+        }}
+
+        .level-plate-label {{
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            color: #8b909c;
+        }}
+
+        .level-plate-value {{
+            font-size: 52px;
+            font-weight: 700;
+            line-height: 1;
+            margin-top: 4px;
+            letter-spacing: -2px;
+            color: #ffffff;
+            font-variant-numeric: tabular-nums;
+        }}
+
+        /* ------------------------------------------------- XP BAR ------- */
+        .xp-block {{
+            padding: 0 34px 26px 34px;
+        }}
+
+        .xp-meta {{
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            margin-bottom: 9px;
+        }}
+
+        .xp-meta-label {{
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 1.4px;
+            text-transform: uppercase;
+            color: #7c818d;
+        }}
+
+        .xp-meta-value {{
+            font-size: 13px;
+            font-weight: 700;
+            color: #b9bdc7;
+            font-variant-numeric: tabular-nums;
+        }}
+
+        .xp-meta-value b {{ color: #ffffff; }}
+
+        .xp-track {{
+            position: relative;
+            height: 13px;
+            border-radius: 7px;
+            background: rgba(255, 255, 255, 0.055);
+            overflow: hidden;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }}
+
+        .xp-fill {{
+            position: absolute;
+            top: 0; left: 0; bottom: 0;
+            width: {xp_percent}%;
+            min-width: 3px;
+            border-radius: 7px;
+            background: linear-gradient(90deg, {accent} 0%, {accent_light} 100%);
+            box-shadow: 0 0 18px {accent_glow};
+        }}
+
+        /* Diagonal sheen over the filled portion. */
+        .xp-fill::after {{
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: repeating-linear-gradient(
+                115deg,
+                rgba(255,255,255,0.13) 0px,
+                rgba(255,255,255,0.13) 2px,
+                rgba(255,255,255,0) 2px,
+                rgba(255,255,255,0) 9px
+            );
+        }}
+
+        /* ------------------------------------------------ STAT TILES ---- */
+        .tiles {{
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            border-top: 1px solid rgba(255, 255, 255, 0.06);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+            background: rgba(255, 255, 255, 0.012);
+        }}
+
+        .tile {{
+            padding: 20px 26px;
+            border-right: 1px solid rgba(255, 255, 255, 0.055);
+        }}
+
+        .tile:last-child {{ border-right: none; }}
+
+        .tile-label {{
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 1.3px;
+            text-transform: uppercase;
+            color: #7c818d;
+        }}
+
+        .tile-value {{
+            font-size: 31px;
+            font-weight: 700;
+            line-height: 1.1;
+            margin-top: 6px;
+            letter-spacing: -1px;
+            font-variant-numeric: tabular-nums;
+        }}
+
+        .tile-sub {{
+            font-size: 12px;
+            color: #6f7480;
+            margin-top: 3px;
+        }}
+
+        /* ---------------------------------------------------- CHART ----- */
+        .chart-section {{
+            padding: 22px 34px 20px 34px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        }}
+
+        .chart-head {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }}
+
+        .chart-title {{
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 1.6px;
+            text-transform: uppercase;
+            color: #8b909c;
+        }}
+
+        .legend {{
+            display: flex;
+            gap: 18px;
+        }}
+
+        .legend-item {{
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            font-size: 11px;
+            font-weight: 700;
+            color: #8b909c;
+            letter-spacing: 0.4px;
+        }}
+
+        /* Each series is scaled to its own peak, so the peak is stated. */
+        .legend-peak {{
+            color: #5c616c;
+            font-weight: 400;
+        }}
+
+        .swatch-bar {{
+            width: 9px;
+            height: 9px;
+            border-radius: 2px;
+            background: {accent};
+        }}
+
+        .swatch-line {{
+            width: 14px;
+            height: 3px;
+            border-radius: 2px;
+            background: #4dd4ac;
+        }}
+
+        /* --------------------------------------------- BEHAVIOUR STRIP - */
+        .strip {{
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            padding: 4px 0;
+        }}
+
+        .strip-item {{
+            padding: 15px 26px;
+            border-right: 1px solid rgba(255, 255, 255, 0.05);
+        }}
+
+        .strip-item:nth-child(4n) {{ border-right: none; }}
+        .strip-item:nth-child(n+5) {{ border-top: 1px solid rgba(255, 255, 255, 0.05); }}
+
+        .strip-label {{
+            font-size: 9.5px;
+            font-weight: 700;
+            letter-spacing: 1.2px;
+            text-transform: uppercase;
+            color: #6f7480;
+        }}
+
+        .strip-value {{
+            font-size: 16px;
+            font-weight: 700;
+            color: #dfe1e6;
+            margin-top: 5px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            font-variant-numeric: tabular-nums;
+        }}
+
+        .strip-value.muted {{ color: #5c616c; font-weight: 400; }}
+
+        /* --------------------------------------------------- FOOTER ----- */
+        .footer {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 13px 34px 15px 34px;
+            border-top: 1px solid rgba(255, 255, 255, 0.055);
+            background: rgba(0, 0, 0, 0.22);
+        }}
+
+        .footer-text {{
+            font-size: 11px;
+            color: #5c616c;
+            letter-spacing: 0.3px;
+        }}
+
+        .footer-text b {{ color: #8b909c; }}
+    </style>
+</head>
+<body>
+    <div class="card">
+
+        <div class="hero">
+            <div class="avatar-wrap">
+                <div class="avatar-ring"></div>
+                <div class="avatar-mask"></div>
+                <img class="avatar" src="{avatar_url}">
+                <div class="ring-chip">{xp_percent}%</div>
+            </div>
+
+            <div class="hero-info">
+                <div class="display-name">{display_name}</div>
+                <div class="username">{username}</div>
+                <div class="hero-tags">
+                    <div class="tag accent">
+                        <span class="tag-label">Rank</span>
+                        <span class="tag-value">{rank_display}</span>
+                    </div>
+                    <div class="tag">
+                        <span class="tag-label">Total XP</span>
+                        <span class="tag-value">{total_xp}</span>
+                    </div>
+                    <div class="tag">
+                        <span class="tag-label">Joined</span>
+                        <span class="tag-value">{joined}</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="level-plate">
+                <div class="level-plate-label">Level</div>
+                <div class="level-plate-value">{level}</div>
+            </div>
+        </div>
+
+        <div class="xp-block">
+            <div class="xp-meta">
+                <span class="xp-meta-label">Progress to level {next_level}</span>
+                <span class="xp-meta-value"><b>{xp_into}</b> / {xp_needed} XP</span>
+            </div>
+            <div class="xp-track"><div class="xp-fill"></div></div>
+        </div>
+
+        <div class="tiles">
+            <div class="tile">
+                <div class="tile-label">Messages</div>
+                <div class="tile-value">{messages}</div>
+                <div class="tile-sub">{messages_sub}</div>
+            </div>
+            <div class="tile">
+                <div class="tile-label">Voice Hours</div>
+                <div class="tile-value">{voice_hours}</div>
+                <div class="tile-sub">{voice_sub}</div>
+            </div>
+            <div class="tile">
+                <div class="tile-label">Days Active</div>
+                <div class="tile-value">{days_active}</div>
+                <div class="tile-sub">{days_sub}</div>
+            </div>
+            <div class="tile">
+                <div class="tile-label">Day Streak</div>
+                <div class="tile-value">{streak}</div>
+                <div class="tile-sub">{streak_sub}</div>
+            </div>
+        </div>
+
+        <div class="chart-section">
+            <div class="chart-head">
+                <div class="chart-title">Last 30 Days</div>
+                <div class="legend">
+                    <div class="legend-item">
+                        <span class="swatch-bar"></span>Messages
+                        <span class="legend-peak">peak {chart_msg_peak}</span>
+                    </div>
+                    <div class="legend-item">
+                        <span class="swatch-line"></span>Voice
+                        <span class="legend-peak">peak {chart_voice_peak}</span>
+                    </div>
+                </div>
+            </div>
+            {chart_svg}
+        </div>
+
+        <div class="strip">
+            <div class="strip-item">
+                <div class="strip-label">Top Channel</div>
+                <div class="strip-value {top_channel_class}">{top_channel}</div>
+            </div>
+            <div class="strip-item">
+                <div class="strip-label">Peak Hour</div>
+                <div class="strip-value {peak_hour_class}">{peak_hour}</div>
+            </div>
+            <div class="strip-item">
+                <div class="strip-label">Busiest Day</div>
+                <div class="strip-value {peak_day_class}">{peak_day}</div>
+            </div>
+            <div class="strip-item">
+                <div class="strip-label">Avg Message</div>
+                <div class="strip-value {avg_len_class}">{avg_len}</div>
+            </div>
+            <div class="strip-item">
+                <div class="strip-label">Reactions Given</div>
+                <div class="strip-value">{reactions_given}</div>
+            </div>
+            <div class="strip-item">
+                <div class="strip-label">Reactions Received</div>
+                <div class="strip-value">{reactions_received}</div>
+            </div>
+            <div class="strip-item">
+                <div class="strip-label">Replies Sent</div>
+                <div class="strip-value">{replies}</div>
+            </div>
+            <div class="strip-item">
+                <div class="strip-label">Top Emoji</div>
+                <div class="strip-value {top_emoji_class}">{top_emoji}</div>
+            </div>
+        </div>
+
+        <div class="footer">
+            <div class="footer-text">{footer_left}</div>
+            <div class="footer-text">{footer_right}</div>
+        </div>
+
+    </div>
+</body>
+</html>

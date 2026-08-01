@@ -19,7 +19,7 @@ try:
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
 
-logger = logging.getLogger('custommatch')
+logger = logging.getLogger('cogs.custommatch')
 
 
 # =============================================================================

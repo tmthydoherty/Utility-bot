@@ -8,7 +8,7 @@ import secrets
 import unicodedata
 import logging
 
-logger = logging.getLogger('custommatch')
+logger = logging.getLogger('cogs.custommatch')
 
 # =============================================================================
 # CONSTANTS & ENUMS
@@ -29,9 +29,19 @@ class Team(Enum):
     BLUE = "blue"
 
 # K-Factor settings
-K_FACTOR_PLACEMENT = 80   # Games 1-10 (~40 per even game)
-K_FACTOR_LEARNING = 40    # Games 11-20 (~20 per even game)
-K_FACTOR_STABLE = 20      # Games 21+ (~10 per even game)
+#
+# Scaled to the 500-6000 rank ladder in game_mmr_roles, whose bands are 400-1100
+# points wide. At the old stable K of 20 a match moved 10 points, so climbing a
+# single rank took 40-110 net wins (350 games at a 60% winrate) — the ladder was
+# effectively immobile. These values put a match at ~80 points, or roughly one
+# tier per 44 games at a 60% winrate.
+#
+# Placement/learning are only ~2x/1.5x stable rather than the old 4x/2x: players
+# are seeded onto the ladder from their real rank role, so placement only has to
+# correct a misseed of a band or two, not walk someone up from scratch.
+K_FACTOR_PLACEMENT = 320  # Games 1-10 (~160 per even game)
+K_FACTOR_LEARNING = 240   # Games 11-20 (~120 per even game)
+K_FACTOR_STABLE = 160     # Games 21+ (~80 per even game)
 
 
 def is_valorant_game(game) -> bool:
@@ -50,8 +60,29 @@ def is_rivals_game(game) -> bool:
     return 'rivals' in str(name).lower()
 
 
+def is_overwatch_game(game) -> bool:
+    """True if the given game is Overwatch (name-based)."""
+    if game is None:
+        return False
+    name = getattr(game, "name", None) or (game if isinstance(game, str) else "")
+    return 'overwatch' in str(name).lower()
+
+
 # Canonical Rivals roles
 RIVALS_ROLES = ("Vanguard", "Duelist", "Strategist")
+
+# Canonical Overwatch roles for strict 2-2-2 (2 of each per team)
+OW_ROLES = ("Tank", "DPS", "Support")
+# Display glyphs (unicode — no custom-emoji dependency)
+OW_ROLE_GLYPH = {"Tank": "\U0001f6e1️", "DPS": "⚔️", "Support": "\U0001f489"}
+# Default per-role balance weights (tunable per game via ow_role_weights)
+OW_DEFAULT_ROLE_WEIGHTS = {"Tank": 1.30, "Support": 1.15, "DPS": 1.00}
+# Fraction of MMR-above-floor kept when seeding new roles is handled via rank
+# bands (see seeding logic); this constant documents the design intent.
+# One band, not two: a two-band drop put a Diamond main's new role at Gold, a
+# 1400-point hole that outruns what placement K can close. One band (700 points
+# at mid-ladder) is recovered inside placements plus ~30 games.
+OW_NEW_ROLE_RANK_DROP = 1  # Seed a new role 1 full rank band below the top role
 
 
 def _parse_tracker_url(url: str) -> Optional[str]:
@@ -204,6 +235,179 @@ def normalize_rivals_role(value) -> Optional[str]:
     return None
 
 
+def normalize_ow_role(value) -> Optional[str]:
+    """Normalize a role string to one of the canonical OW_ROLES, or None."""
+    if not value:
+        return None
+    v = str(value).strip().lower()
+    if "tank" in v or v.startswith("main") or v.startswith("off"):
+        return "Tank"
+    if "dps" in v or "damage" in v or "dmg" in v or "hitscan" in v:
+        return "DPS"
+    if "sup" in v or "heal" in v:
+        return "Support"
+    return None
+
+
+def ow_seed_mmr_for_new_role(
+    best_role_mmr: int,
+    rank_thresholds: Optional[List[int]] = None,
+    floor: int = 1000,
+    rank_drop: int = OW_NEW_ROLE_RANK_DROP,
+) -> int:
+    """MMR to seed a player's *new* Overwatch role at.
+
+    Seeds ``rank_drop`` full rank bands below the player's top-role rank, using
+    the game's configured rank thresholds (from ``game_mmr_roles``). This
+    respects the non-linear rank ladder — a fixed point drop would punish low
+    ranks far more than high ones.
+
+    ``rank_thresholds`` is the list of rank-band floor MMRs (any order; it is
+    sorted here). If it is missing/empty, falls back to a proportional drop
+    (85% of the distance above ``floor``).
+
+    When thresholds are provided, the ladder floor is taken from them (the lowest
+    rank), NOT the ``floor`` argument -- ladders don't all start at 1000 (Rivals
+    and Valorant start at 500), so a hardcoded floor would clamp low ranks wrong.
+    The ``floor`` argument is only the fallback when no ladder is configured.
+
+    The result is only a *starting* value: the fresh role has games_played=0,
+    so placement K-factor lets it climb to its true rank quickly.
+    """
+    if rank_thresholds:
+        thresholds = sorted(set(int(t) for t in rank_thresholds))
+        ladder_floor = thresholds[0]
+        if best_role_mmr <= ladder_floor:
+            return ladder_floor
+        # Current band = highest threshold <= best_role_mmr (index into thresholds)
+        current_idx = 0
+        for i, t in enumerate(thresholds):
+            if best_role_mmr >= t:
+                current_idx = i
+            else:
+                break
+        target_idx = max(0, current_idx - rank_drop)
+        return max(ladder_floor, thresholds[target_idx])
+    # Fallback when no rank ladder is configured yet
+    if best_role_mmr <= floor:
+        return floor
+    return max(floor, floor + int((best_role_mmr - floor) * 0.85))
+
+
+def pc_seed_mmr(
+    rank_mmr: int,
+    rank_thresholds: Optional[List[int]] = None,
+    offset_tiers: float = 1.0,
+    floor: int = 1000,
+) -> int:
+    """Seed MMR for a *PC* player in a crossplay game, bumped up from their rank.
+
+    A PC player at a given rank out-aims a console player at the same rank, so we
+    seed them ``offset_tiers`` rank bands *above* their console-rank MMR. This is
+    the up-walking mirror of :func:`ow_seed_mmr_for_new_role`: it walks the game's
+    real ``game_mmr_roles`` thresholds so the bump respects the non-linear ladder
+    (a full tier is worth more points high up than low down).
+
+    The result is only a *seed prior*: the player still has games_played=0, so the
+    normal placement K-factor lets Elo converge them to their true rank within
+    ~20 games. It is applied once at setup, never re-added per game.
+
+    ``offset_tiers`` may be fractional (e.g. 0.75); the fractional part interpolates
+    between the two surrounding bands. ``offset_tiers <= 0`` is a no-op.
+
+    The ladder floor is derived from the thresholds themselves (the lowest rank),
+    NOT the ``floor`` argument -- ladders don't all start at 1000 (Rivals starts at
+    500), so a hardcoded floor would wrongly skip the bump for the bottom ranks.
+    """
+    if offset_tiers <= 0:
+        return rank_mmr
+    if not rank_thresholds:
+        return rank_mmr
+    thresholds = sorted(set(int(t) for t in rank_thresholds))
+    if len(thresholds) < 2:
+        return rank_mmr
+    # Only skip when the player is *below* the ladder entirely; a player sitting
+    # exactly on the lowest rank still deserves the bump (Bronze PC -> Silver).
+    if rank_mmr < thresholds[0]:
+        return rank_mmr
+
+    # Current band = highest threshold <= rank_mmr.
+    current_idx = 0
+    for i, t in enumerate(thresholds):
+        if rank_mmr >= t:
+            current_idx = i
+        else:
+            break
+
+    whole = int(offset_tiers)
+    frac = offset_tiers - whole
+    max_idx = len(thresholds) - 1
+
+    base_idx = current_idx + whole
+    if base_idx >= max_idx:
+        # At or past the top of the ladder: extrapolate above the top threshold by
+        # the size of the last gap, so a PC top-rank still seeds above a console
+        # top-rank instead of both landing on the ceiling.
+        top_gap = thresholds[max_idx] - thresholds[max_idx - 1]
+        overflow = (current_idx + offset_tiers) - max_idx
+        return int(thresholds[max_idx] + top_gap * max(0.0, overflow))
+
+    base = thresholds[base_idx]
+    if frac <= 0:
+        return base
+    nxt = thresholds[base_idx + 1] if base_idx + 1 <= max_idx else base + (base - thresholds[base_idx - 1])
+    return int(base + (nxt - base) * frac)
+
+
+def ow_can_form_222(
+    selections: Dict[int, "set"],
+    per_role: Optional[Dict[str, int]] = None,
+) -> Tuple[bool, Dict[str, int]]:
+    """Can these players fill a strict 2-2-2 (default 4 Tank / 4 DPS / 4 Support)?
+
+    ``selections`` maps player_id -> the set of OW roles that player will queue
+    for. Returns ``(feasible, deficit)`` where ``deficit`` maps role -> how many
+    more coverers are needed (0 when that role is satisfiable). Uses bipartite
+    matching (players -> role slots) so overlapping flex picks are resolved
+    optimally, not greedily.
+    """
+    if per_role is None:
+        per_role = {r: 4 for r in OW_ROLES}
+
+    # Expand each role into individual slots; match players to slots.
+    slots: List[str] = []
+    for role in OW_ROLES:
+        slots.extend([role] * per_role.get(role, 0))
+
+    players = list(selections.keys())
+    # slot_match[i] = player_id currently assigned to slot i, or None
+    slot_match: List[Optional[int]] = [None] * len(slots)
+
+    def _try_assign(pid: int, seen: "set") -> bool:
+        for i, role in enumerate(slots):
+            if role in selections.get(pid, ()) and i not in seen:
+                seen.add(i)
+                if slot_match[i] is None or _try_assign(slot_match[i], seen):
+                    slot_match[i] = pid
+                    return True
+        return False
+
+    matched = 0
+    for pid in players:
+        if _try_assign(pid, set()):
+            matched += 1
+
+    # Per-role fill from the resulting matching -> deficit report
+    filled: Dict[str, int] = {r: 0 for r in OW_ROLES}
+    for i, role in enumerate(slots):
+        if slot_match[i] is not None:
+            filled[role] += 1
+    deficit = {r: max(0, per_role.get(r, 0) - filled[r]) for r in OW_ROLES}
+
+    feasible = matched == len(slots)
+    return feasible, deficit
+
+
 def display_width(s: str) -> int:
     """Calculate the monospace display width of a string.
 
@@ -340,6 +544,20 @@ def generate_short_id() -> str:
     """Generate a 5-character alphanumeric ID without confusing chars."""
     chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ123456789'  # No 0, O, I, L
     return ''.join(secrets.choice(chars) for _ in range(5))
+
+
+def slugify_game_name(name: str) -> str:
+    """Slug of a game name for channel prefixes: lowercase, first alphanumeric token."""
+    tokens = re.findall(r'[a-z0-9]+', (name or '').lower())
+    return tokens[0] if tokens else 'game'
+
+
+def resolve_short_name(game: 'GameConfig') -> str:
+    """The prefix used in lobby/VC channel names: explicit short_name, else a slug of the name."""
+    explicit = (getattr(game, 'short_name', None) or '').strip().lower()
+    if explicit:
+        return explicit
+    return slugify_game_name(game.name)
 
 
 def parse_duration_to_minutes(value: str) -> int:
@@ -600,6 +818,11 @@ class GameConfig:
     secondary_schedule_times: Optional[Dict[str, Dict[str, str]]] = None  # Same format as schedule_times
     secondary_queue_match_limit: Optional[int] = None  # Max matches per window, None = unlimited
     secondary_banner_url: Optional[str] = None  # Banner image for secondary queue embeds
+    short_name: Optional[str] = None  # Per-game prefix for lobby/VC channel names (falls back to slug of name)
+
+    # Crossplay PC-player support (Rivals/Overwatch; never Valorant)
+    pc_enabled: bool = False  # If set, setup asks Console/PC and applies the seed bump
+    pc_offset_tiers: float = 1.0  # Rank-tier bump applied once when seeding a PC player
 
 @dataclass
 class SecondaryMode:
@@ -647,6 +870,7 @@ class PlayerStats:
     admin_offset: int = 0
     last_played: Optional[datetime] = None
     returning_games_remaining: int = 0
+    platform: str = 'console'  # 'console' | 'pc' -- admin-only; drives PC seed bump
     is_new: bool = False  # True only when no DB row existed -- not persisted
 
     @property
@@ -675,6 +899,17 @@ class PlayerStats:
                     return K_FACTOR_LEARNING
 
         return base_k
+
+
+@dataclass
+class PlayerRoleStats(PlayerStats):
+    """Per-role MMR for Overwatch (hidden matchmaking engine).
+
+    Inherits effective_mmr and get_k_factor from PlayerStats unchanged, so a
+    freshly-seeded role (games_played=0) automatically runs placement K-factor.
+    """
+    role: str = ""  # 'Tank' | 'DPS' | 'Support'
+
 
 @dataclass
 class QueueState:

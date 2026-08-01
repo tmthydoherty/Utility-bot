@@ -21,6 +21,12 @@ try:
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
 
+try:
+    from utils.economy_award import award_points
+except ImportError:  # Economy bridge absent — trivia carries on regardless.
+    def award_points(*args, **kwargs):
+        pass
+
 # =====================================================================================
 # UTILS & CONSTANTS
 # =====================================================================================
@@ -99,7 +105,27 @@ class TriviaImageGenerator:
 TRIVIA_API_URL_BASE = "https://opentdb.com/api.php"
 CACHE_FETCH_AMOUNT = 50
 EMBED_COLOR_TRIVIA = 0x1ABC9C
-CACHE_MIN_SIZE = 10
+CACHE_MIN_SIZE = 15
+
+
+def get_question_group(category: str) -> str:
+    """Map an OpenTDB category name to a broad subject group for anti-repeat logic.
+
+    All 'Entertainment: *' categories collapse to one group, all Science
+    categories (both 'Science:' and 'Science & Nature') to another; everything
+    else is its own group. Relies only on the category text, so it's robust to
+    whatever the API returns/stores.
+    """
+    c = (category or "").strip()
+    # Video Games gets a pass: it's its own group, not lumped into Entertainment,
+    # so it appears as often as it always has.
+    if c.startswith("Entertainment: Video Games"):
+        return "Video Games"
+    if c.startswith("Entertainment"):
+        return "Entertainment"
+    if c.startswith("Science"):
+        return "Science"
+    return c or "Unknown"
 LEADERBOARD_LIMIT = 20
 EPHEMERAL_QUESTION_TIMEOUT = 20.0
 TRIVIA_TIMEZONE = ZoneInfo("America/New_York")
@@ -1005,7 +1031,7 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
             "daily_interactions": [], "daily_don_interactions": [],
             "daily_don_answer_times": [], "daily_answer_times": [],
             "yesterdays_recap_data": None, "blocked_users": [],
-            "cheater_test_users": {}
+            "cheater_test_users": {}, "recent_question_groups": []
         }
         
         # Ensure all default keys exist
@@ -1326,15 +1352,36 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
             try:
                 log_trivia.info("Global cache is low, refilling with custom category distribution...")
 
-                # Boosted Categories
-                # 15: Games, 12: Music, 31: Anime, 32: Cartoons, 11: Film, 14: TV, 10: Books
-                # 17: Science/Nature, 18: Computers, 30: Gadgets, 21: Sports, 16: Board Games
-                boosted = [15, 12, 31, 11, 14, 10, 17, 18, 30, 21, 16]
+                # Boosted Categories (Anime 31 deliberately NOT boosted; it still
+                # arrives via the random fetch below). Names used for group-spread:
+                # 12 Music, 11 Film, 14 TV, 10 Books, 16 Board Games -> Entertainment
+                # 17 Science & Nature, 18 Computers, 30 Gadgets -> Science
+                # 15 Video Games, 21 Sports, 22 Geography, 23 History, 26 Celebrities,
+                # 27 Animals -> own groups (Video Games gets a pass, appears as often as before)
+                boosted_names = {
+                    12: "Entertainment", 11: "Entertainment", 14: "Entertainment",
+                    10: "Entertainment", 16: "Entertainment",
+                    17: "Science", 18: "Science", 30: "Science",
+                    15: "Video Games", 21: "Sports", 22: "Geography", 23: "History",
+                    26: "Celebrities", 27: "Animals",
+                }
+
+                # Pick 5 boosted categories, capping any single broad group at 2 so
+                # a single refill can't flood the cache with one subject.
+                group_counts: dict = {}
+                selected_boosted = []
+                for cat in random.sample(list(boosted_names), len(boosted_names)):
+                    grp = boosted_names[cat]
+                    if group_counts.get(grp, 0) >= 2:
+                        continue
+                    selected_boosted.append(cat)
+                    group_counts[grp] = group_counts.get(grp, 0) + 1
+                    if len(selected_boosted) >= 5:
+                        break
 
                 fetch_tasks = []
-                selected_boosted = random.sample(boosted, 5) # Pick 5 boosted categories
                 for cat in selected_boosted:
-                    url = f"{TRIVIA_API_URL_BASE}?amount=7&category={cat}&type=multiple"
+                    url = f"{TRIVIA_API_URL_BASE}?amount=5&category={cat}&type=multiple"
                     fetch_tasks.append(self.session.get(url, timeout=aiohttp.ClientTimeout(total=10)))
 
                 # 15 random questions
@@ -1421,6 +1468,17 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
             self.config_is_dirty = True
             return global_data["question_cache"].pop(0)
 
+    def _pop_question_avoiding_groups(self, cache: list, avoid: set) -> typing.Optional[dict]:
+        """Pop the first cached question whose broad group isn't in `avoid`.
+
+        Falls back to the head of the cache if every candidate is in a recent
+        group, so the daily post never fails for lack of a "fresh" subject.
+        """
+        for i, q in enumerate(cache):
+            if get_question_group(q.get("category", "")) not in avoid:
+                return cache.pop(i)
+        return cache.pop(0) if cache else None
+
     async def _handle_monthly_role_reward(self, guild: discord.Guild, scores: dict):
         # scores (global) are passed in, but settings are guild-specific
         cfg_settings = self.get_guild_settings(guild.id)
@@ -1501,9 +1559,22 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
                 "daily_don_answer_times": global_data.get("daily_don_answer_times", []).copy()
             }
 
-            # Reset GLOBAL daily data
-            global_data["daily_question_data"] = global_data["question_cache"].pop(0)
-            global_data["daily_don_question_data"] = global_data["question_cache"].pop(0)
+            # Reset GLOBAL daily data.
+            # Pick the day's questions avoiding broad subject groups used in the
+            # last ~2 days, so the same subject can't run on consecutive days.
+            cache = global_data["question_cache"]
+            recent = set(global_data.get("recent_question_groups", []))
+            main_q = self._pop_question_avoiding_groups(cache, recent)
+            main_group = get_question_group((main_q or {}).get("category", ""))
+            don_q = self._pop_question_avoiding_groups(cache, recent | {main_group})
+            global_data["daily_question_data"] = main_q
+            global_data["daily_don_question_data"] = don_q
+
+            # Track the last 2 days of main-question groups (guarantees no group
+            # repeats within any rolling 3-day window).
+            recent_groups = global_data.get("recent_question_groups", [])
+            recent_groups.append(main_group)
+            global_data["recent_question_groups"] = recent_groups[-2:]
             global_data["daily_interactions"], global_data["daily_don_interactions"], global_data["daily_answer_times"], global_data["daily_don_answer_times"] = [], [], [], []
             
             now_est = datetime.now(TRIVIA_TIMEZONE)
@@ -1790,7 +1861,10 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
                 await interaction.response.defer()
             
             answer_time, user_id_str = datetime.now(timezone.utc), str(interaction.user.id)
-            
+
+            # Economy: playing today's trivia earns Points (once per day).
+            award_points(self.bot, interaction.user.id, "trivia")
+
             # Validation check for custom_id
             custom_id_parts = interaction.data["custom_id"].split('_')
             if len(custom_id_parts) < 2:

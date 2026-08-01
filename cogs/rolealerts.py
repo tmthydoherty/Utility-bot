@@ -188,76 +188,21 @@ class ClaimedAlertView(discord.ui.View):
         self.thread_id = thread_id
         self.role_id = role_id
 
-        # Create buttons with dynamic custom_ids that encode the alert data
-        join_btn = discord.ui.Button(
+        # Buttons deliberately carry NO callback: every ralert_* click is handled
+        # by RoleAlerts.on_interaction, which parses these custom_ids. That listener
+        # is the only path that survives a restart (nothing re-registers these views
+        # on startup), so it owns all four actions. Attaching callbacks here too
+        # would double-handle the click and the loser gets 40060 "already acknowledged".
+        self.add_item(discord.ui.Button(
             label="Join",
             style=discord.ButtonStyle.primary,
             custom_id=f"ralert_join:{alert_id}:{thread_id}:{role_id or 0}"
-        )
-        join_btn.callback = self.join_callback
-        self.add_item(join_btn)
-
-        close_btn = discord.ui.Button(
+        ))
+        self.add_item(discord.ui.Button(
             label="Close Thread",
             style=discord.ButtonStyle.danger,
             custom_id=f"ralert_close:{alert_id}:{thread_id}:{role_id or 0}"
-        )
-        close_btn.callback = self.close_callback
-        self.add_item(close_btn)
-
-    async def join_callback(self, interaction: discord.Interaction):
-        """Allow admins to join the thread."""
-        role_settings = None
-        if self.role_id:
-            role_settings = await self.cog.get_tracked_role_settings(interaction.guild_id, self.role_id)
-
-        is_admin = interaction.user.guild_permissions.administrator
-        if role_settings and role_settings.get('admin_role_id'):
-            admin_role = interaction.guild.get_role(role_settings['admin_role_id'])
-            if admin_role and admin_role in interaction.user.roles:
-                is_admin = True
-        if hasattr(self.cog.bot, 'is_bot_admin'):
-            is_admin = is_admin or self.cog.bot.is_bot_admin(interaction.user)
-
-        if not is_admin:
-            await interaction.response.send_message("You don't have permission.", ephemeral=True)
-            return
-
-        thread = interaction.guild.get_channel_or_thread(self.thread_id)
-        if not thread:
-            await interaction.response.send_message("Thread no longer exists.", ephemeral=True)
-            return
-
-        try:
-            await thread.add_user(interaction.user)
-            await interaction.response.send_message(f"You've been added to {thread.mention}", ephemeral=True)
-        except discord.HTTPException as e:
-            await interaction.response.send_message(f"Failed to join: {e}", ephemeral=True)
-
-    async def close_callback(self, interaction: discord.Interaction):
-        """Handle close button click."""
-        role_settings = None
-        if self.role_id:
-            role_settings = await self.cog.get_tracked_role_settings(interaction.guild_id, self.role_id)
-
-        is_admin = interaction.user.guild_permissions.administrator
-        if role_settings and role_settings.get('admin_role_id'):
-            admin_role = interaction.guild.get_role(role_settings['admin_role_id'])
-            if admin_role and admin_role in interaction.user.roles:
-                is_admin = True
-        if hasattr(self.cog.bot, 'is_bot_admin'):
-            is_admin = is_admin or self.cog.bot.is_bot_admin(interaction.user)
-
-        if not is_admin:
-            await interaction.response.send_message("You don't have permission.", ephemeral=True)
-            return
-
-        confirm_view = CloseConfirmView(self.cog, self.alert_id, self.thread_id)
-        await interaction.response.send_message(
-            "Delete this thread? This cannot be undone.",
-            view=confirm_view,
-            ephemeral=True
-        )
+        ))
 
 
 class ClaimButton(discord.ui.View):
@@ -271,185 +216,19 @@ class ClaimButton(discord.ui.View):
         self.role_name = role_name
         self.role_id = role_id
 
-        # Create buttons with dynamic custom_ids that encode the alert data
-        claim_btn = discord.ui.Button(
+        # Buttons deliberately carry NO callback — see ClaimedAlertView above.
+        # RoleAlerts.on_interaction parses these custom_ids and is the single
+        # handler for every ralert_* click.
+        self.add_item(discord.ui.Button(
             label="Claim",
             style=discord.ButtonStyle.primary,
             custom_id=f"ralert_claim:{alert_id}:{user_id}:{role_id or 0}"
-        )
-        claim_btn.callback = self.claim_callback
-        self.add_item(claim_btn)
-
-        dismiss_btn = discord.ui.Button(
+        ))
+        self.add_item(discord.ui.Button(
             label="Dismiss",
             style=discord.ButtonStyle.secondary,
             custom_id=f"ralert_dismiss:{alert_id}:{user_id}:{role_id or 0}"
-        )
-        dismiss_btn.callback = self.dismiss_callback
-        self.add_item(dismiss_btn)
-
-    async def claim_callback(self, interaction: discord.Interaction):
-        """Handle the claim button click."""
-        role_settings = None
-        if self.role_id:
-            role_settings = await self.cog.get_tracked_role_settings(interaction.guild_id, self.role_id)
-
-        is_admin = False
-        if interaction.user.guild_permissions.administrator:
-            is_admin = True
-        elif role_settings and role_settings.get('admin_role_id'):
-            admin_role = interaction.guild.get_role(role_settings['admin_role_id'])
-            if admin_role and admin_role in interaction.user.roles:
-                is_admin = True
-
-        if hasattr(self.cog.bot, 'is_bot_admin'):
-            is_admin = is_admin or self.cog.bot.is_bot_admin(interaction.user)
-
-        if not is_admin:
-            await interaction.response.send_message("You don't have permission.", ephemeral=True)
-            return
-
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute(
-                "SELECT claimed_by, status FROM active_alerts WHERE alert_id = ?",
-                (self.alert_id,)
-            )
-            row = await cursor.fetchone()
-
-            if not row:
-                await interaction.response.send_message("Alert no longer exists.", ephemeral=True)
-                return
-
-            if row[0] is not None or row[1] == 'claimed':
-                claimer = interaction.guild.get_member(row[0])
-                claimer_name = claimer.display_name if claimer else "Unknown"
-                await interaction.response.send_message(f"Already claimed by {claimer_name}.", ephemeral=True)
-                return
-
-            # Check for existing active thread for this user/role
-            cursor = await db.execute(
-                """SELECT thread_id FROM active_alerts
-                   WHERE guild_id = ? AND user_id = ? AND role_id = ?
-                   AND status = 'claimed' AND thread_id IS NOT NULL""",
-                (interaction.guild_id, self.user_id, self.role_id)
-            )
-            existing = await cursor.fetchone()
-            if existing:
-                thread = interaction.guild.get_channel_or_thread(existing[0])
-                if thread:
-                    await interaction.response.send_message(
-                        f"There's already an active thread for this user: {thread.mention}",
-                        ephemeral=True
-                    )
-                    return
-
-            # Mark as claimed immediately to prevent race condition
-            await db.execute(
-                "UPDATE active_alerts SET claimed_by = ?, status = 'claimed' WHERE alert_id = ? AND claimed_by IS NULL",
-                (interaction.user.id, self.alert_id)
-            )
-            await db.commit()
-
-        await interaction.response.defer()
-
-        target_user = interaction.guild.get_member(self.user_id)
-        if not target_user:
-            await interaction.followup.send("User is no longer in the server.", ephemeral=True)
-            return
-
-        try:
-            # Use per-role thread name format or default
-            thread_format = (role_settings.get('thread_name_format') if role_settings else None) or '{user}-{role}'
-            thread_name = thread_format.format(
-                user=target_user.display_name[:20],
-                role=self.role_name[:20],
-                date=datetime.now(timezone.utc).strftime("%m-%d")
-            )[:100]
-
-            # Use parent channel (thread_channel_id) if set, otherwise alert channel
-            thread_channel = interaction.channel
-            if role_settings and role_settings.get('thread_channel_id'):
-                thread_channel = interaction.guild.get_channel(role_settings['thread_channel_id'])
-                if not thread_channel:
-                    thread_channel = interaction.channel
-
-            thread = await thread_channel.create_thread(
-                name=thread_name,
-                type=discord.ChannelType.private_thread,
-                auto_archive_duration=AUTO_ARCHIVE_DURATION,
-                reason=f"Role alert claimed by {interaction.user}"
-            )
-
-            await thread.add_user(target_user)
-
-            # Use per-role welcome message
-            welcome_msg_template = role_settings.get('welcome_message') if role_settings else None
-
-            # Only send welcome message if set
-            if welcome_msg_template:
-                welcome_msg = welcome_msg_template.format(
-                    user=target_user.mention,
-                    role=self.role_name,
-                    admin=interaction.user.mention
-                )
-                await thread.send(welcome_msg)
-
-            async with aiosqlite.connect(DB_PATH) as db:
-                await db.execute("""
-                    UPDATE active_alerts
-                    SET thread_id = ?, claimed_at = ?
-                    WHERE alert_id = ?
-                """, (thread.id, datetime.now(timezone.utc).isoformat(), self.alert_id))
-                await db.commit()
-
-            embed = interaction.message.embeds[0] if interaction.message.embeds else None
-            if embed:
-                embed.color = discord.Color.green()
-                embed.description = f"{embed.description}\n{thread.mention}"
-                embed.set_footer(text=f"Claimed by {interaction.user.display_name}")
-
-            new_view = ClaimedAlertView(self.cog, self.alert_id, thread.id, self.role_id)
-
-            await interaction.message.edit(embed=embed, view=new_view)
-            await interaction.followup.send(f"Thread created: {thread.mention}", ephemeral=True)
-
-        except discord.Forbidden:
-            await interaction.followup.send("Missing permissions to create threads.", ephemeral=True)
-        except Exception as e:
-            logger.error(f"Error creating thread: {e}", exc_info=True)
-            await interaction.followup.send(f"Error: {e}", ephemeral=True)
-
-    async def dismiss_callback(self, interaction: discord.Interaction):
-        """Dismiss the alert without creating a thread."""
-        role_settings = None
-        if self.role_id:
-            role_settings = await self.cog.get_tracked_role_settings(interaction.guild_id, self.role_id)
-
-        is_admin = interaction.user.guild_permissions.administrator
-        if role_settings and role_settings.get('admin_role_id'):
-            admin_role = interaction.guild.get_role(role_settings['admin_role_id'])
-            if admin_role and admin_role in interaction.user.roles:
-                is_admin = True
-        if hasattr(self.cog.bot, 'is_bot_admin'):
-            is_admin = is_admin or self.cog.bot.is_bot_admin(interaction.user)
-
-        if not is_admin:
-            await interaction.response.send_message("You don't have permission.", ephemeral=True)
-            return
-
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                "UPDATE active_alerts SET status = 'dismissed', claimed_by = ? WHERE alert_id = ?",
-                (interaction.user.id, self.alert_id)
-            )
-            await db.commit()
-
-        embed = interaction.message.embeds[0] if interaction.message.embeds else None
-        if embed:
-            embed.color = discord.Color.dark_gray()
-            embed.set_footer(text=f"Dismissed by {interaction.user.display_name}")
-
-        await interaction.response.edit_message(embed=embed, view=None)
+        ))
 
 
 # ============================================================================

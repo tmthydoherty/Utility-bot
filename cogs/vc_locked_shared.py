@@ -1,23 +1,31 @@
 import discord
 from discord.ext import commands
+import aiohttp
 import aiosqlite
 import json
 import asyncio
 import logging
+import os
 import time
 
 # --- CONSTANTS ---
 DB_FILE = "vc_data.db"
-TRIGGER_NAME = "➕ Join to create locked vc"  # Locked VCs trigger
-TRIGGER_NAME_BASIC = "➕ Join to create vc"   # Basic VCs trigger
-TRIGGER_NAME_SPECTATOR = "➕ Join to create spectator vc"  # Spectator VCs trigger
-SPECTATOR_PREFIX = "🤫 "
+# Base ("join to create") channel names. Only used as a fallback for guilds that
+# haven't picked their base channels in the admin panel — see get_trigger_channel_ids().
+DEFAULT_TRIGGER_NAME_LOCKED = "➕ Join to create locked vc"
+DEFAULT_TRIGGER_NAME_BASIC = "➕ Join to create vc"
 BANNED_WORDS = ["badword1", "badword2", "naughty"]
 
-# Bots that should always be able to join locked VCs
+# Bots that should always be able to join locked VCs — all three pool bots
 WHITELISTED_BOT_IDS = [
-    1406417971290832966,  # VibeyMusic
+    1406417971290832966,  # VibeyMusic (primary)
+    1527517684542083203,  # VibeyMusic (2)
+    1527530687492784338,  # VibeyMusic (3)
 ]
+
+# VibeyMusic launch bridge (localhost HTTP server run by the music bot)
+MUSIC_BRIDGE_URL = "http://127.0.0.1:4417/launch"
+MUSIC_BRIDGE_SECRET = os.environ.get("VIBEY_BRIDGE_SECRET")  # optional shared secret
 
 # Issue #16 fix: Use constants instead of magic strings for verify_channel_exists results
 VERIFY_FORBIDDEN = "FORBIDDEN"
@@ -104,9 +112,6 @@ async def init_db():
                     if 'created_at' not in columns:
                         logger.info("Migrating DB: Adding created_at column...")
                         await db.execute("ALTER TABLE active_vcs ADD COLUMN created_at REAL DEFAULT 0")
-                    if 'spectator' not in columns:
-                        logger.info("Migrating DB: Adding spectator column...")
-                        await db.execute("ALTER TABLE active_vcs ADD COLUMN spectator INTEGER DEFAULT 0")
             except Exception as e:
                 logger.error(f"Migration failed: {e}")
 
@@ -137,12 +142,40 @@ async def set_config(key, value):
         logger.error(f"Failed to set config {key}: {e}")
         raise
 
+async def get_trigger_channel_ids(guild_id):
+    """
+    (locked_base_channel_id, basic_base_channel_id) as picked in the admin panel.
+    Either may be None, in which case the caller falls back to the legacy
+    DEFAULT_TRIGGER_NAME_* match so un-configured guilds keep working.
+    """
+    def _parse(raw):
+        try:
+            return int(raw) if raw else None
+        except (ValueError, TypeError):
+            return None
+    locked = _parse(await get_config(f"trigger_channel_locked_{guild_id}"))
+    basic = _parse(await get_config(f"trigger_channel_basic_{guild_id}"))
+    return locked, basic
+
+async def get_ignored_config(guild_id):
+    """
+    Channels the VC system must never touch (permanent channels).
+    Returns (lowercased name list, set of channel ids).
+    """
+    raw_names = await get_config(f"excluded_vc_names_{guild_id}", "") or ""
+    names = [n.strip().lower() for n in raw_names.split(",") if n.strip()]
+    try:
+        ids = {int(x) for x in json.loads(await get_config(f"ignored_vc_ids_{guild_id}", "[]") or "[]")}
+    except (ValueError, TypeError):
+        ids = set()
+    return names, ids
+
 async def load_active_vcs():
     logger.info("Loading active VCs from database...")
     try:
         async with DB_SEMAPHORE:
             async with aiosqlite.connect(DB_FILE) as db:
-                async with db.execute("SELECT vc_id, owner_id, message_id, knock_mgmt_msg_id, thread_id, ghost, unlocked, bans, mute_knock_pings, guild_id, is_basic, last_seen_occupied, created_at, spectator FROM active_vcs") as cursor:
+                async with db.execute("SELECT vc_id, owner_id, message_id, knock_mgmt_msg_id, thread_id, ghost, unlocked, bans, mute_knock_pings, guild_id, is_basic, last_seen_occupied, created_at FROM active_vcs") as cursor:
                     rows = await cursor.fetchall()
                     result = {}
                     corrupted = []
@@ -175,8 +208,7 @@ async def load_active_vcs():
                                 'guild_id': int(row[9]) if len(row) > 9 and row[9] else None,
                                 'is_basic': bool(row[10]) if len(row) > 10 else False,
                                 'last_seen_occupied': float(row[11]) if len(row) > 11 and row[11] else time.time(),
-                                'created_at': float(row[12]) if len(row) > 12 and row[12] else time.time(),
-                                'spectator': bool(row[13]) if len(row) > 13 else False
+                                'created_at': float(row[12]) if len(row) > 12 and row[12] else time.time()
                             }
                         except (json.JSONDecodeError, TypeError, ValueError) as e:
                             logger.error(f"Corrupted data for VC {row[0]}: {e}")
@@ -218,8 +250,7 @@ async def save_multiple_vcs(vcs_dict):
                 bans_json,
                 int(data.get('mute_knock_pings', False)),
                 int(data['guild_id']) if data.get('guild_id') else None,
-                int(data.get('is_basic', False)),
-                int(data.get('spectator', False))
+                int(data.get('is_basic', False))
             ))
         if not data_list:
             return
@@ -229,8 +260,8 @@ async def save_multiple_vcs(vcs_dict):
                 try:
                     await db.execute("BEGIN TRANSACTION")
                     await db.executemany('''
-                        INSERT OR REPLACE INTO active_vcs (vc_id, owner_id, message_id, knock_mgmt_msg_id, thread_id, ghost, unlocked, bans, mute_knock_pings, guild_id, is_basic, spectator)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        INSERT OR REPLACE INTO active_vcs (vc_id, owner_id, message_id, knock_mgmt_msg_id, thread_id, ghost, unlocked, bans, mute_knock_pings, guild_id, is_basic)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ''', data_list)
                     await db.commit()
                 except Exception as e:
@@ -442,23 +473,16 @@ def create_knock_management_embed(owner, pending_knocks, guild, vc_data=None):
         )
     else:
         if vc_data:
-            if vc_data.get('spectator', False):
-                embed.description = (
-                    f"- **Mode:** 🤫 **SPECTATOR**\n"
-                    f"*(Everyone can join but only unmuted users can speak)*\n\n"
-                    f"- To unmute users either @ them here or use **Unmute Users** in the settings menu below"
-                )
-            else:
-                lock_status = "🔒 **LOCKED**" if not vc_data.get('unlocked', False) else "🔓 **UNLOCKED**"
-                ghost_status = "**ON**" if vc_data.get('ghost', False) else "**OFF**"
+            lock_status = "🔒 **LOCKED**" if not vc_data.get('unlocked', False) else "🔓 **UNLOCKED**"
+            ghost_status = "**ON**" if vc_data.get('ghost', False) else "**OFF**"
 
-                embed.description = (
-                    f"- **Lock status:** {lock_status}\n"
-                    f"*(Unlocking your vc opens it up to the public for anyone to join)*\n\n"
-                    f"- **Ghost mode:** {ghost_status}\n"
-                    f"*(Enabling ghost mode will keep your vc locked but remove the knock ability from the public)*\n\n"
-                    f"- To manually add users to your vc either @ them here or add them to the VIP list with the settings menu below"
-                )
+            embed.description = (
+                f"- **Lock status:** {lock_status}\n"
+                f"*(Unlocking your vc opens it up to the public for anyone to join)*\n\n"
+                f"- **Ghost mode:** {ghost_status}\n"
+                f"*(Enabling ghost mode will keep your vc locked but remove the knock ability from the public)*\n\n"
+                f"- To manually add users to your vc either @ them here or add them to the VIP list with the settings menu below"
+            )
         else:
             embed.description = (
                 f"Welcome {owner.mention}!\n\n"
@@ -645,25 +669,6 @@ class InfoContentModal(discord.ui.Modal, title="Set Info Button Content"):
             logger.error(f"Failed to save info content: {e}")
             await interaction.response.send_message("❌ Failed to save content. Please try again.", ephemeral=True)
 
-class IdleNameModal(discord.ui.Modal, title="Set Idle Channel Name"):
-    name = discord.ui.TextInput(label="Channel Name (0 Active VCs)", placeholder="e.g. 💤-locked-vcs-idle", default="locked-vcs-idle", max_length=100)
-    def __init__(self, bot):
-        super().__init__()
-        self.bot = bot
-    
-    async def on_submit(self, interaction: discord.Interaction):
-        if contains_banned_word(self.name.value): 
-            return await interaction.response.send_message("❌ Name contains banned words.", ephemeral=True)
-        try:
-            await set_config(f'idle_name_{interaction.guild_id}', self.name.value)
-            await interaction.response.send_message(f"✅ Idle name set to: **{self.name.value}**", ephemeral=True)
-            cog = get_cog_safe(self.bot)
-            if cog: 
-                await cog.update_hub_name(interaction.guild, force=True)
-        except Exception as e:
-            logger.error(f"Failed to set idle name: {e}")
-            await interaction.response.send_message("❌ Failed to save name.", ephemeral=True)
-
 class RulesEmbedModal(discord.ui.Modal, title="Post Rules Embed"):
     title_input = discord.ui.TextInput(label="Embed Title", placeholder="How to use Locked VCs...", max_length=256)
     description_input = discord.ui.TextInput(label="Embed Description", style=discord.TextStyle.paragraph, placeholder="1. Join...", max_length=4000)
@@ -685,17 +690,41 @@ class RulesEmbedModal(discord.ui.Modal, title="Post Rules Embed"):
             description=self.description_input.value,
             color=discord.Color.blue()
         )
-        
+
+        # Persist so the modal comes pre-filled next time
+        await set_config(f'rules_title_{interaction.guild_id}', self.title_input.value)
+        await set_config(f'rules_description_{interaction.guild_id}', self.description_input.value)
+
+        # Knock button only shows while locked VCs are live
+        cog = get_cog_safe(self.bot)
+        show_knock = False
+        if cog:
+            try:
+                show_knock = bool(await cog.get_knockable_vcs(interaction.guild))
+            except Exception:
+                pass
+
         try:
-            await hub_channel.send(embed=embed, view=RulesView(self.bot))
+            msg = await hub_channel.send(embed=embed, view=RulesView(self.bot, show_knock=show_knock))
+            # Replace the previous rules message and remember the new one
+            old_id = await get_config(f'rules_msg_id_{interaction.guild_id}')
+            if old_id:
+                try:
+                    await hub_channel.get_partial_message(int(old_id)).delete()
+                except (discord.NotFound, discord.HTTPException):
+                    pass
+            await set_config(f'rules_msg_id_{interaction.guild_id}', msg.id)
+            if cog:
+                cog._rules_msg_ids[interaction.guild_id] = msg.id
+                cog._rules_knock_state[interaction.guild_id] = show_knock
             await interaction.response.send_message("✅ Rules embed posted!", ephemeral=True)
         except Exception as e:
             logger.error(f"Failed to post rules: {e}")
             await interaction.response.send_message("❌ Failed to post rules embed.", ephemeral=True)
 
-class ExclusionsModal(discord.ui.Modal, title="Set VC Exclusions"):
+class IgnoredNamesModal(discord.ui.Modal, title="Ignore VCs by Name"):
     exclusions = discord.ui.TextInput(
-        label="Excluded VC Names (comma-separated)",
+        label="Ignored VC Names (comma-separated)",
         style=discord.TextStyle.paragraph,
         placeholder="e.g. General, Music, AFK",
         required=False,
@@ -720,24 +749,165 @@ class ExclusionsModal(discord.ui.Modal, title="Set VC Exclusions"):
 
             await set_config(f'excluded_vc_names_{interaction.guild_id}', value)
 
-            # Issue #5 fix: Invalidate the exclusion cache after admin updates
+            # Issue #5 fix: Invalidate the ignore cache after admin updates
             cog = get_cog_safe(self.bot)
             if cog:
-                cog.invalidate_exclusion_cache(interaction.guild_id)
+                cog.invalidate_ignore_cache(interaction.guild_id)
 
             if value:
                 await interaction.response.send_message(
-                    f"✅ Exclusions set! The following VC names will be ignored:\n`{value}`",
+                    f"✅ The following VC names will be ignored:\n`{value}`",
                     ephemeral=True
                 )
             else:
                 await interaction.response.send_message(
-                    "✅ Exclusions cleared. No VCs will be excluded.",
+                    "✅ Name-based ignores cleared.",
                     ephemeral=True
                 )
         except Exception as e:
-            logger.error(f"Failed to save exclusions: {e}")
-            await interaction.response.send_message("❌ Failed to save exclusions.", ephemeral=True)
+            logger.error(f"Failed to save ignored names: {e}")
+            await interaction.response.send_message("❌ Failed to save ignored names.", ephemeral=True)
+
+
+class BaseChannelsView(discord.ui.View):
+    """
+    Ephemeral admin view for picking the two 'join to create' channels.
+    Stored as channel ids, so renaming them in Discord afterwards is free.
+    """
+
+    def __init__(self, bot, locked_id=None, basic_id=None):
+        super().__init__(timeout=180)
+        self.bot = bot
+
+        self.locked_select = discord.ui.ChannelSelect(
+            placeholder="🔒 Locked VC base channel…",
+            channel_types=[discord.ChannelType.voice],
+            min_values=1, max_values=1, row=0,
+            default_values=[discord.Object(id=locked_id)] if locked_id else [],
+        )
+        self.locked_select.callback = self._on_locked
+        self.add_item(self.locked_select)
+
+        self.basic_select = discord.ui.ChannelSelect(
+            placeholder="🔊 Normal VC base channel…",
+            channel_types=[discord.ChannelType.voice],
+            min_values=1, max_values=1, row=1,
+            default_values=[discord.Object(id=basic_id)] if basic_id else [],
+        )
+        self.basic_select.callback = self._on_basic
+        self.add_item(self.basic_select)
+
+    async def _check_admin(self, interaction: discord.Interaction) -> bool:
+        if not self.bot.is_bot_admin(interaction.user):
+            await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True)
+            return False
+        return True
+
+    async def _set(self, interaction, kind, channel):
+        """kind is 'locked' or 'basic'; the other slot must not point at the same channel."""
+        other = 'basic' if kind == 'locked' else 'locked'
+        other_id = await get_config(f'trigger_channel_{other}_{interaction.guild_id}')
+        if other_id and int(other_id) == channel.id:
+            return await interaction.response.send_message(
+                "❌ That channel is already the other base channel — pick a different one.", ephemeral=True)
+
+        await set_config(f'trigger_channel_{kind}_{interaction.guild_id}', channel.id)
+        cog = get_cog_safe(self.bot)
+        if cog:
+            cog.invalidate_trigger_cache(interaction.guild_id)
+
+        label = "Locked" if kind == 'locked' else "Normal"
+        await interaction.response.send_message(
+            f"✅ {label} VC base channel set to {channel.mention}.\n"
+            f"*Rename it however you like — the bot tracks the channel, not its name.*",
+            ephemeral=True)
+
+    async def _on_locked(self, interaction: discord.Interaction):
+        if not await self._check_admin(interaction):
+            return
+        await self._set(interaction, 'locked', self.locked_select.values[0])
+
+    async def _on_basic(self, interaction: discord.Interaction):
+        if not await self._check_admin(interaction):
+            return
+        await self._set(interaction, 'basic', self.basic_select.values[0])
+
+    @discord.ui.button(label="Reset to Defaults", style=discord.ButtonStyle.danger, row=2)
+    async def reset(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Clear both picks and fall back to matching the default channel names."""
+        if not await self._check_admin(interaction):
+            return
+        await set_config(f'trigger_channel_locked_{interaction.guild_id}', None)
+        await set_config(f'trigger_channel_basic_{interaction.guild_id}', None)
+        cog = get_cog_safe(self.bot)
+        if cog:
+            cog.invalidate_trigger_cache(interaction.guild_id)
+        await interaction.response.send_message(
+            "✅ Base channels reset. Falling back to matching by name:\n"
+            f"🔒 `{DEFAULT_TRIGGER_NAME_LOCKED}`\n"
+            f"🔊 `{DEFAULT_TRIGGER_NAME_BASIC}`",
+            ephemeral=True)
+
+
+class IgnoredChannelsView(discord.ui.View):
+    """Ephemeral admin view for picking channels the VC system must leave alone."""
+
+    def __init__(self, bot, current_ids=()):
+        super().__init__(timeout=180)
+        self.bot = bot
+
+        defaults = [discord.Object(id=cid) for cid in list(current_ids)[:25]]
+        self.channel_select = discord.ui.ChannelSelect(
+            placeholder="Channels to ignore… (overwrites the list)",
+            channel_types=[discord.ChannelType.voice, discord.ChannelType.stage_voice],
+            min_values=0, max_values=25, row=0,
+            default_values=defaults,
+        )
+        self.channel_select.callback = self._on_channels
+        self.add_item(self.channel_select)
+
+    async def _check_admin(self, interaction: discord.Interaction) -> bool:
+        if not self.bot.is_bot_admin(interaction.user):
+            await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True)
+            return False
+        return True
+
+    def _invalidate(self, guild_id):
+        cog = get_cog_safe(self.bot)
+        if cog:
+            cog.invalidate_ignore_cache(guild_id)
+
+    async def _on_channels(self, interaction: discord.Interaction):
+        if not await self._check_admin(interaction):
+            return
+        ids = [c.id for c in self.channel_select.values]
+        await set_config(f'ignored_vc_ids_{interaction.guild_id}', json.dumps(ids))
+        self._invalidate(interaction.guild_id)
+        names = ", ".join(f"<#{cid}>" for cid in ids) or "none"
+        await interaction.response.send_message(
+            f"✅ Ignored channels set to: {names}", ephemeral=True)
+
+    @discord.ui.button(label="Ignore by Name", style=discord.ButtonStyle.secondary, emoji="🔤", row=1)
+    async def by_name(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Name patterns still work — useful for channels recreated with the same name."""
+        if not await self._check_admin(interaction):
+            return
+        modal = IgnoredNamesModal(self.bot)
+        current = await get_config(f'excluded_vc_names_{interaction.guild_id}', "")
+        if current:
+            modal.exclusions.default = current
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="Clear All", style=discord.ButtonStyle.danger, row=1)
+    async def clear_all(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check_admin(interaction):
+            return
+        await set_config(f'ignored_vc_ids_{interaction.guild_id}', "[]")
+        await set_config(f'excluded_vc_names_{interaction.guild_id}', "")
+        self._invalidate(interaction.guild_id)
+        await interaction.response.send_message(
+            "✅ Ignore list cleared — the VC system will manage every channel in its category.",
+            ephemeral=True)
 
 
 class SavePresetModal(discord.ui.Modal, title="Save Preset"):
@@ -782,7 +952,7 @@ class AdminPanelView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="Set Category", style=discord.ButtonStyle.primary, emoji="📁", custom_id="admin_set_category")
+    @discord.ui.button(label="Set Category", style=discord.ButtonStyle.primary, emoji="📁", custom_id="admin_set_category", row=0)
     async def set_category(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self._check_admin(interaction):
             return
@@ -809,50 +979,308 @@ class AdminPanelView(discord.ui.View):
         view.add_item(select)
         await interaction.response.send_message("Select category:", view=view, ephemeral=True)
     
-    @discord.ui.button(label="Set Info Content", style=discord.ButtonStyle.secondary, emoji="ℹ️", custom_id="admin_set_info")
+    @discord.ui.button(label="Set Base Channels", style=discord.ButtonStyle.primary, emoji="📝", custom_id="admin_set_triggers", row=0)
+    async def set_base_channels(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Pick the 'join to create' channels for normal and locked custom VCs"""
+        if not await self._check_admin(interaction):
+            return
+        locked_id, basic_id = await get_trigger_channel_ids(interaction.guild_id)
+        summary = (
+            "Pick the channels users join to spawn a custom VC.\n"
+            f"🔒 Locked: {f'<#{locked_id}>' if locked_id else f'*by name — `{DEFAULT_TRIGGER_NAME_LOCKED}`*'}\n"
+            f"🔊 Normal: {f'<#{basic_id}>' if basic_id else f'*by name — `{DEFAULT_TRIGGER_NAME_BASIC}`*'}"
+        )
+        await interaction.response.send_message(
+            summary, view=BaseChannelsView(self.bot, locked_id, basic_id), ephemeral=True)
+
+    @discord.ui.button(label="Set Info Content", style=discord.ButtonStyle.secondary, emoji="ℹ️", custom_id="admin_set_info", row=0)
     async def set_info(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self._check_admin(interaction):
             return
         await interaction.response.send_modal(InfoContentModal(self.bot))
 
-    @discord.ui.button(label="Set Idle Name", style=discord.ButtonStyle.secondary, emoji="💤", custom_id="admin_idle_name")
-    async def set_idle_name(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await self._check_admin(interaction):
-            return
-        await interaction.response.send_modal(IdleNameModal(self.bot))
-
-    @discord.ui.button(label="Post Rules", style=discord.ButtonStyle.success, emoji="📋", custom_id="admin_post_rules")
+    @discord.ui.button(label="Post Rules", style=discord.ButtonStyle.success, emoji="📋", custom_id="admin_post_rules", row=1)
     async def post_rules(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self._check_admin(interaction):
             return
-        await interaction.response.send_modal(RulesEmbedModal(self.bot))
+        # Pre-fill with the last posted rules so re-posting doesn't mean retyping
+        modal = RulesEmbedModal(self.bot)
+        saved_title = await get_config(f'rules_title_{interaction.guild_id}', "")
+        saved_desc = await get_config(f'rules_description_{interaction.guild_id}', "")
+        if saved_title:
+            modal.title_input.default = saved_title
+        if saved_desc:
+            modal.description_input.default = saved_desc
+        await interaction.response.send_modal(modal)
 
-    @discord.ui.button(label="Set Exclusions", style=discord.ButtonStyle.secondary, emoji="🚫", custom_id="admin_set_exclusions")
-    async def set_exclusions(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """Set VC names to exclude from the locked VC system"""
+    @discord.ui.button(label="Ignored Channels", style=discord.ButtonStyle.secondary, emoji="🚫", custom_id="admin_set_exclusions", row=1)
+    async def set_ignored_channels(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Pick permanent channels the VC system must never rename, adopt or clean up"""
         if not await self._check_admin(interaction):
             return
-        # Pre-populate the modal with current exclusions
-        current_exclusions = await get_config(f'excluded_vc_names_{interaction.guild_id}', "")
-        modal = ExclusionsModal(self.bot)
-        if current_exclusions:
-            modal.exclusions.default = current_exclusions
-        await interaction.response.send_modal(modal)
+        names, ids = await get_ignored_config(interaction.guild_id)
+        summary = (
+            "Channels listed here are left completely alone — no adoption, no renaming, no cleanup.\n"
+            f"Currently ignoring: **{len(ids)}** channel(s)"
+        )
+        if names:
+            summary += f" and **{len(names)}** name pattern(s): `{', '.join(names)}`"
+        await interaction.response.send_message(
+            summary, view=IgnoredChannelsView(self.bot, ids), ephemeral=True)
+
+    @discord.ui.button(label="Set Stage Access", style=discord.ButtonStyle.secondary, emoji="🔊", custom_id="admin_stage_access", row=1)
+    async def set_stage_access(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Set which users/roles may use the Create Stage VC dropdown option"""
+        if not await self._check_admin(interaction):
+            return
+        users, roles = await get_stage_access(interaction.guild_id)
+        summary = (
+            "Configure who can use **Create Stage VC** (bot admins always can).\n"
+            f"Currently allowed: {len(users)} user(s), {len(roles)} role(s)."
+        )
+        await interaction.response.send_message(summary, view=StageAccessView(self.bot), ephemeral=True)
+
+
+async def get_stage_access(guild_id):
+    """Allowed (user_ids, role_ids) for Create Stage VC, from config."""
+    def _parse(raw):
+        try:
+            return {int(x) for x in json.loads(raw)}
+        except (ValueError, TypeError):
+            return set()
+    users_raw = await get_config(f'stage_access_users_{guild_id}', "[]")
+    roles_raw = await get_config(f'stage_access_roles_{guild_id}', "[]")
+    return _parse(users_raw), _parse(roles_raw)
+
+
+async def can_create_stage(bot, member):
+    """Bot admins always; otherwise must be in the configured users/roles."""
+    if bot.is_bot_admin(member):
+        return True
+    users, roles = await get_stage_access(member.guild.id)
+    if member.id in users:
+        return True
+    return any(r.id in roles for r in member.roles)
+
+
+class StageAccessView(discord.ui.View):
+    """Ephemeral admin view to set who may create Stage VCs."""
+
+    def __init__(self, bot):
+        super().__init__(timeout=180)
+        self.bot = bot
+
+        self.user_select = discord.ui.UserSelect(
+            placeholder="Allowed users… (overwrites the list)",
+            min_values=0, max_values=10, row=0,
+        )
+        self.user_select.callback = self._on_users
+        self.add_item(self.user_select)
+
+        self.role_select = discord.ui.RoleSelect(
+            placeholder="Allowed roles… (overwrites the list)",
+            min_values=0, max_values=10, row=1,
+        )
+        self.role_select.callback = self._on_roles
+        self.add_item(self.role_select)
+
+    async def _check_admin(self, interaction: discord.Interaction) -> bool:
+        if not self.bot.is_bot_admin(interaction.user):
+            await interaction.response.send_message("❌ Administrator permission required.", ephemeral=True)
+            return False
+        return True
+
+    async def _on_users(self, interaction: discord.Interaction):
+        if not await self._check_admin(interaction):
+            return
+        ids = [u.id for u in self.user_select.values]
+        await set_config(f'stage_access_users_{interaction.guild_id}', json.dumps(ids))
+        names = ", ".join(u.display_name for u in self.user_select.values) or "nobody"
+        await interaction.response.send_message(f"✅ Stage access users set to: {names}", ephemeral=True)
+
+    async def _on_roles(self, interaction: discord.Interaction):
+        if not await self._check_admin(interaction):
+            return
+        ids = [r.id for r in self.role_select.values]
+        await set_config(f'stage_access_roles_{interaction.guild_id}', json.dumps(ids))
+        names = ", ".join(r.name for r in self.role_select.values) or "none"
+        await interaction.response.send_message(f"✅ Stage access roles set to: {names}", ephemeral=True)
+
+    @discord.ui.button(label="Clear All", style=discord.ButtonStyle.danger, row=2)
+    async def clear_all(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._check_admin(interaction):
+            return
+        await set_config(f'stage_access_users_{interaction.guild_id}', "[]")
+        await set_config(f'stage_access_roles_{interaction.guild_id}', "[]")
+        await interaction.response.send_message(
+            "✅ Stage access cleared — only bot admins can create stages.", ephemeral=True)
+
+
+class RulesActionSelect(discord.ui.Select):
+    def __init__(self, bot):
+        self.bot = bot
+        super().__init__(
+            custom_id="rules_action_select",
+            placeholder="Choose an action...",
+            min_values=1, max_values=1, row=1,
+            options=[
+                discord.SelectOption(
+                    label="Lock my VC", value="lock_vc", emoji="🔒",
+                    description="Convert your unlocked/basic VC to a locked VC"),
+                discord.SelectOption(
+                    label="Create Stage VC", value="create_stage", emoji="🔊",
+                    description="Create a stage channel (restricted)"),
+            ],
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        value = self.values[0]
+        try:
+            if value == "lock_vc":
+                await self.view.perform_lock_vc(interaction)
+            elif value == "create_stage":
+                await self.view.perform_create_stage(interaction)
+        finally:
+            # Reset the dropdown so it can be used again (preserving the
+            # Knock button if locked VCs are live)
+            try:
+                show_knock = False
+                cog = get_cog_safe(self.bot)
+                if cog:
+                    try:
+                        show_knock = bool(await cog.get_knockable_vcs(interaction.guild))
+                    except Exception:
+                        pass
+                await interaction.message.edit(view=RulesView(self.bot, show_knock=show_knock))
+            except (discord.NotFound, discord.HTTPException):
+                pass
 
 
 class RulesView(discord.ui.View):
-    def __init__(self, bot):
+    """The hub's single persistent message view.
+
+    `show_knock` adds a Knock button while at least one locked VC is live;
+    the cog edits the rules message's view when that state flips. The
+    globally registered template must use show_knock=True so the button's
+    custom_id always routes.
+    """
+
+    def __init__(self, bot, show_knock=False):
         super().__init__(timeout=None)
         self.bot = bot
+        self.add_item(RulesActionSelect(bot))
+        if show_knock:
+            knock_btn = discord.ui.Button(
+                label="Knock", style=discord.ButtonStyle.success,
+                emoji="<:knock:1528011187927912510>", custom_id="rules_knock", row=0,
+            )
+            knock_btn.callback = self._knock_callback
+            self.add_item(knock_btn)
 
-    @discord.ui.button(label="Info", style=discord.ButtonStyle.primary, emoji="ℹ️", custom_id="rules_info")
+    async def _knock_callback(self, interaction: discord.Interaction):
+        """Knock on a live locked VC — list is built at click time."""
+        cog = get_cog_safe(self.bot)
+        if not cog:
+            return await interaction.response.send_message("❌ System temporarily unavailable.", ephemeral=True)
+
+        knockable = await cog.get_knockable_vcs(interaction.guild)
+        if not knockable:
+            return await interaction.response.send_message(
+                "<:knock:1528011187927912510> No active locked VCs to knock on right now.", ephemeral=True)
+
+        # Single VC — knock straight away, no picker needed
+        if len(knockable) == 1:
+            return await process_knock(self.bot, cog, interaction, knockable[0][0])
+
+        lines = []
+        for vc_id, vc_name, is_full, member_count, user_limit, owner in knockable[:25]:
+            status = "🔴 FULL" if is_full else f"👥 {member_count}" + (f"/{user_limit}" if user_limit else "")
+            lines.append(f"**{vc_name}** — {status}")
+        await interaction.response.send_message(
+            "Choose a locked VC to knock on:\n" + "\n".join(lines),
+            view=KnockChoiceView(self.bot, knockable),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Info", style=discord.ButtonStyle.secondary, emoji="<:info:1528015738412204103>", custom_id="rules_info", row=0)
     async def info_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         content = await get_config(f'info_content_{interaction.guild_id}', "No info set.")
         await interaction.response.send_message(content, ephemeral=True)
 
-    @discord.ui.button(label="Lock my vc", style=discord.ButtonStyle.success, emoji="🔒", custom_id="rules_lock_vc")
-    async def lock_vc_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        """Convert an unlocked or basic VC to a locked VC"""
+    @discord.ui.button(label="Launch VibeyMusic", style=discord.ButtonStyle.primary, emoji="<:music:1528015803969044521>", custom_id="rules_launch_music", row=0)
+    async def launch_music_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Start a VibeyMusic session in the presser's voice channel"""
+        member = interaction.guild.get_member(interaction.user.id)
+        if member is None:
+            try:
+                member = await interaction.guild.fetch_member(interaction.user.id)
+            except discord.HTTPException:
+                return await interaction.response.send_message(
+                    "❌ Couldn't resolve your server membership.", ephemeral=True)
+        if not member.voice or not member.voice.channel:
+            return await interaction.response.send_message(
+                "🎵 Join a voice channel first, then press this button.", ephemeral=True)
+
+        await interaction.response.defer(ephemeral=True)
+        vc = member.voice.channel
+        payload = {"guild_id": interaction.guild_id, "channel_id": vc.id, "user_id": member.id}
+        headers = {"X-Vibey-Secret": MUSIC_BRIDGE_SECRET} if MUSIC_BRIDGE_SECRET else {}
+        try:
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(MUSIC_BRIDGE_URL, json=payload, headers=headers) as resp:
+                    data = await resp.json()
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            return await interaction.followup.send(
+                "❌ VibeyMusic looks offline right now — try again in a minute.", ephemeral=True)
+
+        if data.get("ok"):
+            thread_ref = f"<#{data['thread_id']}>" if data.get("thread_id") else "your music thread"
+            if data.get("already_active"):
+                msg = f"🎵 VibeyMusic is already active in your VC — head to {thread_ref}."
+            else:
+                msg = f"🎵 VibeyMusic joined **{vc.name}**! Add songs with the ➕ button in {thread_ref}."
+        else:
+            error = data.get("error")
+            if error == "locked_owner_only":
+                msg = "❌ Only the VC owner can start music in a locked VC."
+            elif error == "not_in_vc":
+                msg = "❌ You need to be in a voice channel."
+            elif error == "pool_busy":
+                msg = f"❌ {data.get('message', 'All music bots are busy.')}"
+            else:
+                msg = f"❌ Couldn't start VibeyMusic: {data.get('message', 'unknown error')}"
+        await interaction.followup.send(msg, ephemeral=True)
+
+    async def perform_create_stage(self, interaction: discord.Interaction):
+        """Create a stage VC (rules dropdown action; restricted by admin-set access list)"""
+        member = interaction.guild.get_member(interaction.user.id)
+        if member is None:
+            try:
+                member = await interaction.guild.fetch_member(interaction.user.id)
+            except discord.HTTPException:
+                return await interaction.response.send_message(
+                    "❌ Couldn't resolve your server membership.", ephemeral=True)
+        if not await can_create_stage(self.bot, member):
+            return await interaction.response.send_message(
+                "❌ You don't have permission to create a Stage VC.", ephemeral=True)
+        cog = get_cog_safe(self.bot)
+        if not cog:
+            return await interaction.response.send_message("❌ System temporarily unavailable.", ephemeral=True)
+
+        await interaction.response.defer(ephemeral=True)
+        stage = await cog.create_stage_vc(member, interaction.guild)
+        if stage:
+            await interaction.followup.send(
+                f"🔊 Created {stage.mention}! You can rename it, and it auto-deletes "
+                "after 1 minute of being empty.", ephemeral=True)
+        else:
+            await interaction.followup.send(
+                "❌ Couldn't create a stage — no category set, category full, "
+                "or you already have one.", ephemeral=True)
+
+    async def perform_lock_vc(self, interaction: discord.Interaction):
+        """Convert an unlocked or basic VC to a locked VC (rules dropdown action)"""
         cog = get_cog_safe(self.bot)
         if not cog:
             return await interaction.response.send_message("❌ System temporarily unavailable.", ephemeral=True)
@@ -1143,7 +1571,6 @@ class UserSelectView(discord.ui.View):
             
             elif self.action == 'vip':
                 added, skipped, already_vip, failed = [], [], [], []
-                is_spectator = vc_data.get('spectator', False)
                 for user in select.values:
                     if user.bot:
                         continue
@@ -1164,23 +1591,14 @@ class UserSelectView(discord.ui.View):
                         skipped.append(f"{member.mention} (banned)")
                         continue
 
-                    # FIX: For spectator VCs, check speak (not connect) since connect is open
                     current_perms = vc.overwrites_for(member)
-                    if is_spectator:
-                        if current_perms.speak is True:
-                            already_vip.append(member.mention)
-                            continue
-                    else:
-                        if current_perms.connect is True:
-                            already_vip.append(member.mention)
-                            continue
+                    if current_perms.connect is True:
+                        already_vip.append(member.mention)
+                        continue
 
                     # FIX: Better error handling for permission setting
                     try:
-                        if is_spectator:
-                            success = await self.cog_ref.safe_set_permissions(vc, member, speak=True)
-                        else:
-                            success = await self.cog_ref.safe_set_permissions(vc, member, connect=True, speak=True)
+                        success = await self.cog_ref.safe_set_permissions(vc, member, connect=True, speak=True)
                         if success:
                             added.append(member.mention)
                         else:
@@ -1191,11 +1609,9 @@ class UserSelectView(discord.ui.View):
 
                 msg = ""
                 if added:
-                    label = "Unmuted" if is_spectator else "VIP Access"
-                    msg += f"⭐ **{label}:** {', '.join(added)}\n"
+                    msg += f"⭐ **VIP Access:** {', '.join(added)}\n"
                 if already_vip:
-                    label = "Already unmuted" if is_spectator else "Already VIP"
-                    msg += f"ℹ️ **{label}:** {', '.join(already_vip)}\n"
+                    msg += f"ℹ️ **Already VIP:** {', '.join(already_vip)}\n"
                 if skipped:
                     msg += f"⚠️ **Skipped:** {', '.join(skipped)}\n"
                 if failed:
@@ -1321,101 +1737,27 @@ async def process_knock(bot, cog, interaction, voice_id):
         logger.error(f"Error updating knock panel/ping for VC {voice_id}: {e}")
 
 
-def build_knock_hub_embed(knockable_vcs):
-    """Build the persistent knock hub embed based on active knockable VCs.
+class KnockChoiceView(discord.ui.View):
+    """Ephemeral picker shown by the Knock button when 2+ locked VCs are active."""
 
-    knockable_vcs: list of (vc_id, vc_name, is_full, member_count, user_limit, owner) tuples
-    """
-    if not knockable_vcs:
-        embed = discord.Embed(
-            description="No active locked VCs to join.",
-            color=discord.Color.greyple()
-        )
-        return embed
-
-    if len(knockable_vcs) == 1:
-        vc_id, vc_name, is_full, member_count, user_limit, owner = knockable_vcs[0]
-        embed = discord.Embed(color=discord.Color.red() if is_full else discord.Color.gold())
-        embed.set_author(name=vc_name, icon_url=owner.display_avatar.url if owner else None)
-        if is_full:
-            embed.description = "🔴 **FULL**\nClick **Knock** to request entry."
-        else:
-            embed.description = "Click **Knock** to request entry."
-        return embed
-
-    # 2+ VCs - list them
-    embed = discord.Embed(
-        description="Select a VC from the dropdown below to knock.",
-        color=discord.Color.gold()
-    )
-    lines = []
-    for vc_id, vc_name, is_full, member_count, user_limit, owner in knockable_vcs[:25]:
-        status = "🔴 FULL" if is_full else f"👥 {member_count}" + (f"/{user_limit}" if user_limit else "")
-        lines.append(f"**{vc_name}** — {status}")
-    embed.add_field(name="Active Locked VCs", value="\n".join(lines), inline=False)
-    if len(knockable_vcs) > 25:
-        embed.add_field(name="", value=f"*...and {len(knockable_vcs) - 25} more (showing first 25)*", inline=False)
-    return embed
-
-
-class KnockHubView(discord.ui.View):
-    """Persistent view for the single knock hub embed. Dynamically shows a button (1 VC) or dropdown (2+ VCs)."""
-    def __init__(self, bot, cog_ref, guild_id, knockable_vcs):
-        super().__init__(timeout=None)
+    def __init__(self, bot, knockable_vcs):
+        super().__init__(timeout=60)
         self.bot = bot
-        self.cog_ref = cog_ref
-        self.guild_id = guild_id
+        options = []
+        for vc_id, vc_name, is_full, member_count, user_limit, owner in knockable_vcs[:25]:
+            emoji = "🔴" if is_full else "<:knock:1528011187927912510>"
+            options.append(discord.SelectOption(label=vc_name[:100], value=str(vc_id), emoji=emoji))
+        self.select = discord.ui.Select(placeholder="Select a VC to knock on...", options=options)
+        self.select.callback = self._on_select
+        self.add_item(self.select)
 
-        if len(knockable_vcs) == 1:
-            vc_id, vc_name, is_full, member_count, user_limit, owner = knockable_vcs[0]
-            btn = discord.ui.Button(
-                label="Knock",
-                style=discord.ButtonStyle.primary,
-                custom_id=f"knock_hub_btn:{vc_id}"
-            )
-            btn.callback = self._knock_button_callback
-            self.add_item(btn)
-
-        elif len(knockable_vcs) >= 2:
-            options = []
-            for vc_id, vc_name, is_full, member_count, user_limit, owner in knockable_vcs[:25]:
-                emoji = "🔴" if is_full else "🚪"
-                label = vc_name[:100] if len(vc_name) > 100 else vc_name
-                options.append(discord.SelectOption(
-                    label=label,
-                    value=str(vc_id),
-                    emoji=emoji
-                ))
-            select = discord.ui.Select(
-                placeholder="Select a VC to knock on...",
-                options=options,
-                custom_id=f"knock_hub_select:{guild_id}"
-            )
-            select.callback = self._knock_select_callback
-            self.add_item(select)
-
-    async def _knock_button_callback(self, interaction: discord.Interaction):
+    async def _on_select(self, interaction: discord.Interaction):
         cog = get_cog_safe(self.bot)
         if not cog:
             return await interaction.response.send_message("❌ System temporarily unavailable.", ephemeral=True)
-        # Parse VC ID from custom_id
-        custom_id = interaction.data.get("custom_id", "")
         try:
-            voice_id = int(custom_id.split(":")[1])
+            voice_id = int(self.select.values[0])
         except (IndexError, ValueError):
-            return await interaction.response.send_message("❌ Invalid button data.", ephemeral=True)
-        await process_knock(self.bot, cog, interaction, voice_id)
-
-    async def _knock_select_callback(self, interaction: discord.Interaction):
-        cog = get_cog_safe(self.bot)
-        if not cog:
-            return await interaction.response.send_message("❌ System temporarily unavailable.", ephemeral=True)
-        values = interaction.data.get("values", [])
-        if not values:
-            return await interaction.response.send_message("❌ No VC selected.", ephemeral=True)
-        try:
-            voice_id = int(values[0])
-        except ValueError:
             return await interaction.response.send_message("❌ Invalid selection.", ephemeral=True)
         await process_knock(self.bot, cog, interaction, voice_id)
 
@@ -1438,13 +1780,12 @@ class HubEntryView(discord.ui.View):
         await process_knock(self.bot, cog, interaction, self.voice_id)
 
 class KnockManagementView(discord.ui.View):
-    def __init__(self, bot, cog_ref, owner_id, voice_id, show_knock_buttons=False, vc_type="locked"):
+    def __init__(self, bot, cog_ref, owner_id, voice_id, show_knock_buttons=False):
         super().__init__(timeout=None)
         self.bot = bot
         self.cog_ref = cog_ref
         self.owner_id = owner_id
         self.voice_id = voice_id
-        self.vc_type = vc_type
 
         self.accept_btn.custom_id = f"knock_accept:{voice_id}"
         self.deny_btn.custom_id = f"knock_deny:{voice_id}"
@@ -1456,30 +1797,16 @@ class KnockManagementView(discord.ui.View):
             self.remove_item(self.accept_btn)
             self.remove_item(self.deny_btn)
 
-        # Set dropdown options based on VC type
-        if vc_type == "spectator":
-            self.settings_select.placeholder = "⚙️ Spectator Settings"
-            self.settings_select.options = [
-                discord.SelectOption(label="Remove Spectator Mode", description="Convert to normal VC", emoji="🔊"),
-                discord.SelectOption(label="Lock this VC", description="Convert to locked VC", emoji="🔒"),
-                discord.SelectOption(label="Unmute All", description="Unmute all users in VC", emoji="🔈"),
-                discord.SelectOption(label="Unmute Users", description="Unmute specific users", emoji="🤫"),
-                discord.SelectOption(label="Kick Users", description="Remove users from VC", emoji="👢"),
-                discord.SelectOption(label="Ban/Unban", description="Ban or unban users", emoji="⛔"),
-                discord.SelectOption(label="Transfer Ownership", description="Transfer VC to another user", emoji="👑"),
-            ]
-        else:
-            self.settings_select.options = [
-                discord.SelectOption(label="Unlock/Lock", description="Toggle VC lock status", emoji="🔓"),
-                discord.SelectOption(label="Ghost Mode", description="Toggle ghost mode", emoji="👻"),
-                discord.SelectOption(label="Mute Knock Pings", description="Toggle knock notifications", emoji="🔕"),
-                discord.SelectOption(label="Spectate Mode", description="Convert to spectator VC", emoji="🤫"),
-                discord.SelectOption(label="Transfer Ownership", description="Transfer VC to another user", emoji="👑"),
-                discord.SelectOption(label="Add VIPs", description="Grant access to specific users", emoji="⭐"),
-                discord.SelectOption(label="Kick Users", description="Remove users from VC", emoji="👢"),
-                discord.SelectOption(label="Ban/Unban", description="Ban or unban users", emoji="⛔"),
-            ]
-    
+        self.settings_select.options = [
+            discord.SelectOption(label="Unlock/Lock", description="Toggle VC lock status", emoji="🔓"),
+            discord.SelectOption(label="Ghost Mode", description="Toggle ghost mode", emoji="👻"),
+            discord.SelectOption(label="Mute Knock Pings", description="Toggle knock notifications", emoji="🔕"),
+            discord.SelectOption(label="Transfer Ownership", description="Transfer VC to another user", emoji="👑"),
+            discord.SelectOption(label="Add VIPs", description="Grant access to specific users", emoji="⭐"),
+            discord.SelectOption(label="Kick Users", description="Remove users from VC", emoji="👢"),
+            discord.SelectOption(label="Ban/Unban", description="Ban or unban users", emoji="⛔"),
+        ]
+
     def _get_cog(self):
         """Get cog reference - ALWAYS get fresh from bot to handle reloads"""
         # FIX: Always get fresh cog reference from bot, don't trust cached self.cog_ref
@@ -1800,67 +2127,6 @@ class KnockManagementView(discord.ui.View):
         elif choice == "Kick Users":
             view = UserSelectView('kick', vc, cog)
             await interaction.response.send_message("Select to Kick:", view=view, ephemeral=True)
-            try:
-                view._interaction_message = await interaction.original_response()
-            except Exception:
-                pass
-
-        elif choice == "Spectate Mode":
-            await interaction.response.defer(ephemeral=True)
-            try:
-                await cog.convert_to_spectator(vc, interaction)
-            except Exception as e:
-                logger.error(f"Failed to convert to spectator: {e}", exc_info=True)
-                await interaction.followup.send("❌ Failed to enable spectator mode.", ephemeral=True)
-
-        elif choice == "Remove Spectator Mode":
-            await interaction.response.defer(ephemeral=True)
-            try:
-                await cog.convert_spectator_to_basic(vc, interaction)
-            except Exception as e:
-                logger.error(f"Failed to remove spectator mode: {e}", exc_info=True)
-                await interaction.followup.send("❌ Failed to remove spectator mode.", ephemeral=True)
-
-        elif choice == "Lock this VC":
-            await interaction.response.defer(ephemeral=True)
-            try:
-                await cog.convert_spectator_to_locked(vc, interaction)
-            except Exception as e:
-                logger.error(f"Failed to lock spectator VC: {e}", exc_info=True)
-                await interaction.followup.send("❌ Failed to lock VC.", ephemeral=True)
-
-        elif choice == "Unmute All":
-            await interaction.response.defer(ephemeral=True)
-            unmuted = []
-            failed = []
-            for member in vc.members:
-                if member.bot or member.id == vc_data['owner_id']:
-                    continue
-                current_perms = vc.overwrites_for(member)
-                if current_perms.speak is True:
-                    continue
-                try:
-                    if await cog.safe_set_permissions(vc, member, speak=True):
-                        unmuted.append(member.mention)
-                    else:
-                        failed.append(member.mention)
-                except Exception as e:
-                    logger.debug(f"Failed to unmute {member.id}: {e}")
-                    failed.append(member.mention)
-                await asyncio.sleep(0.3)
-
-            msg = ""
-            if unmuted:
-                msg += f"🔊 **Unmuted:** {', '.join(unmuted)}\n"
-            if failed:
-                msg += f"❌ **Failed:** {', '.join(failed)}"
-            if not msg:
-                msg = "ℹ️ No users to unmute."
-            await interaction.followup.send(msg.strip(), ephemeral=True)
-
-        elif choice == "Unmute Users":
-            view = UserSelectView('vip', vc, cog)
-            await interaction.response.send_message("Select users to unmute:", view=view, ephemeral=True)
             try:
                 view._interaction_message = await interaction.original_response()
             except Exception:

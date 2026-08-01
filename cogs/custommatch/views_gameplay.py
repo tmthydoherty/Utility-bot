@@ -13,13 +13,15 @@ from .models import (
     Team, Suspension,
     COLOR_WHITE, COLOR_SUCCESS, COLOR_WARNING, COLOR_RED, COLOR_BLUE, COLOR_NEUTRAL,
     RIVALS_ROLES, is_valorant_game, is_rivals_game,
-    is_overwatch_game, OW_ROLES, OW_ROLE_GLYPH,
+    is_overwatch_game, OW_ROLES, OW_ROLE_EMOJI,
+    OW_ROLE_EMOJI_ID, OW_ROLE_DISPLAY_ORDER,
     safe_display_name, sanitize_for_codeblock, generate_short_id,
     normalize_ign, normalize_rivals_role, _parse_tracker_url,
 )
 from .database import DatabaseHelper
 from .views_settings import (
     BaseMatchView, ConfirmView, GameSelectDropdown, PenaltySettingsView,
+    BackButton, SettingsPage,
     _resolve_role_emojis, seed_mmr_for_rank,
 )
 
@@ -94,25 +96,94 @@ class QueueTypeSelectView(discord.ui.View):
         await panel.do_queue_start(interaction, self.game.game_id, is_secondary=True)
 
 
-class AdminPanelView(BaseMatchView):
-    """Admin panel for custom match admins."""
+class AdminPage(SettingsPage):
+    """Base for every /cm_panel screen.
 
-    def __init__(self, cog: 'CustomMatch'):
-        super().__init__(timeout=300)
-        self.cog = cog
+    Reuses the /cm_settings page machinery: one ephemeral message that every
+    screen draws onto, a Back button that redraws the parent with fresh data,
+    ancestor timeouts kept alive while a nested page is in use, and the admin
+    role re-checked on every click. Before this the panel was 18 flat buttons
+    that each spawned their own ephemeral, so a single action left a trail of
+    dead messages behind it.
+    """
 
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        """Re-verify admin role on every button press — role may have been removed since panel opened."""
-        if await self.cog.is_cm_admin(interaction.user):
-            return True
-        await interaction.response.send_message("You no longer have permission to use this panel.", ephemeral=True)
-        return False
+    async def build_embed(self, guild: discord.Guild) -> discord.Embed:
+        return discord.Embed(title=self.page_title, description=self.page_blurb,
+                             color=COLOR_NEUTRAL)
 
-    # Row 0: Match management
-    @discord.ui.button(label="Sub Player", style=discord.ButtonStyle.primary, row=0)
-    async def substitute(self, interaction: discord.Interaction, button: discord.ui.Button):
+    page_title = "Custom Matches Admin"
+    page_blurb = None
+
+    async def render(self, interaction: discord.Interaction, *, flash: Optional[str] = None):
+        # Same as SettingsPage.render but also clears any content left behind by
+        # a selector view, which would otherwise linger above the embed.
+        for item in self.children:
+            if hasattr(item, "disabled"):
+                item.disabled = False
+        embed = await self.build_embed(interaction.guild)
+        if flash:
+            embed.description = f"{flash}\n\n{embed.description or ''}".strip()
+        await interaction.response.edit_message(content=None, embed=embed, view=self)
+        self.message = interaction.message
+
+    async def render_original(self, interaction: discord.Interaction, flash: str):
+        """Redraw this page onto the panel message after the interaction has
+        already been answered — the tail of an action that deferred or edited on
+        its way through. edit_original_response targets the same message, so the
+        result lands on the panel instead of stacking another ephemeral."""
+        for item in self.children:
+            if hasattr(item, "disabled"):
+                item.disabled = False
+        embed = await self.build_embed(interaction.guild)
+        embed.description = f"{flash}\n\n{embed.description or ''}".strip()
+        try:
+            await interaction.edit_original_response(content=None, embed=embed, view=self)
+        except discord.HTTPException:
+            await interaction.followup.send(flash, ephemeral=True)
+
+    async def show_child(self, interaction: discord.Interaction, view: discord.ui.View,
+                         title: str, description: Optional[str] = None):
+        """Draw a selector view onto the panel message with a way back.
+
+        Takes any plain discord.ui.View — the existing selector views are not
+        ExpiringViews, so this adds the Back button directly rather than going
+        through SettingsPage.show_view. Their stock 60s timeout is stretched to
+        the panel's so a selector can't go dead while the page around it is
+        still live.
+        """
+        if (view.timeout or 0) < 300:
+            view.timeout = 300
+        if not any(isinstance(c, BackButton) for c in view.children):
+            view.add_item(BackButton(self, row=4))
+        embed = discord.Embed(title=title, description=description, color=COLOR_NEUTRAL)
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
+
+
+class AdminActions:
+    """Every /cm_panel action, shared by the pages that surface them.
+
+    A mixin rather than a base class so the child pages inherit the handlers
+    without also inheriting the top-level page's buttons. Because the handler
+    runs with ``self`` bound to whichever page invoked it, ``show_child``
+    attaches Back to that page — so Back returns where the admin actually was.
+    """
+
+
+    async def ow_role_ranks(self, interaction: discord.Interaction, button: discord.ui.Button = None):
+        games = [g for g in await DatabaseHelper.get_all_games() if is_overwatch_game(g)]
+        if not games:
+            await self.render(interaction, flash="⚠️ No Overwatch game configured.")
+            return
+        view = OWRoleRanksUserSelectView(self.cog, games)
+        await self.show_child(
+            interaction, view, "Overwatch Role Ranks",
+            "Rank or re-rank a player's individual roles. Roles you don't pick "
+            "keep the rating they already have."
+        )
+
+    async def substitute(self, interaction: discord.Interaction, button: discord.ui.Button = None):
         view = SubTypeSelectView(self.cog)
-        await interaction.response.send_message("Select sub type:", view=view, ephemeral=True)
+        await self.show_child(interaction, view, "Substitute — select sub type")
 
     async def show_sub_modal(self, interaction: discord.Interaction, match_id: int):
         view = await SubstituteOutPlayerView.create(self.cog, match_id, interaction.guild)
@@ -128,14 +199,13 @@ class AdminPanelView(BaseMatchView):
         else:
             await interaction.response.edit_message(content="No players found in this match.", view=None)
 
-    @discord.ui.button(label="Swap Players", style=discord.ButtonStyle.primary, row=0)
-    async def swap(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def swap(self, interaction: discord.Interaction, button: discord.ui.Button = None):
         matches = await DatabaseHelper.get_active_matches()
         if not matches:
-            await interaction.response.send_message("No active matches.", ephemeral=True)
+            await self.render(interaction, flash="⚠️ No active matches.")
             return
         view = await MatchSelectView.create(self.cog, matches, self.show_swap_modal)
-        await interaction.response.send_message("Select a match:", view=view, ephemeral=True)
+        await self.show_child(interaction, view, "Substitute — select a match")
 
     async def show_swap_modal(self, interaction: discord.Interaction, match_id: int):
         view = await SwapPlayer1View.create(self.cog, match_id, interaction.guild)
@@ -144,27 +214,25 @@ class AdminPanelView(BaseMatchView):
         else:
             await interaction.response.edit_message(content="No players found in this match.", view=None)
 
-    @discord.ui.button(label="Force Winner", style=discord.ButtonStyle.danger, row=0)
-    async def force_winner(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def force_winner(self, interaction: discord.Interaction, button: discord.ui.Button = None):
         matches = await DatabaseHelper.get_active_matches()
         if not matches:
-            await interaction.response.send_message("No active matches.", ephemeral=True)
+            await self.render(interaction, flash="⚠️ No active matches.")
             return
         view = await MatchSelectView.create(self.cog, matches, self.show_force_winner)
-        await interaction.response.send_message("Select a match:", view=view, ephemeral=True)
+        await self.show_child(interaction, view, "Force Winner — select a match")
 
     async def show_force_winner(self, interaction: discord.Interaction, match_id: int):
         view = ForceWinnerView(self.cog, match_id)
         await interaction.response.edit_message(content="Select the winning team:", view=view)
 
-    @discord.ui.button(label="Cancel Match", style=discord.ButtonStyle.danger, row=0)
-    async def cancel_match(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def cancel_match(self, interaction: discord.Interaction, button: discord.ui.Button = None):
         matches = await DatabaseHelper.get_active_matches()
         if not matches:
-            await interaction.response.send_message("No active matches.", ephemeral=True)
+            await self.render(interaction, flash="⚠️ No active matches.")
             return
         view = await MatchSelectView.create(self.cog, matches, self.confirm_cancel)
-        await interaction.response.send_message("Select a match to cancel:", view=view, ephemeral=True)
+        await self.show_child(interaction, view, "Cancel Match — select a match")
 
     async def confirm_cancel(self, interaction: discord.Interaction, match_id: int):
         match = await DatabaseHelper.get_match(match_id)
@@ -173,20 +241,18 @@ class AdminPanelView(BaseMatchView):
         await interaction.response.send_modal(modal)
 
     # Row 1: Advanced match/queue controls
-    @discord.ui.button(label="Change Winner", style=discord.ButtonStyle.secondary, row=1)
-    async def change_winner(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def change_winner(self, interaction: discord.Interaction, button: discord.ui.Button = None):
         modal = ChangeWinnerModal(self.cog)
         await interaction.response.send_modal(modal)
 
-    @discord.ui.button(label="Force Start", style=discord.ButtonStyle.secondary, row=1)
     async def force_start(self, interaction: discord.Interaction, button: discord.ui.Button):
         games = await DatabaseHelper.get_all_games()
         if not games:
-            await interaction.response.send_message("No games configured.", ephemeral=True)
+            await self.render(interaction, flash="⚠️ No games configured.")
             return
         view = discord.ui.View(timeout=60)
         view.add_item(GameSelectDropdown(games, self.do_force_start))
-        await interaction.response.send_message("Select a game to force start:", view=view, ephemeral=True)
+        await self.show_child(interaction, view, "Force Start — select a game")
 
     async def do_force_start(self, interaction: discord.Interaction, game_id: int):
         game = await DatabaseHelper.get_game(game_id)
@@ -201,28 +267,27 @@ class AdminPanelView(BaseMatchView):
             # Check if it's already starting (all readied up)
             for qid, qs in self.cog.queues.items():
                 if qs.game_id == game_id and qs.state == "starting_match":
-                    await interaction.response.send_message(
-                        "Match is already starting (all players readied up).", ephemeral=True
-                    )
+                    await self.render(
+                        interaction,
+                        flash="⚠️ Match is already starting (all players readied up).")
                     return
-            await interaction.response.send_message("No active queue found for this game.", ephemeral=True)
+            await self.render(interaction, flash="⚠️ No active queue found for this game.")
             return
 
         if len(queue_state.players) < game.player_count and queue_state.state == "waiting":
-            await interaction.response.send_message(
-                f"Queue is not full ({len(queue_state.players)}/{game.player_count}).",
-                ephemeral=True
-            )
+            await self.render(
+                interaction,
+                flash=f"⚠️ Queue is not full ({len(queue_state.players)}/{game.player_count}).")
             return
 
         if len(queue_state.players) < game.player_count and queue_state.state == "ready_check":
             # During ready check, some players may have dropped — allow force start with remaining players
             # but require at least enough for two teams
             if len(queue_state.players) < 2:
-                await interaction.response.send_message(
-                    f"Not enough players remaining ({len(queue_state.players)}) to start a match.",
-                    ephemeral=True
-                )
+                await self.render(
+                    interaction,
+                    flash=f"⚠️ Not enough players remaining ({len(queue_state.players)}) "
+                          "to start a match.")
                 return
 
         # Cancel ready check task if active
@@ -247,29 +312,34 @@ class AdminPanelView(BaseMatchView):
         channel = interaction.guild.get_channel(queue_state.channel_id)
         if channel:
             await self.cog.proceed_to_match(channel, game, queue_state)
-        await interaction.followup.send("Match force started.", ephemeral=True)
+        await self.render_original(interaction, "✅ Match force started.")
         await self.cog.log_action(
             interaction.guild,
             f"Match force started for **{game.name}** by {interaction.user.display_name} ({len(queue_state.players)} players)"
         )
 
-    @discord.ui.button(label="Clear Queue", style=discord.ButtonStyle.secondary, row=1)
-    async def clear_queue(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def clear_queue(self, interaction: discord.Interaction, button: discord.ui.Button = None):
         games = await DatabaseHelper.get_all_games()
         if not games:
-            await interaction.response.send_message("No games configured.", ephemeral=True)
+            await self.render(interaction, flash="⚠️ No games configured.")
             return
         view = discord.ui.View(timeout=60)
         view.add_item(GameSelectDropdown(games, self.confirm_clear_queue))
-        await interaction.response.send_message("Select a game to clear its queue:", view=view, ephemeral=True)
+        await self.show_child(interaction, view, "Clear Queue — select a game")
 
     async def confirm_clear_queue(self, interaction: discord.Interaction, game_id: int):
         game = await DatabaseHelper.get_game(game_id)
         view = ConfirmView()
-        await interaction.response.send_message(
-            f"Are you sure you want to clear the queue for **{game.name}**?",
-            view=view, ephemeral=True
+        # Deliberately not show_child: this one blocks on view.wait(), so a Back
+        # button would leave that coroutine parked until the timeout and then
+        # redraw the panel over whatever the admin had navigated to since.
+        # Cancel is the way out of a confirmation.
+        embed = discord.Embed(
+            title="Clear Queue",
+            description=f"Are you sure you want to clear the queue for **{game.name}**?",
+            color=COLOR_WARNING,
         )
+        await interaction.response.edit_message(content=None, embed=embed, view=view)
         await view.wait()
         if view.value:
             # Find and clear queue
@@ -302,17 +372,18 @@ class AdminPanelView(BaseMatchView):
                             await msg.edit(embed=embed, view=new_view)
                         except Exception:
                             pass
-            await interaction.followup.send(f"Queue cleared for **{game.name}**.", ephemeral=True)
+            await self.render_original(interaction, f"✅ Queue cleared for **{game.name}**.")
+        else:
+            await self.render_original(interaction, "Cancelled.")
 
-    @discord.ui.button(label="New Queue", style=discord.ButtonStyle.secondary, row=1)
-    async def queue_start(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def queue_start(self, interaction: discord.Interaction, button: discord.ui.Button = None):
         games = await DatabaseHelper.get_all_games()
         if not games:
-            await interaction.response.send_message("No games configured.", ephemeral=True)
+            await self.render(interaction, flash="⚠️ No games configured.")
             return
         view = discord.ui.View(timeout=60)
         view.add_item(GameSelectDropdown(games, self._queue_start_game_selected))
-        await interaction.response.send_message("Select a game to start queue:", view=view, ephemeral=True)
+        await self.show_child(interaction, view, "New Queue — select a game")
 
     async def _queue_start_game_selected(self, interaction: discord.Interaction, game_id: int):
         """After game selection, show Standard/Arcade choice if secondary is enabled."""
@@ -337,28 +408,26 @@ class AdminPanelView(BaseMatchView):
             target_channel = interaction.guild.get_channel(target_channel_id) if target_channel_id else interaction.channel
 
         if not target_channel:
-            await interaction.followup.send("Queue channel not found.", ephemeral=True)
+            await self.render_original(interaction, "⚠️ Queue channel not found.")
             return
 
         await self.cog.start_queue(target_channel, game, is_secondary=is_secondary)
         mode_label = (game.secondary_queue_name or "Arcade") if is_secondary else "Standard"
-        await interaction.followup.send(f"{mode_label} queue started for **{game.name}**.", ephemeral=True)
+        await self.render_original(interaction, f"✅ {mode_label} queue started for **{game.name}**.")
 
     # Row 2: Player management
-    @discord.ui.button(label="Suspensions", style=discord.ButtonStyle.secondary, row=2)
     async def manage_suspensions(self, interaction: discord.Interaction, button: discord.ui.Button):
         view = SuspensionManagementView(self.cog)
-        await interaction.response.send_message("Manage Suspensions:", view=view, ephemeral=True)
+        await self.show_child(interaction, view, "Suspensions")
 
-    @discord.ui.button(label="Remove from Queue", style=discord.ButtonStyle.secondary, row=2)
-    async def remove_from_queue(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def remove_from_queue(self, interaction: discord.Interaction, button: discord.ui.Button = None):
         games = await DatabaseHelper.get_all_games()
         if not games:
-            await interaction.response.send_message("No games configured.", ephemeral=True)
+            await self.render(interaction, flash="⚠️ No games configured.")
             return
         view = discord.ui.View(timeout=60)
         view.add_item(GameSelectDropdown(games, self.show_queue_players))
-        await interaction.response.send_message("Select a game:", view=view, ephemeral=True)
+        await self.show_child(interaction, view, "Remove from Queue — select a game")
 
     async def show_queue_players(self, interaction: discord.Interaction, game_id: int):
         # Find queue for this game — pick the one with the most players
@@ -375,31 +444,27 @@ class AdminPanelView(BaseMatchView):
         view = QueuePlayerRemoveView(self.cog, game_id, queue_state, interaction.guild)
         await interaction.response.edit_message(content="Select a player to remove:", view=view)
 
-    @discord.ui.button(label="Adjust W/L", style=discord.ButtonStyle.secondary, row=2)
-    async def adjust_wl(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def adjust_wl(self, interaction: discord.Interaction, button: discord.ui.Button = None):
         view = AdjustWLUserSelectView(self.cog)
-        await interaction.response.send_message("Select a user:", view=view, ephemeral=True)
+        await self.show_child(interaction, view, "Adjust W/L — select a user")
 
-    @discord.ui.button(label="Set Player MMR", style=discord.ButtonStyle.secondary, row=2)
     async def set_player_mmr_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         games = await DatabaseHelper.get_all_games()
         if not games:
-            await interaction.response.send_message("No games configured.", ephemeral=True)
+            await self.render(interaction, flash="⚠️ No games configured.")
             return
         view = SetMMRUserSelectView(self.cog, games)
-        await interaction.response.send_message("Select a user and game:", view=view, ephemeral=True)
+        await self.show_child(interaction, view, "Set Player MMR — select a user and game")
 
-    @discord.ui.button(label="User View", style=discord.ButtonStyle.secondary, row=2)
-    async def view_player_mmr_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def view_player_mmr_btn(self, interaction: discord.Interaction, button: discord.ui.Button = None):
         games = await DatabaseHelper.get_all_games()
         if not games:
-            await interaction.response.send_message("No games configured.", ephemeral=True)
+            await self.render(interaction, flash="⚠️ No games configured.")
             return
         view = MMRViewUserSelectView(self.cog, games)
-        await interaction.response.send_message("Select a user and game to view their overview:", view=view, ephemeral=True)
+        await self.show_child(interaction, view, "User View — select a user and game")
 
-    @discord.ui.button(label="Set Platform", style=discord.ButtonStyle.secondary, row=3)
-    async def set_platform_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def set_platform_btn(self, interaction: discord.Interaction, button: discord.ui.Button = None):
         games = [g for g in await DatabaseHelper.get_all_games() if g.pc_enabled]
         if not games:
             await interaction.response.send_message(
@@ -408,24 +473,21 @@ class AdminPanelView(BaseMatchView):
             )
             return
         view = SetPlatformUserSelectView(self.cog, games)
-        await interaction.response.send_message("Select a user and game to set platform:", view=view, ephemeral=True)
+        await self.show_child(interaction, view, "Set Platform — select a user and game")
 
     # Row 3: Setup and utilities
-    @discord.ui.button(label="IGN", style=discord.ButtonStyle.secondary, row=3)
-    async def manage_ign(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def manage_ign(self, interaction: discord.Interaction, button: discord.ui.Button = None):
         view = AdminIGNUserSelectView(self.cog)
-        await interaction.response.send_message("Select a user to view/edit their IGN:", view=view, ephemeral=True)
+        await self.show_child(interaction, view, "IGN — select a user")
 
-    @discord.ui.button(label="Setup New User", style=discord.ButtonStyle.success, row=3)
     async def setup_new_user(self, interaction: discord.Interaction, button: discord.ui.Button):
         games = await DatabaseHelper.get_all_games()
         if not games:
-            await interaction.response.send_message("No games configured.", ephemeral=True)
+            await self.render(interaction, flash="⚠️ No games configured.")
             return
         view = SetupUserGameSelectView(self.cog, games)
-        await interaction.response.send_message("Step 1: Select a game for the new user:", view=view, ephemeral=True)
+        await self.show_child(interaction, view, "Setup New User — select a game")
 
-    @discord.ui.button(label="Start Discussion", style=discord.ButtonStyle.primary, row=3)
     async def start_discussion(self, interaction: discord.Interaction, button: discord.ui.Button):
         parent_id = await DatabaseHelper.get_config("cm_discussion_parent_channel_id")
         if not parent_id:
@@ -436,20 +498,19 @@ class AdminPanelView(BaseMatchView):
             return
         parent_channel = interaction.guild.get_channel(int(parent_id))
         if not parent_channel:
-            await interaction.response.send_message("Discussion parent channel not found.", ephemeral=True)
+            await self.render(interaction, flash="⚠️ Discussion parent channel not found.")
             return
         view = PanelDiscussionUserSelectView(self.cog, parent_channel)
-        await interaction.response.send_message("Select a user to start a discussion with:", view=view, ephemeral=True)
+        await self.show_child(interaction, view, "Start Discussion — select a user")
 
-    @discord.ui.button(label="Penalty Settings", style=discord.ButtonStyle.secondary, row=3)
     async def penalty_settings(self, interaction: discord.Interaction, button: discord.ui.Button):
         games = await DatabaseHelper.get_all_games()
         if not games:
-            await interaction.response.send_message("No games configured.", ephemeral=True)
+            await self.render(interaction, flash="⚠️ No games configured.")
             return
         view = discord.ui.View(timeout=60)
         view.add_item(GameSelectDropdown(games, self.show_penalty_settings))
-        await interaction.response.send_message("Select a game to configure penalties:", view=view, ephemeral=True)
+        await self.show_child(interaction, view, "Penalty Settings — select a game")
 
     async def show_penalty_settings(self, interaction: discord.Interaction, game_id: int):
         game = await DatabaseHelper.get_game(game_id)
@@ -475,6 +536,158 @@ class AdminPanelView(BaseMatchView):
             inline=True,
         )
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+
+class AdminPanelView(AdminActions, AdminPage):
+    """Top level of /cm_panel.
+
+    Match, queue and user actions live on the child pages below; everything
+    else stays here.
+    """
+
+    page_title = "Custom Matches Admin Panel"
+
+    def __init__(self, cog: 'CustomMatch'):
+        super().__init__(cog, timeout=300)
+
+    async def build_embed(self, guild: discord.Guild) -> discord.Embed:
+        embed = discord.Embed(title=self.page_title, color=COLOR_NEUTRAL)
+
+        matches = await DatabaseHelper.get_active_matches()
+        if matches:
+            match_lines = []
+            for m in matches:
+                game = await DatabaseHelper.get_game(m["game_id"])
+                game_name = game.name if game else "Unknown"
+                short_id = m.get("short_id") or str(m["match_id"])
+                match_lines.append(f"Match {short_id} - {game_name}")
+            embed.add_field(name="Active Matches", value="\n".join(match_lines), inline=False)
+        else:
+            embed.add_field(name="Active Matches", value="No active matches.", inline=False)
+
+        # Show queues in ready-check state so admins know Force Start applies to them
+        ready_check_lines = []
+        for qid, qs in self.cog.queues.items():
+            if qs.state == "ready_check":
+                g = await DatabaseHelper.get_game(qs.game_id)
+                g_name = g.name if g else f"Game {qs.game_id}"
+                ready_check_lines.append(f"{g_name} — {len(qs.players)} players readying up")
+        if ready_check_lines:
+            embed.add_field(name="Active Ready Checks", value="\n".join(ready_check_lines), inline=False)
+        return embed
+
+    # Row 0: grouping pages
+    @discord.ui.button(label="Queue", style=discord.ButtonStyle.primary, row=0)
+    async def queue_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await AdminQueuePage(self.cog, self).render(interaction)
+
+    @discord.ui.button(label="User", style=discord.ButtonStyle.primary, row=0)
+    async def user_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await AdminUserPage(self.cog, self).render(interaction)
+
+    @discord.ui.button(label="Match", style=discord.ButtonStyle.primary, row=0)
+    async def match_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await AdminMatchPage(self.cog, self).render(interaction)
+
+    # Row 1: player setup
+    @discord.ui.button(label="Setup New User", style=discord.ButtonStyle.success, row=1)
+    async def setup_new_user_btn_(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.setup_new_user(interaction, button)
+
+    @discord.ui.button(label="Set Player MMR", style=discord.ButtonStyle.secondary, row=1)
+    async def set_player_mmr_btn_btn_(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.set_player_mmr_btn(interaction, button)
+
+    @discord.ui.button(label="OW Role Ranks", style=discord.ButtonStyle.secondary, row=1)
+    async def ow_role_ranks_btn_(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.ow_role_ranks(interaction, button)
+
+    # Row 2: everything else
+    @discord.ui.button(label="Force Start", style=discord.ButtonStyle.secondary, row=2)
+    async def force_start_btn_(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.force_start(interaction, button)
+
+    @discord.ui.button(label="Suspensions", style=discord.ButtonStyle.secondary, row=2)
+    async def manage_suspensions_btn_(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.manage_suspensions(interaction, button)
+
+    @discord.ui.button(label="Penalty Settings", style=discord.ButtonStyle.secondary, row=2)
+    async def penalty_settings_btn_(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.penalty_settings(interaction, button)
+
+    @discord.ui.button(label="Start Discussion", style=discord.ButtonStyle.primary, row=2)
+    async def start_discussion_btn_(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.start_discussion(interaction, button)
+
+
+class AdminQueuePage(AdminActions, AdminPage):
+    """Queue controls."""
+
+    page_title = "Queue"
+    page_blurb = "Start, clear, or pull a player out of a queue."
+
+    @discord.ui.button(label="New Queue", style=discord.ButtonStyle.success, row=0)
+    async def new_queue_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.queue_start(interaction, button)
+
+    @discord.ui.button(label="Clear Queue", style=discord.ButtonStyle.danger, row=0)
+    async def clear_queue_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.clear_queue(interaction, button)
+
+    @discord.ui.button(label="Remove from Queue", style=discord.ButtonStyle.secondary, row=0)
+    async def remove_from_queue_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.remove_from_queue(interaction, button)
+
+
+class AdminUserPage(AdminActions, AdminPage):
+    """Per-player admin actions."""
+
+    page_title = "User"
+    page_blurb = "Platform, IGN, record and overview for a single player."
+
+    @discord.ui.button(label="Set Platform", style=discord.ButtonStyle.secondary, row=0)
+    async def set_platform_btn_(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.set_platform_btn(interaction, button)
+
+    @discord.ui.button(label="IGN", style=discord.ButtonStyle.secondary, row=0)
+    async def ign_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.manage_ign(interaction, button)
+
+    @discord.ui.button(label="User View", style=discord.ButtonStyle.secondary, row=0)
+    async def user_view_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.view_player_mmr_btn(interaction, button)
+
+    @discord.ui.button(label="Adjust W/L", style=discord.ButtonStyle.secondary, row=0)
+    async def adjust_wl_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.adjust_wl(interaction, button)
+
+
+class AdminMatchPage(AdminActions, AdminPage):
+    """Live match controls."""
+
+    page_title = "Match"
+    page_blurb = "Substitutions, swaps and result corrections for a live match."
+
+    @discord.ui.button(label="Sub Player", style=discord.ButtonStyle.primary, row=0)
+    async def sub_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.substitute(interaction, button)
+
+    @discord.ui.button(label="Swap Players", style=discord.ButtonStyle.primary, row=0)
+    async def swap_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.swap(interaction, button)
+
+    @discord.ui.button(label="Force Winner", style=discord.ButtonStyle.danger, row=1)
+    async def force_winner_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.force_winner(interaction, button)
+
+    @discord.ui.button(label="Change Winner", style=discord.ButtonStyle.secondary, row=1)
+    async def change_winner_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.change_winner(interaction, button)
+
+    @discord.ui.button(label="Cancel Match", style=discord.ButtonStyle.danger, row=1)
+    async def cancel_match_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cancel_match(interaction, button)
 
 
 class AdminIGNUserSelectView(discord.ui.View):
@@ -2077,6 +2290,17 @@ class SetMMRUserSelectView(discord.ui.View):
         self.selected_user = select.values[0]
 
         async def show_mmr_modal(inter: discord.Interaction, game_id: int):
+            game = await DatabaseHelper.get_game(game_id)
+            if game and is_overwatch_game(game):
+                # Overwatch has no single MMR to set -- the balancer reads a
+                # rating per role, so ask which one before opening the modal.
+                view = OWSetMMRRoleSelectView(self.cog, self.selected_user.id, game_id)
+                await inter.response.edit_message(
+                    content=f"Setting **{game.name}** MMR for "
+                            f"**{self.selected_user.display_name}**\nSelect a role:",
+                    view=view
+                )
+                return
             modal = SetMMRModal(self.cog, self.selected_user.id, game_id)
             await inter.response.send_modal(modal)
 
@@ -2085,6 +2309,145 @@ class SetMMRUserSelectView(discord.ui.View):
         await interaction.response.edit_message(
             content=f"Setting MMR for **{self.selected_user.display_name}**\nSelect a game:",
             view=view
+        )
+
+
+class OWRoleRanksUserSelectView(discord.ui.View):
+    """Entry point for re-ranking an existing player's Overwatch roles.
+
+    The "they were set up for Tank, now they want to play DPS" case: same rank
+    dropdowns as new-user setup, but scoped to the roles the admin picks so the
+    ratings they already earned on other roles are never touched.
+    """
+
+    def __init__(self, cog: 'CustomMatch', games: List[GameConfig]):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.games = games
+
+    @discord.ui.select(cls=discord.ui.UserSelect, placeholder="Select a user...")
+    async def user_select(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
+        user = select.values[0]
+        if len(self.games) == 1:
+            await _ow_role_ranks_show(interaction, self.cog, self.games[0], user.id)
+            return
+
+        async def pick_game(inter: discord.Interaction, game_id: int):
+            game = await DatabaseHelper.get_game(game_id)
+            await _ow_role_ranks_show(inter, self.cog, game, user.id)
+
+        view = discord.ui.View(timeout=120)
+        view.add_item(GameSelectDropdown(self.games, pick_game))
+        await interaction.response.edit_message(
+            content=f"Role ranks for **{user.display_name}**\nSelect a game:", view=view
+        )
+
+
+async def _ow_role_ranks_show(interaction, cog, game, user_id: int):
+    """Show a player's current per-role ratings and offer roles to (re)rank."""
+    member = interaction.guild.get_member(user_id)
+    name = member.display_name if member else str(user_id)
+    current = await DatabaseHelper.get_all_ow_role_stats(user_id, game.game_id)
+    bands = await DatabaseHelper.get_mmr_roles_with_labels(game.game_id)
+
+    def band_label(mmr: int) -> str:
+        best = None
+        for data in bands.values():
+            if data['mmr'] <= mmr and (best is None or data['mmr'] > best['mmr']):
+                best = data
+        return (best['label'] or f"{best['mmr']} MMR") if best else "unranked"
+
+    lines = [f"**{name}** — {game.name} role ranks"]
+    for role in OW_ROLE_DISPLAY_ORDER:
+        if role in current:
+            mmr = current[role].effective_mmr
+            played = current[role].games_played
+            lines.append(f"{OW_ROLE_EMOJI[role]} **{role}**: {band_label(mmr)} "
+                         f"({mmr} MMR, {played} games)")
+        else:
+            lines.append(f"{OW_ROLE_EMOJI[role]} **{role}**: *unranked*")
+    lines.append("")
+    lines.append("-# Select the roles to (re)rank — every other role is left untouched.")
+
+    view = OWRoleRanksPickView(cog, game.game_id, user_id, set(current))
+    await interaction.response.edit_message(content="\n".join(lines), view=view)
+
+
+class OWRoleRanksPickView(discord.ui.View):
+    """Which roles to (re)rank. Feeds straight into the setup rank dropdowns."""
+
+    def __init__(self, cog: 'CustomMatch', game_id: int, user_id: int, rated: set):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.game_id = game_id
+        self.user_id = user_id
+
+        select = discord.ui.Select(
+            placeholder="Select role(s) to rank...",
+            min_values=1,
+            max_values=len(OW_ROLE_DISPLAY_ORDER),
+            options=[
+                discord.SelectOption(
+                    label=r, value=r,
+                    description="Currently rated" if r in rated else "Currently unranked",
+                    emoji=discord.PartialEmoji(name=r.lower(), id=OW_ROLE_EMOJI_ID[r]),
+                )
+                for r in OW_ROLE_DISPLAY_ORDER
+            ],
+        )
+        select.callback = self.on_select
+        self.add_item(select)
+
+    async def on_select(self, interaction: discord.Interaction):
+        chosen = set(interaction.data["values"])
+        roles = [r for r in OW_ROLE_DISPLAY_ORDER if r in chosen]
+
+        mmr_roles = await DatabaseHelper.get_mmr_roles_with_labels(self.game_id)
+        if not mmr_roles:
+            await interaction.response.edit_message(
+                content="No rank labels configured for this game — set them up in "
+                        "Game Settings first.", view=None)
+            return
+
+        stats = await DatabaseHelper.get_player_stats(self.user_id, self.game_id)
+        member = interaction.guild.get_member(self.user_id)
+        name = member.display_name if member else str(self.user_id)
+
+        view = OWSetupRoleRankView(
+            self.cog, self.game_id, self.user_id, mmr_roles, stats.platform,
+            roles, existing_only=True,
+        )
+        await interaction.response.edit_message(content=view.prompt(name), view=view)
+
+
+class OWSetMMRRoleSelectView(discord.ui.View):
+    """Which Overwatch role's rating is being set. One role per edit."""
+
+    def __init__(self, cog: 'CustomMatch', user_id: int, game_id: int):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.user_id = user_id
+        self.game_id = game_id
+
+        select = discord.ui.Select(
+            placeholder="Select role...",
+            options=[
+                discord.SelectOption(
+                    label=r, value=r,
+                    emoji=discord.PartialEmoji(name=r.lower(), id=OW_ROLE_EMOJI_ID[r]),
+                )
+                for r in OW_ROLE_DISPLAY_ORDER
+            ],
+        )
+        select.callback = self.on_select
+        self.add_item(select)
+
+    async def on_select(self, interaction: discord.Interaction):
+        role = interaction.data["values"][0]
+        current = await DatabaseHelper.get_all_ow_role_stats(self.user_id, self.game_id)
+        await interaction.response.send_modal(
+            SetMMRModal(self.cog, self.user_id, self.game_id, role=role,
+                        current=current.get(role))
         )
 
 
@@ -2174,40 +2537,99 @@ class SetMMRModal(discord.ui.Modal, title="Set Player MMR"):
         required=True
     )
 
-    def __init__(self, cog: 'CustomMatch', user_id: int, game_id: int):
+    def __init__(self, cog: 'CustomMatch', user_id: int, game_id: int,
+                 role: Optional[str] = None, current: Optional['PlayerRoleStats'] = None):
         super().__init__()
         self.cog = cog
         self.user_id = user_id
         self.game_id = game_id
+        # Set for Overwatch: the rating lives per role, not on the aggregate column.
+        self.role = role
+        if role:
+            self.title = f"Set {role} MMR"
+            self.mmr_value.label = f"{role} MMR"
+            if current is not None:
+                self.mmr_value.default = str(current.effective_mmr)
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
             mmr = int(self.mmr_value.value)
-            stats = await DatabaseHelper.get_player_stats(self.user_id, self.game_id)
-            old_mmr = stats.mmr
-            stats.mmr = mmr
-            await DatabaseHelper.update_player_stats(stats)
-
-            member = interaction.guild.get_member(self.user_id)
-            name = member.display_name if member else str(self.user_id)
-            game = await DatabaseHelper.get_game(self.game_id)
-            # Overwatch balances off per-role MMR, not this column.
-            await DatabaseHelper.sync_ow_role_seed(
-                self.user_id, self.game_id, stats.effective_mmr, game
-            )
-
-            await interaction.response.send_message(
-                f"Set **{name}**'s MMR for {game.name} to {mmr}.",
-                ephemeral=True
-            )
-            await self.cog.update_mmr_roles(interaction.guild, self.user_id, self.game_id, stats.effective_mmr)
-            await self.cog.log_action(
-                interaction.guild,
-                f"MMR updated for **{name}** ({game.name}): {old_mmr} \u2192 {mmr} (by {interaction.user.display_name})",
-                prefix="\u2755"
-            )
         except ValueError:
             await interaction.response.send_message("Invalid MMR value.", ephemeral=True)
+            return
+
+        member = interaction.guild.get_member(self.user_id)
+        name = member.display_name if member else str(self.user_id)
+        game = await DatabaseHelper.get_game(self.game_id)
+
+        if self.role:
+            await self._submit_role(interaction, game, name, mmr)
+            return
+
+        stats = await DatabaseHelper.get_player_stats(self.user_id, self.game_id)
+        old_mmr = stats.mmr
+        stats.mmr = mmr
+        await DatabaseHelper.update_player_stats(stats)
+
+        # Overwatch balances off per-role MMR, not this column.
+        await DatabaseHelper.sync_ow_role_seed(
+            self.user_id, self.game_id, stats.effective_mmr, game
+        )
+
+        await interaction.response.send_message(
+            f"Set **{name}**'s MMR for {game.name} to {mmr}.",
+            ephemeral=True
+        )
+        await self.cog.update_mmr_roles(interaction.guild, self.user_id, self.game_id, stats.effective_mmr)
+        await self.cog.log_action(
+            interaction.guild,
+            f"MMR updated for **{name}** ({game.name}): {old_mmr} \u2192 {mmr} (by {interaction.user.display_name})",
+            prefix="\u2755"
+        )
+
+    async def _submit_role(self, interaction: discord.Interaction, game, name: str, mmr: int):
+        """Write one Overwatch role's rating, then re-derive the visible rank."""
+        bands = sorted((await DatabaseHelper.get_mmr_roles(self.game_id)).values())
+        floor = bands[0] if bands else 500
+        ceiling = max(bands[-1], floor) if bands else 6000
+        # A value under the lowest band leaves update_mmr_roles with no role to
+        # grant: it strips the player's current rank role and hands back nothing.
+        if not (floor <= mmr <= ceiling):
+            await interaction.response.send_message(
+                f"MMR must be between {floor} and {ceiling} "
+                f"(the configured rank ladder for {game.name}).",
+                ephemeral=True
+            )
+            return
+
+        role_stats = await DatabaseHelper.get_ow_role_stats(self.user_id, self.game_id, self.role)
+        old = role_stats.effective_mmr
+        existed = not role_stats.is_new
+        role_stats.mmr = mmr - role_stats.admin_offset  # keep effective_mmr == mmr
+        role_stats.is_new = False
+        await DatabaseHelper.upsert_ow_role_stats(role_stats)
+
+        # The rank role tracks the player's best role, so re-derive it rather
+        # than assuming this edit was the high-water mark.
+        peak = await DatabaseHelper.get_ow_player_peak_mmr(self.user_id, self.game_id) or mmr
+        stats = await DatabaseHelper.get_player_stats(self.user_id, self.game_id)
+        stats.mmr = peak - stats.admin_offset
+        await DatabaseHelper.update_player_stats(stats)
+        await self.cog.update_mmr_roles(interaction.guild, self.user_id, self.game_id, peak)
+
+        was = f"{old} \u2192 " if existed else "previously unranked, "
+        await interaction.response.edit_message(
+            content=f"Set **{name}**'s {OW_ROLE_EMOJI[self.role]} **{self.role}** MMR "
+                    f"for {game.name}: {was}**{mmr}**.\n"
+                    f"-# Rank role now follows their best role ({peak} MMR).",
+            view=None
+        )
+        await self.cog.log_action(
+            interaction.guild,
+            f"OW role MMR updated for **{name}** ({game.name}): {self.role} "
+            f"{old if existed else 'unranked'} \u2192 {mmr} (by {interaction.user.display_name})",
+            prefix="\u2755"
+        )
 
 
 class MMRViewUserSelectView(discord.ui.View):
@@ -2288,6 +2710,47 @@ class MMRViewUserSelectView(discord.ui.View):
                     inline=False
                 )
 
+                # Roles (Overwatch: a rating per role, so show all three).
+                # This is where a player's Overwatch rank actually lives now --
+                # a single Discord rank badge could only ever report one of the
+                # three honestly, so it reports none of them.
+                if is_overwatch_game(game):
+                    role_stats = await DatabaseHelper.get_all_ow_role_stats(selected_user.id, game_id)
+                    bands = await DatabaseHelper.get_mmr_roles_with_labels(game_id)
+
+                    def band_label(mmr):
+                        best = None
+                        for data in bands.values():
+                            if data['mmr'] <= mmr and (best is None or data['mmr'] > best['mmr']):
+                                best = data
+                        return (best['label'] or f"{best['mmr']} MMR") if best else "unranked"
+
+                    role_lines = []
+                    for role in OW_ROLE_DISPLAY_ORDER:
+                        emoji = OW_ROLE_EMOJI[role]
+                        rs = role_stats.get(role)
+                        if rs:
+                            role_lines.append(
+                                f"{emoji} **{role}:** {band_label(rs.effective_mmr)} "
+                                f"· {rs.effective_mmr} MMR · {rs.games_played}g "
+                                f"({rs.wins}W/{rs.losses}L)"
+                            )
+                        else:
+                            # No stored row: get_ow_role_stats would seed this a
+                            # band below their best if they queued it, so say so
+                            # rather than implying a rating they don't have.
+                            seeded = await DatabaseHelper.get_ow_role_stats(
+                                selected_user.id, game_id, role)
+                            role_lines.append(
+                                f"{emoji} **{role}:** *unranked* "
+                                f"— would seed at {seeded.effective_mmr}"
+                            )
+                    sel = await DatabaseHelper.get_ow_role_selection(selected_user.id, game_id)
+                    if sel:
+                        queued = " ".join(OW_ROLE_EMOJI[r] for r, _rank in sel)
+                        role_lines.append(f"\n**Queues as:** {queued}")
+                    embed.add_field(name="Role Ranks", value="\n".join(role_lines), inline=False)
+
                 # Roles (Rivals only)
                 if 'rivals' in game.name.lower():
                     role_prefs = await DatabaseHelper.get_player_role_prefs(selected_user.id, game_id)
@@ -2346,18 +2809,228 @@ class MMRViewUserSelectView(discord.ui.View):
 
 async def _setup_advance_to_rank(interaction, cog, game_id, user_id, display_name, platform):
     """Advance new-user setup to the rank step (or the manual-MMR fallback),
-    carrying the chosen platform through so the PC seed bump can be applied."""
+    carrying the chosen platform through so the PC seed bump can be applied.
+
+    Overwatch forks here: it rates every role separately, so it walks one rank
+    dropdown per role instead of a single one for the player."""
     mmr_roles = await DatabaseHelper.get_mmr_roles_with_labels(game_id)
-    if mmr_roles:
-        view = SetupUserRankSelectView(cog, game_id, user_id, mmr_roles, platform)
-        await interaction.response.edit_message(
-            content=f"Select rank for **{display_name}**:",
-            view=view
-        )
-    else:
+    if not mmr_roles:
         # No labeled ranks configured: fall back to manual MMR entry.
         modal = SetupUserModal(cog, game_id, user_id, platform)
         await interaction.response.send_modal(modal)
+        return
+
+    game = await DatabaseHelper.get_game(game_id)
+    if game and is_overwatch_game(game):
+        view = OWSetupRoleRankView(cog, game_id, user_id, mmr_roles, platform,
+                                   list(OW_ROLE_DISPLAY_ORDER))
+        await interaction.response.edit_message(content=view.prompt(display_name), view=view)
+        return
+
+    view = SetupUserRankSelectView(cog, game_id, user_id, mmr_roles, platform)
+    await interaction.response.edit_message(
+        content=f"Select rank for **{display_name}**:",
+        view=view
+    )
+
+
+UNRANKED_VALUE = "UNRANKED"
+# Where a player with no rank on any role starts. This is the Silver band floor
+# on the configured Overwatch ladder, deliberately: the old 1000 default sits
+# *between* bands, so update_mmr_roles granted those players Bronze and left
+# them stranded under the floor.
+OW_ALL_UNRANKED_MMR = 1200
+
+
+class OWSetupRoleRankView(discord.ui.View):
+    """One rank dropdown per Overwatch role, asked in sequence.
+
+    Overwatch balances off a rating *per role*, so a single rank for the whole
+    player rated a Tank main identically on DPS. Every role is asked for, and
+    "Unranked" is a first-class answer: an unranked role gets no row at all, and
+    ``DatabaseHelper.get_ow_role_stats`` seeds it a band below the player's best
+    rated role if they ever queue it. That keeps ranking a role *later* a real
+    operation instead of overwriting a value that already existed.
+
+    ``ranks`` accumulates role -> rank MMR (absent = unranked) across the chain.
+    """
+
+    def __init__(self, cog: 'CustomMatch', game_id: int, user_id: int,
+                 mmr_roles: Dict[int, dict], platform: str = 'console',
+                 remaining: Optional[List[str]] = None,
+                 ranks: Optional[Dict[str, int]] = None,
+                 role_ids: Optional[Dict[str, int]] = None,
+                 existing_only: bool = False):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.game_id = game_id
+        self.user_id = user_id
+        self.mmr_roles = mmr_roles  # {role_id: {'mmr': int, 'label': str|None}}
+        self.platform = platform
+        self.remaining = list(remaining or OW_ROLE_DISPLAY_ORDER)
+        self.ranks = dict(ranks or {})
+        self.role_ids = dict(role_ids or {})
+        # True when re-ranking an existing player: don't re-grant the verified
+        # role and never lower an aggregate MMR they already earned.
+        self.existing_only = existing_only
+
+        options = []
+        # Unranked belongs to first-time setup, where the admin is asked about
+        # every role and may not know them all. In the re-rank flow they chose
+        # exactly which roles to rank, so offering "no rank" there would just be
+        # a way to silently discard their own selection.
+        if not existing_only:
+            options.append(discord.SelectOption(
+                label="Unranked",
+                value=UNRANKED_VALUE,
+                description="No rank yet — seeded from their other roles",
+            ))
+        for role_id, data in sorted(mmr_roles.items(), key=lambda x: x[1]['mmr'], reverse=True):
+            options.append(discord.SelectOption(
+                label=data['label'] or f"{data['mmr']} MMR",
+                description=f"{data['mmr']} MMR",
+                value=str(role_id),
+            ))
+
+        select = discord.ui.Select(placeholder=f"Select {self.current} rank...",
+                                   options=options[:25])
+        select.callback = self.on_select
+        self.add_item(select)
+
+    @property
+    def current(self) -> str:
+        return self.remaining[0]
+
+    def prompt(self, display_name: str) -> str:
+        done = len(self.ranks) + 1
+        total = done + len(self.remaining) - 1
+        return (f"**{OW_ROLE_EMOJI[self.current]} {self.current}** rank for "
+                f"**{display_name}**  ({done}/{total})")
+
+    async def on_select(self, interaction: discord.Interaction):
+        choice = interaction.data["values"][0]
+        role = self.current
+        if choice != UNRANKED_VALUE:
+            role_id = int(choice)
+            self.ranks[role] = self.mmr_roles[role_id]['mmr']
+            self.role_ids[role] = role_id
+
+        member = interaction.guild.get_member(self.user_id)
+        name = member.display_name if member else str(self.user_id)
+
+        remaining = self.remaining[1:]
+        if remaining:
+            nxt = OWSetupRoleRankView(
+                self.cog, self.game_id, self.user_id, self.mmr_roles, self.platform,
+                remaining, self.ranks, self.role_ids, self.existing_only,
+            )
+            await interaction.response.edit_message(content=nxt.prompt(name), view=nxt)
+            return
+
+        await _ow_finalize_setup(
+            interaction, self.cog, self.game_id, self.user_id, self.platform,
+            self.ranks, self.role_ids, self.mmr_roles, self.existing_only,
+        )
+
+
+async def _ow_finalize_setup(interaction, cog, game_id, user_id, platform,
+                             ranks: Dict[str, int], role_ids: Dict[str, int],
+                             mmr_roles: Dict[int, dict], existing_only: bool = False):
+    """Persist an Overwatch per-role setup.
+
+    Only roles the admin actually ranked get an ``ow_role_stats`` row -- an
+    unranked role is left absent on purpose so ``get_ow_role_stats`` can seed it
+    from the player's best rated role at read time.
+
+    Marking *every* role Unranked during setup means "I don't know this player",
+    so they land on ``OW_ALL_UNRANKED_MMR`` across the board. Roles they have
+    actually played are exempt from that reset: a rating earned over real games
+    is not something an admin should be able to wipe by clicking through the
+    setup flow, and Set Player MMR exists for when they genuinely mean to.
+
+    The visible rank role and ``player_game_stats.mmr`` follow the player's
+    highest role, which is also the reference ``get_ow_role_stats`` uses when it
+    seeds a new one.
+    """
+    game = await DatabaseHelper.get_game(game_id)
+    member = interaction.guild.get_member(user_id)
+    name = member.display_name if member else str(user_id)
+
+    existing = await DatabaseHelper.get_all_ow_role_stats(user_id, game_id)
+    fallback = not ranks and not existing_only
+    protected: List[str] = []
+    if fallback:
+        for role in OW_ROLES:
+            prior = existing.get(role)
+            if prior is not None and prior.games_played > 0:
+                protected.append(role)
+            else:
+                ranks[role] = OW_ALL_UNRANKED_MMR
+
+    # The PC bump is applied per role, exactly as the single-rank path applies it
+    # once -- a PC player out-aims a console player at the same rank on any role.
+    written: Dict[str, int] = {}
+    for role, rank_mmr in ranks.items():
+        mmr_val = await seed_mmr_for_rank(rank_mmr, game, platform)
+        stats = await DatabaseHelper.get_ow_role_stats(user_id, game_id, role)
+        stats.mmr = mmr_val - stats.admin_offset  # keep effective_mmr == mmr_val
+        stats.games_played = 0                    # placement K corrects a misseed
+        stats.is_new = False
+        await DatabaseHelper.upsert_ow_role_stats(stats)
+        written[role] = mmr_val
+
+    # Aggregate MMR tracks the player's best role, read back *after* the writes
+    # so it reflects what is actually stored. Deriving it from the pre-write
+    # snapshot let a stale high role -- or the all-unranked default when nothing
+    # was written at all -- outlive the edit that was supposed to replace it.
+    best = await DatabaseHelper.get_ow_player_peak_mmr(user_id, game_id)
+    if best is None:
+        best = OW_ALL_UNRANKED_MMR
+
+    stats = await DatabaseHelper.get_player_stats(user_id, game_id)
+    stats.mmr = best - stats.admin_offset
+    stats.platform = platform
+    await DatabaseHelper.update_player_stats(stats)
+
+    if member and not existing_only:
+        if game.verified_role_id:
+            verified_role = interaction.guild.get_role(game.verified_role_id)
+            if verified_role and verified_role not in member.roles:
+                await member.add_roles(verified_role, reason="Setup new user verification")
+
+    await cog.update_mmr_roles(interaction.guild, user_id, game_id, stats.effective_mmr)
+
+    label_by_mmr = {d['mmr']: (d['label'] or f"{d['mmr']} MMR") for d in mmr_roles.values()}
+    lines = [f"{'Roles updated' if existing_only else 'Setup complete'} for "
+             f"**{name}** ({game.name}):"]
+    for role in OW_ROLE_DISPLAY_ORDER:
+        if role in written:
+            tag = "Unranked" if fallback else label_by_mmr.get(ranks[role], str(ranks[role]))
+            lines.append(f"- {OW_ROLE_EMOJI[role]} **{role}**: {tag} — {written[role]} MMR")
+        elif role in protected:
+            lines.append(f"- {OW_ROLE_EMOJI[role]} **{role}**: kept at "
+                         f"{existing[role].effective_mmr} MMR — "
+                         f"{existing[role].games_played} games played, not reset")
+        elif role in existing:
+            lines.append(f"- {OW_ROLE_EMOJI[role]} **{role}**: unchanged "
+                         f"({existing[role].effective_mmr} MMR)")
+        else:
+            lines.append(f"- {OW_ROLE_EMOJI[role]} **{role}**: unranked — "
+                         "seeded from their other roles on first queue")
+    if game.pc_enabled:
+        lines.append(f"- Platform: {platform.upper()}")
+    if game.verified_role_id and not existing_only:
+        lines.append("- Verified role assigned")
+
+    await interaction.response.edit_message(content="\n".join(lines), view=None)
+
+    summary = ", ".join(f"{r} {written[r]}" for r in OW_ROLE_DISPLAY_ORDER if r in written)
+    await cog.log_action(
+        interaction.guild,
+        f"{'OW role ranks updated' if existing_only else 'New user setup'}: **{name}** "
+        f"({game.name}) — {summary or 'no changes'} by {interaction.user.display_name}",
+        prefix="❕"
+    )
 
 
 class SetupUserPlatformSelectView(discord.ui.View):
@@ -2985,7 +3658,7 @@ class SubstituteInPlayerView(discord.ui.View):
                 # Overwatch MMR is hidden everywhere else \u2014 report the role slot
                 # instead of leaking a rating into the log channel.
                 ow_log = is_overwatch_game(game)
-                out_tag = f"{OW_ROLE_GLYPH.get(out_role, '')} {out_role}" if ow_log and out_role \
+                out_tag = f"{OW_ROLE_EMOJI.get(out_role, '')} {out_role}" if ow_log and out_role \
                     else f"[{out_stats.effective_mmr} MMR]"
                 in_tag = out_tag if ow_log else f"[{in_stats.effective_mmr} MMR]"
                 log_embed.add_field(
@@ -3556,7 +4229,7 @@ class QueueMenuView(BaseMatchView):
         game = await DatabaseHelper.get_game(self.game_id)
         current = await DatabaseHelper.get_ow_role_selection(interaction.user.id, self.game_id)
         current_str = (
-            "  ".join(f"{OW_ROLE_GLYPH[r]} {r}" for r, _rank in current)
+            "  ".join(f"{OW_ROLE_EMOJI[r]} {r}" for r, _rank in current)
             if current else "*none set*"
         )
 
@@ -3566,7 +4239,8 @@ class QueueMenuView(BaseMatchView):
             )
 
         view = OWRoleSelectView(
-            self.cog, self.game_id, game.name, rejoin_hint=False, after_save=after_save
+            self.cog, self.game_id, game.name, rejoin_hint=False, after_save=after_save,
+            preselected=[r for r, _rank in current],
         )
         await interaction.response.send_message(
             f"**Current roles:** {current_str}\n\nSelect every role you'll play:",
@@ -4256,40 +4930,60 @@ class OWRoleSelectView(discord.ui.View):
     as a willing-set and assigns each player their strongest viable role.
     """
 
+    ALL_VALUE = "ALL"
+
     def __init__(self, cog: 'CustomMatch', game_id: int, game_name: str,
-                 rejoin_hint: bool = True, after_save=None):
+                 rejoin_hint: bool = True, after_save=None,
+                 preselected: Optional[List[str]] = None):
         super().__init__(timeout=120)
         self.cog = cog
         self.game_id = game_id
         self.game_name = game_name
         self.rejoin_hint = rejoin_hint
         # Optional async hook(interaction, ordered_roles) that takes over the
-        # response after the selection is saved (used to edit roles while queued).
+        # response after the selection is saved (used to edit roles while queued
+        # and to finish a queue join).
         self.after_save = after_save
 
+        prior = set(preselected or ())
+        options = [discord.SelectOption(label="All Roles", value=self.ALL_VALUE)]
+        for r in OW_ROLE_DISPLAY_ORDER:
+            options.append(discord.SelectOption(
+                label=r,
+                value=r,
+                emoji=discord.PartialEmoji(name=r.lower(), id=OW_ROLE_EMOJI_ID[r]),
+                default=r in prior,
+            ))
+
         select = discord.ui.Select(
-            placeholder="Select every role you'll play (1-3)...",
+            placeholder="Select every role you'll play...",
             min_values=1,
-            max_values=3,
-            options=[
-                discord.SelectOption(label=r, value=r, emoji=OW_ROLE_GLYPH.get(r))
-                for r in OW_ROLES
-            ],
+            # 4, not 3: "All Roles" occupies a slot, so a player who ticks it
+            # alongside all three roles must not hit a validation error.
+            max_values=len(options),
+            options=options,
         )
         select.callback = self.on_select
         self.add_item(select)
 
     async def on_select(self, interaction: discord.Interaction):
         chosen = set(interaction.data["values"])
+        if self.ALL_VALUE in chosen:
+            chosen = set(OW_ROLES)
         # Store in canonical order for stability (balancer ignores order)
         ordered = [r for r in OW_ROLES if r in chosen]
+        if not ordered:
+            await interaction.response.edit_message(
+                content="No roles selected — pick at least one.", view=self
+            )
+            return
         await DatabaseHelper.set_ow_role_selection(interaction.user.id, self.game_id, ordered)
 
         self.clear_items()
         if self.after_save:
             await self.after_save(interaction, ordered)
         else:
-            desc = "  ".join(f"{OW_ROLE_GLYPH[r]} {r}" for r in ordered)
+            desc = "  ".join(f"{OW_ROLE_EMOJI[r]} {r}" for r in OW_ROLE_DISPLAY_ORDER if r in ordered)
             hint = "\n\nClick **Join** again to enter the queue." if self.rejoin_hint else ""
             await interaction.response.edit_message(
                 content=f"**{self.game_name} roles set:**  {desc}{hint}",

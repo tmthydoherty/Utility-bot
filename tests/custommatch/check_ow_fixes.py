@@ -25,11 +25,15 @@ def check(c, m):
 
 
 def gate_scope():
-    """All four 2-2-2 gates must be scoped to the non-secondary 12-player queue."""
+    """All four 2-2-2 gates must be scoped to the non-secondary 12-player queue.
+
+    Every consumer of the role selections -- the three feasibility gates and the
+    queue-embed coverage panel -- goes through _ow_selections, so tracking that
+    one name catches any new gate somebody adds later."""
     src = (SRC / "cog.py").read_text()
     # Exclude the definition explicitly -- it is NOT first in the file.
     call_sites = [
-        m.start() for m in re.finditer(r"_ow_composition_summary\(", src)
+        m.start() for m in re.finditer(r"_ow_selections\(", src)
         if "async def" not in src[src.rfind("\n", 0, m.start()):m.start()]
     ]
     print("2-2-2 gate call sites (each must be guarded)")
@@ -40,7 +44,7 @@ def gate_scope():
         guarded = "is_secondary" in window and "== 12" in window
         print(f"   cog.py:{line_no:<6} guarded={guarded}")
         ok_all &= guarded
-    check(ok_all, "a _ow_composition_summary call site is missing the is_secondary/==12 guard")
+    check(ok_all, "a _ow_selections call site is missing the is_secondary/==12 guard")
     check(len(call_sites) >= 3, f"expected >=3 gate call sites, found {len(call_sites)}")
 
 

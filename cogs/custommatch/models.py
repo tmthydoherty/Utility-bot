@@ -2,6 +2,7 @@ from enum import Enum
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Tuple
+from itertools import combinations
 from pathlib import Path
 import re
 import secrets
@@ -85,8 +86,25 @@ RIVALS_ROLES = ("Vanguard", "Duelist", "Strategist")
 
 # Canonical Overwatch roles for strict 2-2-2 (2 of each per team)
 OW_ROLES = ("Tank", "DPS", "Support")
-# Display glyphs (unicode — no custom-emoji dependency)
+# Unicode fallback. Nothing renders these today — every user-facing surface uses
+# OW_ROLE_EMOJI below — but they are the drop-in replacement if the custom emojis
+# ever stop resolving, and the only safe choice inside monospace/display_width
+# padding, where a 20-odd character emoji token would wreck column alignment.
 OW_ROLE_GLYPH = {"Tank": "\U0001f6e1️", "DPS": "⚔️", "Support": "\U0001f489"}
+# Custom server emojis. Discord resolves these by ID, so the names are cosmetic.
+OW_ROLE_EMOJI = {
+    "Tank": "<:tank:1533191116881658047>",
+    "DPS": "<:dps:1533191194929270854>",
+    "Support": "<:support:1533191259680804926>",
+}
+# Raw IDs for select-menu options, which take a PartialEmoji rather than a token
+OW_ROLE_EMOJI_ID = {
+    "Tank": 1533191116881658047,
+    "DPS": 1533191194929270854,
+    "Support": 1533191259680804926,
+}
+# Presentation order only — storage and balancing stay on OW_ROLES
+OW_ROLE_DISPLAY_ORDER = ("Tank", "Support", "DPS")
 # Default per-role balance weights (tunable per game via ow_role_weights)
 OW_DEFAULT_ROLE_WEIGHTS = {"Tank": 1.30, "Support": 1.15, "DPS": 1.00}
 # Fraction of MMR-above-floor kept when seeding new roles is handled via rank
@@ -418,6 +436,105 @@ def ow_can_form_222(
 
     feasible = matched == len(slots)
     return feasible, deficit
+
+
+def ow_coverage_panel(selections: Dict[int, "set"], total_slots: int = 12) -> str:
+    """Render the Overwatch queue's role-coverage block as subtle (-#) markdown.
+
+    ``selections`` maps player_id -> the set of roles that player will queue for;
+    an empty/missing set means "fill" and counts as all three, matching how the
+    balancer treats it. Returns a newline-joined block ready to drop into an
+    embed field value.
+
+    Three buckets, one section each: players locked to a single role (always
+    shown), players on exactly two roles, and players on all three. The pair and
+    trio headers only appear once someone is actually in that bucket, so the
+    panel grows with the queue instead of showing a wall of zeroes.
+    """
+    per_role = total_slots // len(OW_ROLES)
+    open_slots = max(0, total_slots - len(selections))
+
+    expanded = {pid: (set(roles) if roles else set(OW_ROLES))
+                for pid, roles in selections.items()}
+    sets = list(expanded.values())
+
+    locked = {r: sum(1 for s in sets if s == {r}) for r in OW_ROLES}
+    trio = sum(1 for s in sets if len(s) == len(OW_ROLES))
+    # avail counts every player *willing* to play the role, so a flex player is
+    # counted in each role they picked. Only used for the need math below.
+    avail = {r: sum(1 for s in sets if r in s) for r in OW_ROLES}
+
+    lines = ["**Locked In Roles:**"]
+    lines += [f"{OW_ROLE_EMOJI[r]}: {locked[r]}/{per_role}" for r in OW_ROLE_DISPLAY_ORDER]
+
+    pair_rows = []
+    for a, b in combinations(OW_ROLE_DISPLAY_ORDER, 2):
+        n = sum(1 for s in sets if s == {a, b})
+        if n:
+            pair_rows.append(f"{OW_ROLE_EMOJI[a]}{OW_ROLE_EMOJI[b]}: {n}")
+    if pair_rows:
+        lines.append("**Multi-role Queueing:**")
+        lines += pair_rows
+
+    if trio:
+        lines.append("**All-role Queuing:**")
+        all_emoji = "".join(OW_ROLE_EMOJI[r] for r in OW_ROLE_DISPLAY_ORDER)
+        lines.append(f"{all_emoji}: {trio}")
+
+    # "Roles needed" — a guaranteed lower bound: even if every player willing to
+    # play the role is assigned it, you are still short by this much. Unlike the
+    # per-role deficit from ow_can_form_222 (which is read off one arbitrary
+    # maximum matching and varies between equally-valid ones) this is invariant,
+    # so it can never contradict itself between two refreshes of the embed.
+    need = {r: max(0, per_role - avail[r]) for r in OW_ROLES}
+    total_need = sum(need.values())
+
+    # Hold the section back until the remaining slots are fully spoken for.
+    # Above that threshold there is still slack for any role to join, so naming
+    # roles would be guesswork dressed up as a requirement.
+    #
+    # The half-full floor matters because "spoken for" is trivially true for any
+    # queue of single-role players: their needs always sum to exactly the open
+    # slots. Without the floor, one lone Tank would print the entire 4/4/4 shape
+    # as a demand, which is true but tells nobody anything.
+    queued = len(selections)
+    show_need = (total_need
+                 and total_need >= open_slots
+                 and queued >= total_slots // 2)
+    if show_need:
+        lines.append("")
+        lines.append("Roles needed:")
+        lines += [f"{OW_ROLE_EMOJI[r]}: {need[r]}" for r in OW_ROLE_DISPLAY_ORDER if need[r]]
+        if open_slots and total_need > open_slots:
+            # More players needed than seats left: someone already queued has to
+            # widen their picks. Name the roles that are physically over-stacked.
+            over = [r for r in OW_ROLE_DISPLAY_ORDER if locked[r] > per_role]
+            spots = f"{open_slots} spot" + ("" if open_slots == 1 else "s")
+            if over:
+                over_emoji = "".join(OW_ROLE_EMOJI[r] for r in over)
+                lines.append(f"⚠️ Too many {over_emoji} — only {spots} left, some will need to flex")
+            else:
+                lines.append(f"⚠️ Only {spots} left but {total_need} more players are needed "
+                             "— some will need to add roles")
+
+    if queued >= total_slots:
+        feasible, deficit = ow_can_form_222(expanded, {r: per_role for r in OW_ROLES})
+        if feasible:
+            lines.append("✅ 2-2-2 ready")
+        elif total_need:
+            parts = [f"+{need[r]} {OW_ROLE_EMOJI[r]}" for r in OW_ROLE_DISPLAY_ORDER if need[r]]
+            lines.append("⚠️ Can't form 2-2-2 — need " + ", ".join(parts))
+        else:
+            # No single role is short, yet a 2-2-2 still can't be built: the
+            # shortfall lives across a *pair* of roles (8 Tank-only + 4 flex
+            # covers Tank but is 4 short across DPS+Support). Naming a role here
+            # would mean picking one off an arbitrary maximum matching, so
+            # report the headcount instead — that number is invariant.
+            short = sum(deficit.values())
+            players = f"{short} queued player" + ("" if short == 1 else "s")
+            lines.append(f"⚠️ Can't form 2-2-2 — {players} need to add roles")
+
+    return "\n".join(f"-# {line}" if line else "" for line in lines)
 
 
 def display_width(s: str) -> int:

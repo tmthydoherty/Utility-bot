@@ -19,9 +19,17 @@ Scripts, and what each protects:
                          game's lowest band; new-role seeding; climb rates
   check_seed_coverage.py every `stats.mmr =` write mirrors into per-role MMR.
                          Run this after touching any MMR-seeding path.
-  check_view_timeout.py  settings panels refresh while used and grey out on expiry
+  check_settings_panel.py  the /cm_settings page tree: row limits, a Back button
+                         on every page, Back surviving view rebuilds, ancestor
+                         timeouts refreshed from a nested page, expiry greying
   check_ow_fixes.py      2-2-2 gates stay scoped; role-map plumbing; modal
                          bounds; settings warnings
+  check_queue_coverage.py  the queue embed's role-coverage panel: which sections
+                         appear when, the "Roles needed" threshold, and that the
+                         needed roles never contradict the 2-2-2 verdict
+  check_ow_role_setup.py   per-role OW setup: which ow_role_stats rows a setup
+                         writes, unranked roles staying absent, aggregate MMR
+                         tracking the best role, and the /cm_panel page tree
   check_perf.py          balancer stays inside Discord's 3s ack window
 
 Not run here (they read the live database or write to it):
@@ -44,7 +52,9 @@ SCRIPTS = [
     "check_seed_gap.py",
     "check_seed_coverage.py",
     "check_ow_fixes.py",
-    "check_view_timeout.py",
+    "check_queue_coverage.py",
+    "check_ow_role_setup.py",
+    "check_settings_panel.py",
     "ow_lifecycle.py",
     "ow_harness.py",
     "check_perf.py",

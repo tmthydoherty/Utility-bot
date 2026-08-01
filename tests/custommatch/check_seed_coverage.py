@@ -11,9 +11,21 @@ from cogs.custommatch.models import OW_ROLES
 
 WINDOW = 22  # lines after the assignment in which the seed call must appear
 # Elo updates and the per-role admin modal are not rank-seeding paths.
+#
+# The views_gameplay entries run the mirror in reverse: the Overwatch admin
+# flows write ow_role_stats *directly*, per role, and then derive the aggregate
+# column from the roles. Calling sync_ow_role_seed on those paths would be
+# actively wrong -- it blanket-seeds every role that has no row yet, which is
+# exactly the set those flows deliberately leave unranked so get_ow_role_stats
+# can seed them from the player's best role later.
 EXEMPT = {
     "cog.py": ["stats.mmr = max(mmr_floor"],
     "views_settings.py": ["stats.mmr = new_mmr - stats.admin_offset"],
+    "views_gameplay.py": [
+        "stats.mmr = peak - stats.admin_offset",     # SetMMRModal._submit_role
+        "stats.mmr = mmr_val - stats.admin_offset",  # _ow_finalize_setup, per role
+        "stats.mmr = best - stats.admin_offset",     # _ow_finalize_setup, aggregate
+    ],
 }
 
 def coverage():

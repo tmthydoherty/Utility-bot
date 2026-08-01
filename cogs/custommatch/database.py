@@ -763,6 +763,22 @@ class DatabaseHelper:
             )
             await db.commit()
 
+    # Rank roles are the Discord badges granted from the MMR ladder. They are OFF
+    # by default: one badge cannot honestly represent Overwatch's three per-role
+    # ratings, and for the single-MMR games it was decoration that cost a role
+    # mutation per match. The *ladder* itself (game_mmr_roles) stays load-bearing
+    # either way -- it supplies the setup vocabulary, the band-drop used to seed a
+    # new role, the PC bump, and the loss floor -- so none of that is affected.
+    RANK_ROLES_KEY = "rank_roles_enabled"
+
+    @staticmethod
+    async def get_rank_roles_enabled() -> bool:
+        return (await DatabaseHelper.get_config(DatabaseHelper.RANK_ROLES_KEY)) == "1"
+
+    @staticmethod
+    async def set_rank_roles_enabled(enabled: bool):
+        await DatabaseHelper.set_config(DatabaseHelper.RANK_ROLES_KEY, "1" if enabled else "0")
+
     @staticmethod
     async def get_role_emojis() -> dict:
         """Get Rivals role emojis from config. Returns dict with keys: vanguard, duelist, strategist, none."""
@@ -1981,6 +1997,26 @@ class DatabaseHelper:
         return PlayerRoleStats(
             player_id=player_id, game_id=game_id, role=role, mmr=seed, is_new=True
         )
+
+    @staticmethod
+    async def get_all_ow_role_stats(player_id: int, game_id: int) -> Dict[str, PlayerRoleStats]:
+        """Every per-role rating this player actually has stored, keyed by role.
+
+        Unlike get_ow_role_stats this never invents a row: a role missing from
+        the result is a role the player has genuinely never been rated on, which
+        is what the admin flows need in order to show "unranked" honestly and to
+        leave untouched roles alone.
+        """
+        out: Dict[str, PlayerRoleStats] = {}
+        async with DatabaseHelper._get_db() as db:
+            async with db.execute(
+                "SELECT * FROM ow_role_stats WHERE player_id = ? AND game_id = ?",
+                (player_id, game_id)
+            ) as cursor:
+                for row in await cursor.fetchall():
+                    stats = DatabaseHelper._row_to_role_stats(row)
+                    out[stats.role] = stats
+        return out
 
     @staticmethod
     async def get_ow_player_peak_mmr(player_id: int, game_id: int) -> Optional[int]:

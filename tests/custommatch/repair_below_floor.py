@@ -12,8 +12,12 @@ cannot recur. This repairs the players already stranded.
 Overwatch is handled too: its ratings live per-role in ow_role_stats, so each
 role is checked separately.
 
-Rank roles are NOT touched here — this has no Discord connection. The hourly
-rank_role_audit in the cog will grant the correct role on its next pass.
+Rank roles are NOT touched here — this has no Discord connection.
+
+Largely superseded: the hourly rating_audit in the cog now lifts stranded
+ratings on every pass, so this cannot accumulate anymore. Kept for one-off
+inspection (it runs as a dry run by default and prints per-player detail, which
+the audit does not).
 
     # look, change nothing
     venv/bin/python3 tests/custommatch/repair_below_floor.py
@@ -109,7 +113,6 @@ async def main():
         print("nothing below any floor — nothing to repair")
     elif args.apply:
         print(f"repaired {total} rating(s).")
-        print("Rank roles will be granted by rank_role_audit within the hour.")
     else:
         print(f"{total} rating(s) would be repaired — re-run with --apply")
     print("=" * 60)

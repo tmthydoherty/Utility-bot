@@ -5,28 +5,62 @@ import asyncio
 from dotenv import load_dotenv
 from pathlib import Path
 import logging
+from logging.handlers import RotatingFileHandler
 
 from utils.error_reporter import ErrorReporter
 
 # --- LOGGING SETUP ---
+# Stream handlers alone meant every log line went to whatever terminal launched
+# the bot — an SSH session in practice — and vanished with it. Diagnostics the
+# cogs already emit (balancer fallbacks, role-sync failures, view errors) were
+# unrecoverable after the fact. Everything now also lands in a rotating file.
+LOG_DIR = Path(__file__).resolve().parent / "logs"
+LOG_DIR.mkdir(exist_ok=True)
+LOG_FILE = LOG_DIR / "bot.log"
+
+_formatter = logging.Formatter(
+    '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+
+def _build_handlers():
+    """A stream handler (for journald) plus a rotating file (for after the fact)."""
+    stream = logging.StreamHandler()
+    stream.setFormatter(_formatter)
+    file_handler = RotatingFileHandler(
+        LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8")
+    file_handler.setFormatter(_formatter)
+    return [stream, file_handler]
+
+
 logger = logging.getLogger('bot_main')
 if not logger.handlers:
-    handler = logging.StreamHandler()
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
+    for _h in _build_handlers():
+        logger.addHandler(_h)
     logger.setLevel(logging.INFO)
+    # These loggers carry their own handlers, so let them stop here rather than
+    # bubbling to the root handlers below and writing every line twice.
+    logger.propagate = False
 
     # Cog modules log under 'cogs.<name>' and discord.py swallows UI/view
     # exceptions into its own 'discord.*' loggers — neither had a handler,
-    # so those errors were invisible. Surface both in journald.
+    # so those errors were invisible. Surface both.
     for _name, _level in (('cogs', logging.INFO), ('discord', logging.WARNING)):
         _lg = logging.getLogger(_name)
         if not _lg.handlers:
-            _h = logging.StreamHandler()
-            _h.setFormatter(formatter)
-            _lg.addHandler(_h)
+            for _h in _build_handlers():
+                _lg.addHandler(_h)
             _lg.setLevel(_level)
+            _lg.propagate = False
+
+    # Anything that reaches the root logger unhandled (third-party libraries,
+    # bare `logging.error(...)` calls) would otherwise be dropped entirely.
+    _root = logging.getLogger()
+    if not _root.handlers:
+        for _h in _build_handlers():
+            _root.addHandler(_h)
+        _root.setLevel(logging.WARNING)
+
+    logger.info(f"Logging to {LOG_FILE} (5MB x 5 rotation)")
 
 # --- BOT SETUP ---
 ADMIN_ROLE_ID = 1431565435819528302  # Role treated as admin by the bot

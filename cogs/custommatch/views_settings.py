@@ -144,7 +144,7 @@ class ExpiringView(discord.ui.View):
             pass  # message already gone, or the token expired first
 
 
-class ConfirmView(discord.ui.View):
+class ConfirmView(ExpiringView):
     """Simple confirmation view."""
 
     def __init__(self, timeout: float = 60.0):
@@ -213,7 +213,7 @@ class RivalsBlacklistUserSelect(discord.ui.UserSelect):
             pass
 
 
-class RivalsSettingsView(discord.ui.View):
+class RivalsSettingsView(ExpiringView):
     """Sub-view opened from SettingsView for Marvel Rivals stats config."""
 
     def __init__(self, cog):
@@ -224,6 +224,7 @@ class RivalsSettingsView(discord.ui.View):
         self.add_item(RivalsBlacklistUserSelect(self, action="remove"))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        self._refresh_timeout()  # keep the panel alive while in use
         if await self.cog.is_cm_admin(interaction.user):
             return True
         await interaction.response.send_message(
@@ -374,7 +375,7 @@ class RivalsCorrectStatsModal(discord.ui.Modal, title="Correct Rivals Match Stat
         }
 
 
-class _ConfirmLinkResolverView(discord.ui.View):
+class _ConfirmLinkResolverView(ExpiringView):
     """Yes/No confirmation for linking an IGN to a user who isn't in the match roster."""
 
     def __init__(self, parent: "RivalsIGNResolverView", interaction_user_id: int, selected_user_id: int):
@@ -384,6 +385,7 @@ class _ConfirmLinkResolverView(discord.ui.View):
         self.selected_user_id = selected_user_id
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        self._refresh_timeout()  # keep the panel alive while in use
         return interaction.user.id == self.interaction_user_id
 
     @discord.ui.button(label="Link anyway", style=discord.ButtonStyle.danger)
@@ -401,7 +403,7 @@ class _ConfirmLinkResolverView(discord.ui.View):
         self.stop()
 
 
-class RivalsIGNResolverView(discord.ui.View):
+class RivalsIGNResolverView(ExpiringView):
     """Minimal resolver for unmapped IGNs after Rivals scoreboard OCR.
 
     Uses process-of-elimination to suggest which roster member owns each
@@ -580,6 +582,7 @@ class RivalsIGNResolverView(discord.ui.View):
         return embed
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        self._refresh_timeout()  # keep the panel alive while in use
         if not isinstance(interaction.user, discord.Member):
             return False
         if not await self.cog.is_cm_admin(interaction.user):
@@ -855,7 +858,7 @@ class RivalsIGNResolverView(discord.ui.View):
 # CONSOLIDATED ACTION VIEWS
 # =============================================================================
 
-class BlacklistActionView(discord.ui.View):
+class BlacklistActionView(ExpiringView):
     """Consolidated view for blacklist actions."""
 
     def __init__(self, cog: 'CustomMatch'):
@@ -897,7 +900,7 @@ class BlacklistActionView(discord.ui.View):
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
 
-class OverwatchWeightsView(discord.ui.View):
+class OverwatchWeightsView(ExpiringView):
     """Editor for a game's Overwatch role-balance weights.
 
     Weights only affect team balancing (how heavily a role's MMR gap counts) —
@@ -911,6 +914,7 @@ class OverwatchWeightsView(discord.ui.View):
         self.game = game
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        self._refresh_timeout()  # keep the panel alive while in use
         if await self.cog.is_cm_admin(interaction.user):
             return True
         await interaction.response.send_message(
@@ -1073,7 +1077,7 @@ class OWWeightsModal(discord.ui.Modal, title="Edit Overwatch Weights"):
         await interaction.response.edit_message(embed=embed, view=self.parent)
 
 
-class GameManagementView(discord.ui.View):
+class GameManagementView(ExpiringView):
     """Consolidated view for game management actions."""
 
     def __init__(self, cog: 'CustomMatch'):
@@ -1216,7 +1220,7 @@ class SetShortNameModal(discord.ui.Modal, title="Set Game Short Name"):
             )
 
 
-class ChannelSettingsView(discord.ui.View):
+class ChannelSettingsView(ExpiringView):
     """Consolidated view for channel settings."""
 
     def __init__(self, cog: 'CustomMatch'):
@@ -1316,7 +1320,7 @@ class ChannelSettingsView(discord.ui.View):
 # SETTINGS PANEL
 # =============================================================================
 
-class SettingsView(discord.ui.View):
+class SettingsView(ExpiringView):
     """Main settings panel for server admins."""
 
     def __init__(self, cog: 'CustomMatch'):
@@ -1324,6 +1328,7 @@ class SettingsView(discord.ui.View):
         self.cog = cog
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        self._refresh_timeout()  # keep the panel alive while in use
         """Re-verify admin role on every button press."""
         if await self.cog.is_cm_admin(interaction.user):
             return True
@@ -1728,7 +1733,7 @@ class SettingsView(discord.ui.View):
         )
 
 
-class StatsWipeConfirmView(discord.ui.View):
+class StatsWipeConfirmView(ExpiringView):
     """Confirmation view for wiping stats."""
 
     def __init__(self, cog: 'CustomMatch'):
@@ -1807,7 +1812,7 @@ class StatsWipeConfirmView(discord.ui.View):
             )
 
 
-class TestStatsCardView(discord.ui.View):
+class TestStatsCardView(ExpiringView):
     """View for testing stats card generation."""
 
     def __init__(self, cog: 'CustomMatch', user: discord.Member):
@@ -2090,7 +2095,7 @@ class TestStatsSelectDropdown(discord.ui.Select):
         await self.view.handle_selection(interaction, self.values[0])
 
 
-class TestStatsImageView(discord.ui.View):
+class TestStatsImageView(ExpiringView):
     """View for test stats card image with dropdown selection."""
 
     def __init__(self, cog: 'CustomMatch', member: discord.Member, game,
@@ -2106,6 +2111,7 @@ class TestStatsImageView(discord.ui.View):
         self.add_item(TestStatsSelectDropdown(recent_matches))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        self._refresh_timeout()  # keep the panel alive while in use
         if interaction.user.id != self.invoker_id:
             await interaction.response.send_message(
                 "Only the person who ran this command can use this dropdown.",
@@ -2203,7 +2209,7 @@ class TestStatsImageView(discord.ui.View):
                 await interaction.followup.send("Failed to generate match scoreboard.", ephemeral=True)
 
 
-class EmojisSubView(discord.ui.View):
+class EmojisSubView(ExpiringView):
     """Sub-view with buttons for Ready Emojis and Role Emojis configuration."""
 
     def __init__(self, cog: 'CustomMatch'):
@@ -2335,7 +2341,7 @@ ROLE_EMOJI_CHOICES = {
 }
 
 
-class RoleEmojisView(discord.ui.View):
+class RoleEmojisView(ExpiringView):
     """View for managing Rivals role emojis (add/change, view, remove)."""
 
     def __init__(self, cog: 'CustomMatch'):
@@ -2372,7 +2378,7 @@ class RoleEmojisView(discord.ui.View):
         )
 
 
-class RoleEmojiSelectView(discord.ui.View):
+class RoleEmojiSelectView(ExpiringView):
     """Dropdown to select which role to set/remove emoji for."""
 
     def __init__(self, cog: 'CustomMatch', action: str):
@@ -2447,7 +2453,7 @@ class RoleEmojiSelectView(discord.ui.View):
             )
 
 
-class ModRolesView(discord.ui.View):
+class ModRolesView(ExpiringView):
     """View for managing mod roles."""
 
     def __init__(self, cog: 'CustomMatch'):
@@ -2469,7 +2475,7 @@ class ModRolesView(discord.ui.View):
         await interaction.response.send_message("Select a role to remove:", view=view, ephemeral=True)
 
 
-class AddModRoleSelectView(discord.ui.View):
+class AddModRoleSelectView(ExpiringView):
     """View for selecting a role to add as mod role."""
 
     def __init__(self, cog: 'CustomMatch'):
@@ -2483,7 +2489,7 @@ class AddModRoleSelectView(discord.ui.View):
         await interaction.response.edit_message(content=f"Added **{role.name}** as a mod role.", view=None)
 
 
-class RemoveModRoleSelectView(discord.ui.View):
+class RemoveModRoleSelectView(ExpiringView):
     """View for selecting a mod role to remove."""
 
     def __init__(self, cog: 'CustomMatch', mod_role_ids: List[int], guild: discord.Guild):
@@ -2604,7 +2610,7 @@ class RemoveMMRRoleSelectView(ExpiringView):
         await interaction.response.edit_message(content="Removed MMR role.", view=None)
 
 
-class CategorySelectView(discord.ui.View):
+class CategorySelectView(ExpiringView):
     """View for selecting a category channel."""
 
     def __init__(self, cog: 'CustomMatch'):
@@ -2619,7 +2625,7 @@ class CategorySelectView(discord.ui.View):
         await interaction.response.edit_message(content=f"Category set to **{category.name}**.", view=None)
 
 
-class LogChannelSelectView(discord.ui.View):
+class LogChannelSelectView(ExpiringView):
     """View for selecting a log channel."""
 
     def __init__(self, cog: 'CustomMatch'):
@@ -2634,7 +2640,7 @@ class LogChannelSelectView(discord.ui.View):
         await interaction.response.edit_message(content=f"Log channel set to {channel.mention}.", view=None)
 
 
-class AdminChannelSelectView(discord.ui.View):
+class AdminChannelSelectView(ExpiringView):
     """View for selecting the CM admin notification channel."""
 
     def __init__(self, cog: 'CustomMatch'):
@@ -2649,7 +2655,7 @@ class AdminChannelSelectView(discord.ui.View):
         await interaction.response.edit_message(content=f"CM Admin channel set to {channel.mention}.", view=None)
 
 
-class DiscussionParentChannelSelectView(discord.ui.View):
+class DiscussionParentChannelSelectView(ExpiringView):
     """View for selecting the discussion parent channel (where private threads are created)."""
 
     def __init__(self, cog: 'CustomMatch'):
@@ -2664,7 +2670,7 @@ class DiscussionParentChannelSelectView(discord.ui.View):
         await interaction.response.edit_message(content=f"Discussion parent channel set to {channel.mention}.", view=None)
 
 
-class AdminRoleSelectView(discord.ui.View):
+class AdminRoleSelectView(ExpiringView):
     """View for selecting the admin role."""
 
     def __init__(self, cog: 'CustomMatch'):
@@ -2678,7 +2684,7 @@ class AdminRoleSelectView(discord.ui.View):
         await interaction.response.edit_message(content=f"CM Admin role set to **{role.name}**.", view=None)
 
 
-class BlacklistUserSelectView(discord.ui.View):
+class BlacklistUserSelectView(ExpiringView):
     """View for selecting a user to blacklist."""
 
     def __init__(self, cog: 'CustomMatch'):
@@ -2720,7 +2726,7 @@ class BlacklistDurationModal(discord.ui.Modal, title="Blacklist Duration"):
             await interaction.response.send_message("Invalid duration.", ephemeral=True)
 
 
-class UnblacklistSelectView(discord.ui.View):
+class UnblacklistSelectView(ExpiringView):
     """View for selecting a user to unblacklist."""
 
     def __init__(self, cog: 'CustomMatch', blacklisted: List[Tuple[int, datetime]], guild: discord.Guild):
@@ -2747,7 +2753,7 @@ class UnblacklistSelectView(discord.ui.View):
         await interaction.response.send_message("Player unblacklisted.", ephemeral=True)
 
 
-class GameTogglesView(discord.ui.View):
+class GameTogglesView(ExpiringView):
     """View for toggling game settings."""
 
     def __init__(self, cog: 'CustomMatch', game: GameConfig):
@@ -2968,7 +2974,7 @@ class VerificationTopicModal(discord.ui.Modal, title="Set Verification Topic"):
             )
 
 
-class PenaltySettingsView(discord.ui.View):
+class PenaltySettingsView(ExpiringView):
     """View for configuring penalty settings (timeout + decline)."""
 
     def __init__(self, cog: 'CustomMatch', game: GameConfig):
@@ -3062,7 +3068,7 @@ class PenaltyDurationsModal(discord.ui.Modal, title="Penalty Durations"):
             await interaction.response.send_message("Invalid values.", ephemeral=True)
 
 
-class ClearPenaltyUserSelectView(discord.ui.View):
+class ClearPenaltyUserSelectView(ExpiringView):
     """View for selecting a user to clear timeout penalty."""
 
     def __init__(self, cog: 'CustomMatch'):
@@ -3106,7 +3112,7 @@ class DeclinePenaltyDurationsModal(discord.ui.Modal, title="Decline Penalty Dura
             await interaction.response.send_message("Invalid values.", ephemeral=True)
 
 
-class ClearDeclinePenaltyUserSelectView(discord.ui.View):
+class ClearDeclinePenaltyUserSelectView(ExpiringView):
     """View for selecting a user to clear decline penalty."""
 
     def __init__(self, cog: 'CustomMatch'):
@@ -3124,7 +3130,7 @@ class ClearDeclinePenaltyUserSelectView(discord.ui.View):
         )
 
 
-class QueueScheduleView(discord.ui.View):
+class QueueScheduleView(ExpiringView):
     """View for configuring queue schedule with per-day times."""
 
     DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -3258,7 +3264,7 @@ class QueueScheduleView(discord.ui.View):
         )
 
 
-class ScheduleDaySelectView(discord.ui.View):
+class ScheduleDaySelectView(ExpiringView):
     """Dropdown to select a day to configure."""
 
     DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -3305,7 +3311,7 @@ class ScheduleDaySelectView(discord.ui.View):
         )
 
 
-class ScheduleDayModeView(discord.ui.View):
+class ScheduleDayModeView(ExpiringView):
     """View for choosing day mode: Open All Day, Closed All Day, or Set Times."""
 
     DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -3346,7 +3352,7 @@ class ScheduleDayModeView(discord.ui.View):
         await interaction.response.send_modal(modal)
 
 
-class ScheduleDayRemoveView(discord.ui.View):
+class ScheduleDayRemoveView(ExpiringView):
     """Dropdown to remove a configured day."""
 
     DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -3718,7 +3724,7 @@ class NotReadyCooldownModal(discord.ui.Modal, title="Not Ready Cooldown"):
             await interaction.response.send_message("Invalid number.", ephemeral=True)
 
 
-class GameChannelSelectView(discord.ui.View):
+class GameChannelSelectView(ExpiringView):
     """View for selecting game channel (for match results)."""
 
     def __init__(self, cog: 'CustomMatch', game_id: int):
@@ -3739,7 +3745,7 @@ class GameChannelSelectView(discord.ui.View):
         await interaction.response.edit_message(content="Game channel cleared.", view=None)
 
 
-class LF1ChannelSelectView(discord.ui.View):
+class LF1ChannelSelectView(ExpiringView):
     """View for selecting LF1 channel (Looking for 1 notifications)."""
 
     def __init__(self, cog: 'CustomMatch', game_id: int):
@@ -4225,7 +4231,7 @@ class UnblacklistModal(discord.ui.Modal, title="Unblacklist Player"):
 # SECONDARY QUEUE SETTINGS
 # =============================================================================
 
-class SecondaryQueueSettingsView(discord.ui.View):
+class SecondaryQueueSettingsView(ExpiringView):
     """Configure the secondary/fun-mode queue for a game."""
 
     DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -4483,7 +4489,7 @@ class SecondaryQueueMatchLimitModal(discord.ui.Modal, title="Set Match Limit"):
             await interaction.response.send_message("Invalid number.", ephemeral=True)
 
 
-class SecondaryModesManageView(discord.ui.View):
+class SecondaryModesManageView(ExpiringView):
     """Manage game modes for a secondary queue."""
 
     def __init__(self, cog: 'CustomMatch', game: GameConfig, parent_view: SecondaryQueueSettingsView):
@@ -4639,7 +4645,7 @@ class AddSecondaryModeModal(discord.ui.Modal, title="Add Game Mode"):
         await self.parent_view._rebuild(interaction)
 
 
-class EditModePoolView(discord.ui.View):
+class EditModePoolView(ExpiringView):
     """Choose map pool type for a mode."""
 
     def __init__(self, cog: 'CustomMatch', game: GameConfig, mode: dict,
@@ -4696,7 +4702,7 @@ class EditCustomMapsModal(discord.ui.Modal, title="Set Custom Maps"):
         await self.parent_view._rebuild(interaction)
 
 
-class ModeFlagToggleView(discord.ui.View):
+class ModeFlagToggleView(ExpiringView):
     """Toggle FFA and Mirror flags for a mode."""
 
     def __init__(self, cog: 'CustomMatch', game: GameConfig, mode: dict,
@@ -4782,7 +4788,7 @@ class SecondaryBannerModal(discord.ui.Modal, title="Set Secondary Queue Banner")
         await interaction.response.edit_message(embed=embed, view=self.parent_view)
 
 
-class SecondaryQueueTypeSelectView(discord.ui.View):
+class SecondaryQueueTypeSelectView(ExpiringView):
     """Select queue type for the secondary queue."""
 
     def __init__(self, cog: 'CustomMatch', game: GameConfig, parent_view: SecondaryQueueSettingsView):
@@ -4812,7 +4818,7 @@ class SecondaryQueueTypeSelectView(discord.ui.View):
         )
 
 
-class SecondaryQueueChannelSelectView(discord.ui.View):
+class SecondaryQueueChannelSelectView(ExpiringView):
     """Select channel for the secondary queue."""
 
     def __init__(self, cog: 'CustomMatch', game: GameConfig, parent_view: SecondaryQueueSettingsView):
@@ -4847,7 +4853,7 @@ class SecondaryQueueChannelSelectView(discord.ui.View):
         await interaction.response.send_message("Secondary queue will use the main queue channel.", ephemeral=True)
 
 
-class SecondaryScheduleView(discord.ui.View):
+class SecondaryScheduleView(ExpiringView):
     """Configure the secondary queue schedule (per-day open/close times)."""
 
     DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]

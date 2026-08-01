@@ -54,3 +54,6 @@ credentials.json
 image_cache/
 data/
 vc/
+
+# Test database copies
+tests/**/test_custommatch.db*

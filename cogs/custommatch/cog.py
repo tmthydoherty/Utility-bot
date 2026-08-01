@@ -81,6 +81,7 @@ class CustomMatch(commands.Cog):
         self._ow_role_assignments: Dict[int, Dict[int, str]] = {}  # match_id -> {player_id: OW role}
         self.queue_timeout_task: Optional[asyncio.Task] = None
         self.penalty_decay_task: Optional[asyncio.Task] = None
+        self.rank_role_audit_task: Optional[asyncio.Task] = None
         self.queue_schedule_task: Optional[asyncio.Task] = None
         self.orphan_cleanup_task: Optional[asyncio.Task] = None
         self.stats_retry_poll_task: Optional[asyncio.Task] = None
@@ -137,6 +138,7 @@ class CustomMatch(commands.Cog):
         # Start background tasks
         self.queue_timeout_task = asyncio.create_task(self.queue_timeout_check())
         self.penalty_decay_task = asyncio.create_task(self.penalty_decay_check())
+        self.rank_role_audit_task = asyncio.create_task(self.rank_role_audit())
         self.queue_schedule_task = asyncio.create_task(self.queue_schedule_check())
         self.orphan_cleanup_task = asyncio.create_task(self.orphan_match_cleanup())
         # Start persistent stats retry poll (replaces in-memory retry tasks)
@@ -693,6 +695,8 @@ class CustomMatch(commands.Cog):
             self.queue_timeout_task.cancel()
         if self.penalty_decay_task:
             self.penalty_decay_task.cancel()
+        if self.rank_role_audit_task:
+            self.rank_role_audit_task.cancel()
         if self.queue_schedule_task:
             self.queue_schedule_task.cancel()
         if self.orphan_cleanup_task:
@@ -864,6 +868,83 @@ class CustomMatch(commands.Cog):
                 logger.error(f"Penalty decay check error: {e}")
 
             await asyncio.sleep(3600 * 24)  # Check daily
+
+    async def rank_role_audit(self):
+        """Hourly self-heal for rank roles.
+
+        Rank roles are otherwise only corrected at the instant a match ends, so
+        any failure in that window — a rate limit, a permissions blip, a member
+        who left and rejoined — sticks permanently. This recomputes the correct
+        role from stored ratings and repairs drift.
+
+        It also cleans up after the add-before-remove ordering in
+        update_mmr_roles: if the remove half fails, the player holds two rank
+        roles until the next pass sorts it out.
+
+        Only touches players whose role is actually wrong, so a healthy server
+        costs zero Discord calls.
+        """
+        await self.bot.wait_until_ready()
+        while not self.bot.is_closed():
+            try:
+                await asyncio.sleep(3600)
+                for game in await DatabaseHelper.get_all_games():
+                    mmr_roles = await DatabaseHelper.get_mmr_roles(game.game_id)
+                    if not mmr_roles:
+                        continue  # no ladder configured; nothing to reconcile
+                    role_ids = set(mmr_roles)
+                    ladder = sorted(mmr_roles.items(), key=lambda kv: kv[1])
+
+                    async with DatabaseHelper._get_db() as db:
+                        async with db.execute(
+                            """SELECT player_id FROM player_game_stats
+                               WHERE game_id = ? AND games_played > 0""",
+                            (game.game_id,)
+                        ) as cursor:
+                            player_ids = [r[0] for r in await cursor.fetchall()]
+
+                    repaired = 0
+                    for pid in player_ids:
+                        # Overwatch ranks off peak per-role MMR; everything else
+                        # off the aggregate column.
+                        if is_overwatch_game(game):
+                            eff = await DatabaseHelper.get_ow_player_peak_mmr(pid, game.game_id)
+                            if eff is None:
+                                continue
+                        else:
+                            eff = (await DatabaseHelper.get_player_stats(
+                                pid, game.game_id)).effective_mmr
+
+                        target = None
+                        for role_id, threshold in ladder:
+                            if eff >= threshold:
+                                target = role_id
+
+                        for guild in self.bot.guilds:
+                            member = guild.get_member(pid)
+                            if not member:
+                                continue
+                            held = {r.id for r in member.roles} & role_ids
+                            if held == ({target} if target else set()):
+                                continue
+                            logger.info(
+                                f"rank_role_audit: repairing {pid} in {game.name} "
+                                f"(mmr {eff}, holds {held or 'none'}, want "
+                                f"{target or 'none'})"
+                            )
+                            await self.update_mmr_roles(guild, pid, game.game_id, eff)
+                            repaired += 1
+                            await asyncio.sleep(1)  # stay clear of role rate limits
+
+                    if repaired:
+                        logger.info(
+                            f"rank_role_audit: repaired {repaired} rank role(s) "
+                            f"for {game.name}"
+                        )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"rank_role_audit error: {e}", exc_info=True)
 
     async def queue_schedule_check(self):
         """Background task to manage queue open/close schedules."""

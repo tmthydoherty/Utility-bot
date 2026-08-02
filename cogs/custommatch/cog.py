@@ -2117,9 +2117,16 @@ class CustomMatch(commands.Cog):
             return None
         return {p["player_id"]: p.get("role") for p in players if p.get("role")}
 
-    async def _ow_log_roster_lines(self, guild, match_id, team_value, voter_teams=None):
-        """Build role-annotated roster lines for an Overwatch team (no MMR).
-        Ordered Tank → DPS → Support. Optional voter circles."""
+    async def _ow_log_roster_lines(self, guild, match_id, team_value, voter_teams=None,
+                                   mmrs: Optional[Dict[int, int]] = None,
+                                   changes: Optional[Dict[int, int]] = None):
+        """Build role-annotated roster lines for an Overwatch team.
+        Ordered Tank → DPS → Support. Optional voter circles.
+
+        ``mmrs`` maps player_id -> the rating for the role they were assigned,
+        and ``changes`` the +/- that match moved it. Passing them appends the
+        numbers to each line; the log channel is admin-only, so the MMR stays
+        hidden from players either way."""
         players = await DatabaseHelper.get_match_players(match_id)
         order = {r: i for i, r in enumerate(OW_ROLES)}
         team = [p for p in players if p["team"] == team_value]
@@ -2131,29 +2138,68 @@ class CustomMatch(commands.Cog):
             name = member.display_name if member else str(pid)
             name = sanitize_for_codeblock(name, fallback=member.name if member else None)
             glyph = OW_ROLE_EMOJI.get(p.get("role"), "➖")
+            if mmrs is not None:
+                # Narrower name column than the roster-only form to leave room
+                # for the rating without wrapping on mobile.
+                cell = f"{pad_to_width(truncate_to_width(name, 13), 13)} {mmrs.get(pid, 0):>4}"
+                if changes is not None and pid in changes:
+                    chg = changes[pid]
+                    cell += f" {'+' if chg >= 0 else '-'}{abs(chg)}"
+            else:
+                cell = truncate_to_width(name, 16)
             if voter_teams is not None:
                 voted = voter_teams.get(pid)
                 circle = "🔴" if voted == "red" else ("🔵" if voted == "blue" else "⚫")
-                lines.append(f"{circle} {glyph} `{truncate_to_width(name, 16)}`")
+                lines.append(f"{circle} {glyph} `{cell}`")
             else:
-                lines.append(f"{glyph} `{truncate_to_width(name, 16)}`")
+                lines.append(f"{glyph} `{cell}`")
         return lines
+
+    async def _ow_assigned_role_mmrs(self, match_id: int, game_id: int) -> Dict[int, int]:
+        """player_id -> effective MMR for the role they were assigned this match.
+
+        Overwatch rates each role separately, so the player's aggregate MMR
+        column is the wrong number to show against a match: it tracks their best
+        role, not the one they are about to play. This reads the rating the
+        balancer actually weighed."""
+        mmrs: Dict[int, int] = {}
+        for p in await DatabaseHelper.get_match_players(match_id):
+            role = p.get("role")
+            if not role:
+                continue
+            rs = await DatabaseHelper.get_ow_role_stats(p["player_id"], game_id, role)
+            mmrs[p["player_id"]] = rs.effective_mmr
+        return mmrs
 
     async def _send_ow_teams_to_log(self, channel, game, match_id, short_id,
                                     red_role, blue_role, reshuffled=False):
-        """Pre-match team embed for Overwatch (rosters + roles, no MMR)."""
-        red_lines = await self._ow_log_roster_lines(channel.guild, match_id, "red")
-        blue_lines = await self._ow_log_roster_lines(channel.guild, match_id, "blue")
+        """Pre-match team embed for Overwatch (rosters + roles + per-role MMR).
+
+        MMR is hidden from players everywhere else for Overwatch, but this embed
+        goes to the admin-only log channel, where the numbers are the whole point
+        — without them there is no way to see whether the 2-2-2 split was even."""
+        mmrs = await self._ow_assigned_role_mmrs(match_id, game.game_id)
+        red_lines = await self._ow_log_roster_lines(channel.guild, match_id, "red", mmrs=mmrs)
+        blue_lines = await self._ow_log_roster_lines(channel.guild, match_id, "blue", mmrs=mmrs)
+
+        players = await DatabaseHelper.get_match_players(match_id)
+
+        def avg(team_value):
+            vals = [mmrs[p["player_id"]] for p in players
+                    if p["team"] == team_value and p["player_id"] in mmrs]
+            return sum(vals) // len(vals) if vals else 0
+
+        red_avg, blue_avg = avg("red"), avg("blue")
         title = f"Match {short_id} — {game.name}"
         if reshuffled:
             title += " (Reshuffled)"
         embed = discord.Embed(title=title, color=COLOR_NEUTRAL)
         embed.add_field(
-            name=f"{red_role.name if red_role else 'Red Team'}",
+            name=f"{red_role.name if red_role else 'Red Team'} (Avg: {red_avg})",
             value="\n".join(red_lines) or "—", inline=False,
         )
         embed.add_field(
-            name=f"{blue_role.name if blue_role else 'Blue Team'}",
+            name=f"{blue_role.name if blue_role else 'Blue Team'} (Avg: {blue_avg})",
             value="\n".join(blue_lines) or "—", inline=False,
         )
         msg = await channel.send(embed=embed)
@@ -2246,10 +2292,6 @@ class CustomMatch(commands.Cog):
         winner_results: List[tuple], loser_results: List[tuple]
     ):
         """Edit the pre-match log embed to add +/- MMR changes after match result."""
-        # Overwatch hides MMR, so the pre-match embed has no deltas to add.
-        if is_overwatch_game(game):
-            return
-
         match = await DatabaseHelper.get_match(match_id)
         if not match or not match.get("log_msg_id"):
             return
@@ -2257,6 +2299,28 @@ class CustomMatch(commands.Cog):
         try:
             log_msg = await log_channel.fetch_message(int(match["log_msg_id"]))
         except (discord.NotFound, discord.HTTPException):
+            return
+
+        # Overwatch keeps its own layout (role glyphs, per-role rating). Field
+        # names are reused verbatim: they already carry the pre-match averages,
+        # which are the averages of exactly these pre-match ratings.
+        if is_overwatch_game(game):
+            mmrs = {pid: old for pid, old, _chg in winner_results + loser_results}
+            changes = {pid: chg for pid, _old, chg in winner_results + loser_results}
+            if not mmrs:
+                return
+            old_embed = log_msg.embeds[0] if log_msg.embeds else None
+            if old_embed is None or len(old_embed.fields) < 2:
+                return
+            embed = discord.Embed(title=old_embed.title, color=old_embed.color)
+            for field, team_value in zip(old_embed.fields[:2], ("red", "blue")):
+                lines = await self._ow_log_roster_lines(
+                    guild, match_id, team_value, mmrs=mmrs, changes=changes)
+                embed.add_field(name=field.name, value="\n".join(lines) or "—", inline=False)
+            try:
+                await log_msg.edit(embed=embed)
+            except discord.HTTPException as e:
+                logger.warning(f"Failed to edit OW pre-match log embed for {match_id}: {e}")
             return
 
         # Build pid → (old_mmr, change) mapping
@@ -5906,6 +5970,9 @@ class CustomMatch(commands.Cog):
                 )
             role_stats[pid] = await DatabaseHelper.get_ow_role_stats(pid, game.game_id, role)
 
+        # Ratings as they stood before this match, for the admin log's +/- column.
+        before = {pid: role_stats[pid].effective_mmr for pid in winners + losers}
+
         # Returning-player boost keyed on that role's own activity
         for pid in winners + losers:
             rs = role_stats[pid]
@@ -5983,8 +6050,15 @@ class CustomMatch(commands.Cog):
                 )
             await _db.commit()
 
-        # Overwatch MMR is hidden — no per-player deltas surface in the results embeds.
-        return [], []
+        # Per-role before/after for the admin log only. Both consumers of these
+        # tuples write to the log channel, never to a player-facing embed, so
+        # Overwatch MMR stays hidden everywhere players can see it.
+        results = {
+            side: [(pid, before[pid], role_stats[pid].effective_mmr - before[pid])
+                   for pid in side_pids]
+            for side, side_pids in (("w", winners), ("l", losers))
+        }
+        return results["w"], results["l"]
 
     async def _finalize_match_inner(self, guild: discord.Guild, match_id: int, winning_team: Team):
         """Core finalize logic — caller MUST hold self.match_finalize_locks[match_id]."""
@@ -7990,10 +8064,17 @@ class CustomMatch(commands.Cog):
         # Get vote data for colored circle prefixes
         voter_teams = await DatabaseHelper.get_win_voter_teams(match_id)
 
-        # Overwatch: hidden MMR — show role-annotated rosters, no MMR/deltas.
+        # Overwatch: role-annotated rosters carrying the per-role rating that
+        # actually moved, not the aggregate column (which OW never touches).
         if is_overwatch_game(game):
-            winner_lines = await self._ow_log_roster_lines(guild, match_id, winning_team.value, voter_teams)
-            loser_lines = await self._ow_log_roster_lines(guild, match_id, loser_team, voter_teams)
+            # `or None` so a degenerate empty result set falls back to the
+            # roster-only layout rather than printing a column of zeroes.
+            mmrs = {pid: old for pid, old, _chg in winner_results + loser_results} or None
+            changes = {pid: chg for pid, _old, chg in winner_results + loser_results} or None
+            winner_lines = await self._ow_log_roster_lines(
+                guild, match_id, winning_team.value, voter_teams, mmrs, changes)
+            loser_lines = await self._ow_log_roster_lines(
+                guild, match_id, loser_team, voter_teams, mmrs, changes)
             embed = discord.Embed(title=f"Match {short_id} — {game.name}", color=embed_color)
             embed.add_field(name=f"🏆 {winner_team_name}", value="\n".join(winner_lines) or "—", inline=False)
             embed.add_field(name=loser_team_name, value="\n".join(loser_lines) or "—", inline=False)

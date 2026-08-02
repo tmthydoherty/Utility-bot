@@ -2885,7 +2885,9 @@ class OWSetupRoleRankView(discord.ui.View):
                 value=UNRANKED_VALUE,
                 description="No rank yet — seeded from their other roles",
             ))
-        for role_id, data in sorted(mmr_roles.items(), key=lambda x: x[1]['mmr'], reverse=True):
+        # Lowest rung first, matching the single-rank setup dropdown — the ladder
+        # reads bottom-up everywhere an admin picks a *player's* rank.
+        for role_id, data in sorted(mmr_roles.items(), key=lambda x: x[1]['mmr']):
             options.append(discord.SelectOption(
                 label=data['label'] or f"{data['mmr']} MMR",
                 description=f"{data['mmr']} MMR",
@@ -3025,10 +3027,11 @@ async def _ow_finalize_setup(interaction, cog, game_id, user_id, platform,
     await interaction.response.edit_message(content="\n".join(lines), view=None)
 
     summary = ", ".join(f"{r} {written[r]}" for r in OW_ROLE_DISPLAY_ORDER if r in written)
+    log_platform = f" [{platform.upper()}]" if game.pc_enabled else ""
     await cog.log_action(
         interaction.guild,
-        f"{'OW role ranks updated' if existing_only else 'New user setup'}: **{name}** "
-        f"({game.name}) — {summary or 'no changes'} by {interaction.user.display_name}",
+        f"{'OW role ranks updated' if existing_only else 'New user setup'}: **{name}**"
+        f"{log_platform} ({game.name}) — {summary or 'no changes'} by {interaction.user.display_name}",
         prefix="❕"
     )
 
@@ -3242,9 +3245,10 @@ class SetupUserModal(discord.ui.Modal, title="Setup New User"):
                 lines.append(f"- Verified role assigned")
 
             await interaction.response.send_message("\n".join(lines), ephemeral=True)
+            log_platform = f" [{self.platform.upper()}]" if game.pc_enabled else ""
             await self.cog.log_action(
                 interaction.guild,
-                f"New user setup: **{name}** registered for **{game.name}** with {mmr_val} MMR by {interaction.user.display_name}",
+                f"New user setup: **{name}**{log_platform} registered for **{game.name}** with {mmr_val} MMR by {interaction.user.display_name}",
                 prefix="\u2755"
             )
         except ValueError:

@@ -1,5 +1,6 @@
 # Environment
 .env
+.env.*
 .venv/
 venv/
 env/
@@ -30,6 +31,8 @@ bot_data.json
 dm_messages.json
 fm_settings.json
 fm_users.json
+fm_media_cache.json
+fm_usage.json
 guild_settings.json
 invite_roles.json
 modtools_config.json

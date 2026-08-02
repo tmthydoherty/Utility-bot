@@ -9,6 +9,8 @@ import time
 import base64
 import re
 from io import BytesIO
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from typing import Optional, Dict, List, Tuple
 import colorsys
@@ -30,7 +32,25 @@ logger.setLevel(logging.INFO)
 
 class FM(commands.Cog):
     """Last.fm integration cog for Discord."""
-    
+
+    # Last.fm serves this image hash as its "no artwork" placeholder - a grey
+    # star, not real art, so treat it as missing.
+    LASTFM_PLACEHOLDER_HASH = "2a96cbd8b46e442fc41c2b86b821562f"
+
+    # Fully-resolved lookups are effectively permanent; ones that fell back to a
+    # search page get retried the next day, since the miss is usually the
+    # catalogue lagging a new release rather than the track being absent.
+    MEDIA_CACHE_TTL_RESOLVED = 30 * 24 * 3600
+    MEDIA_CACHE_TTL_PARTIAL = 24 * 3600
+    MEDIA_CACHE_MAX_ENTRIES = 5000
+
+    # A search.list call costs 100 of the 10,000 free units. Quota resets at
+    # midnight Pacific, so usage days are counted in that timezone rather than
+    # the host's, or the daily totals would straddle two quota windows.
+    YOUTUBE_SEARCH_COST = 100
+    YOUTUBE_DAILY_QUOTA = 10000
+    QUOTA_TIMEZONE = "America/Los_Angeles"
+
     # URL patterns for music link detection
     MUSIC_URL_PATTERNS = [
         # Spotify patterns
@@ -49,7 +69,7 @@ class FM(commands.Cog):
     
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.api_url = "http://ws.audioscrobbler.com/2.0/"
+        self.api_url = "https://ws.audioscrobbler.com/2.0/"
         self.users_file = "fm_users.json"
         self.settings_file = "fm_settings.json"
         self._file_lock = asyncio.Lock()  # In-memory lock for file operations
@@ -67,6 +87,23 @@ class FM(commands.Cog):
         self.spotify_client_secret = os.getenv("SPOTIFY_CLIENT_SECRET")
         self.spotify_token: Optional[str] = None
         self.spotify_token_expires: float = 0
+
+        # YouTube Data API. Each search costs 100 of the 10,000 daily quota
+        # units, so roughly 100 uncached lookups a day - the media cache below
+        # is what keeps that workable.
+        self.youtube_api_key = os.getenv("YOUTUBE_API_KEY")
+        self._youtube_quota_exhausted_until: float = 0
+
+        # Resolved links and artwork, keyed on artist+track. A track's links
+        # never change, so this is a straight saving on every repeat play.
+        self.media_cache_file = "fm_media_cache.json"
+        self._media_cache: Dict[str, Dict] = {}
+
+        # Per-day API usage, so real consumption can be checked against the
+        # quota instead of estimated.
+        self.usage_file = "fm_usage.json"
+        self._usage: Dict[str, object] = {}
+        self._usage_last_save: float = 0
         
         # Image generation settings
         self.font_path = "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf"
@@ -104,20 +141,39 @@ class FM(commands.Cog):
         try:
             self._session = aiohttp.ClientSession(timeout=self._api_timeout)
             logger.info("FM Cog loaded successfully!")
-            
+
+            self._media_cache = await self.load_media_cache()
+            logger.info(f"Media cache loaded - {len(self._media_cache)} tracks")
+
+            # Restoring counters keeps a restart from resetting the day's total
+            # and understating consumption against the quota.
+            self._usage = await self.load_usage()
+            await self._roll_usage_day()
+            logger.info(f"FM usage today ({self._usage['day']}): {self.usage_summary()}")
+
             if not self.api_key:
                 logger.error("LASTFM_API_KEY not configured!")
-            
+
             if self.spotify_client_id and self.spotify_client_secret:
                 logger.info("Spotify API configured - direct links enabled")
             else:
                 logger.warning("Spotify API not configured - using search URLs")
-                
+
+            if self.youtube_api_key:
+                logger.info("YouTube API configured - direct links enabled")
+            else:
+                logger.warning("YouTube API not configured - using search URLs")
+
+
         except Exception as e:
             logger.error(f"FM Cog failed to initialize: {e}")
 
     async def cog_unload(self):
         """Called when the cog is unloaded."""
+        # Counters are only flushed once a minute, so persist whatever the
+        # last write missed before going away.
+        if self._usage:
+            await self.save_usage()
         if self._session and not self._session.closed:
             await self._session.close()
         logger.info("FM Cog unloaded.")
@@ -192,9 +248,9 @@ class FM(commands.Cog):
                         return None
                     return Image.open(BytesIO(data)).convert("RGBA")
         except asyncio.TimeoutError:
-            logger.debug(f"Image fetch timeout: {url}")
+            logger.warning(f"Album art fetch timed out: {url}")
         except Exception as e:
-            logger.debug(f"Failed to fetch image from {url}: {e}")
+            logger.warning(f"Album art fetch failed for {url}: {e}")
         return None
 
     def get_dominant_color(self, img: Image.Image) -> tuple:
@@ -711,46 +767,362 @@ class FM(commands.Cog):
     # STREAMING LINK HELPERS
     # =========================================================================
 
-    async def get_streaming_links(self, artist: str, track: str) -> Dict[str, str]:
-        """Get streaming links for a track."""
-        # Clean up the query
+    @staticmethod
+    def clean_query(artist: str, track: str) -> Tuple[str, str]:
+        """Strip featured-artist and version suffixes that break catalogue search."""
         clean_track = track.split(" (")[0].split(" feat")[0].split(" ft.")[0].strip()
         clean_artist = artist.split(" feat")[0].split(" ft.")[0].split(",")[0].strip()
-        
-        query = f"{clean_artist} {clean_track}"
-        q_enc = urllib.parse.quote_plus(query)
-        
-        # Fallback search URLs
+        return clean_artist, clean_track
+
+    @staticmethod
+    def _norm(text: str) -> str:
+        """Reduce a title to comparable form: lowercase, alphanumerics only."""
+        return re.sub(r"[^a-z0-9]", "", (text or "").lower())
+
+    def _titles_match(self, want: str, got: str) -> bool:
+        """Check two track titles refer to the same song.
+
+        Containment allows for suffixes the catalogue adds ("- Remastered",
+        "(Deluxe)"), but only past a length floor - without it short titles
+        collide freely, e.g. "Go" would match "Gone".
+        """
+        w, g = self._norm(want), self._norm(got)
+        if not w or not g:
+            return False
+        if w == g:
+            return True
+        shorter, longer = (w, g) if len(w) <= len(g) else (g, w)
+        return len(shorter) >= 6 and shorter in longer
+
+    def _video_title_contains(self, track: str, title: str) -> bool:
+        """Check a YouTube video title contains the track as a whole phrase.
+
+        Video titles wrap the track in artist names and "(Official Video)", so
+        the plain title comparison can't be used - but matching on a bare
+        substring would let "Go" hit "Gone", hence the word boundaries.
+        """
+        needle = track.lower().strip()
+        if not needle:
+            return False
+        # Lookarounds rather than \b, which misbehaves when the track name
+        # starts or ends with punctuation (e.g. "F*CK YOURSELF").
+        if re.search(rf"(?<!\w){re.escape(needle)}(?!\w)", title.lower()):
+            return True
+        # Punctuation and spacing differ between scrobbles and uploads, so fall
+        # back to the normalized comparison for titles long enough to be safe.
+        return self._titles_match(track, title)
+
+    def _artists_match(self, want: str, got: str) -> bool:
+        """Check two artist names refer to the same act, allowing collaborations."""
+        w, g = self._norm(want), self._norm(got)
+        if not w or not g:
+            return False
+        return w == g or w in g or g in w
+
+    async def load_media_cache(self) -> Dict[str, Dict]:
+        """Load the resolved-media cache from disk."""
+        async with self._file_lock:
+            def _load():
+                try:
+                    if not os.path.exists(self.media_cache_file):
+                        return {}
+                    with open(self.media_cache_file, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    return data if isinstance(data, dict) else {}
+                except Exception as e:
+                    logger.error(f"Failed to load media cache: {e}")
+                    return {}
+            return await asyncio.to_thread(_load)
+
+    async def save_media_cache(self) -> bool:
+        """Write the resolved-media cache to disk atomically."""
+        async with self._file_lock:
+            snapshot = dict(self._media_cache)
+
+            def _save():
+                temp_file = self.media_cache_file + ".tmp"
+                try:
+                    with open(temp_file, "w", encoding="utf-8") as f:
+                        json.dump(snapshot, f)
+                    os.replace(temp_file, self.media_cache_file)
+                    return True
+                except Exception as e:
+                    logger.error(f"Failed to save media cache: {e}")
+                    try:
+                        if os.path.exists(temp_file):
+                            os.remove(temp_file)
+                    except Exception:
+                        pass
+                    return False
+            return await asyncio.to_thread(_save)
+
+    async def load_usage(self) -> Dict[str, object]:
+        """Load today's API usage counters from disk."""
+        async with self._file_lock:
+            def _load():
+                try:
+                    if not os.path.exists(self.usage_file):
+                        return {}
+                    with open(self.usage_file, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    return data if isinstance(data, dict) else {}
+                except Exception as e:
+                    logger.error(f"Failed to load usage counters: {e}")
+                    return {}
+            return await asyncio.to_thread(_load)
+
+    async def save_usage(self) -> bool:
+        """Write usage counters to disk atomically."""
+        async with self._file_lock:
+            snapshot = dict(self._usage)
+
+            def _save():
+                temp_file = self.usage_file + ".tmp"
+                try:
+                    with open(temp_file, "w", encoding="utf-8") as f:
+                        json.dump(snapshot, f, indent=2)
+                    os.replace(temp_file, self.usage_file)
+                    return True
+                except Exception as e:
+                    logger.error(f"Failed to save usage counters: {e}")
+                    try:
+                        if os.path.exists(temp_file):
+                            os.remove(temp_file)
+                    except Exception:
+                        pass
+                    return False
+            return await asyncio.to_thread(_save)
+
+    def _quota_day(self) -> str:
+        """Today's date in the timezone YouTube resets quota on."""
+        return datetime.now(ZoneInfo(self.QUOTA_TIMEZONE)).strftime("%Y-%m-%d")
+
+    @staticmethod
+    def _blank_usage(day: str) -> Dict[str, object]:
+        return {
+            "day": day,
+            "youtube_units": 0,
+            "youtube_searches": 0,
+            "spotify_searches": 0,
+            "itunes_searches": 0,
+            "cache_hits": 0,
+            "cache_misses": 0
+        }
+
+    def usage_summary(self, usage: Optional[Dict[str, object]] = None) -> str:
+        """One-line description of a day's API consumption."""
+        u = usage if usage is not None else self._usage
+        looks = int(u.get("cache_hits", 0)) + int(u.get("cache_misses", 0))
+        rate = f"{int(u.get('cache_hits', 0)) / looks:.0%}" if looks else "n/a"
+        units = int(u.get("youtube_units", 0))
+        return (
+            f"youtube {units}/{self.YOUTUBE_DAILY_QUOTA} units "
+            f"({u.get('youtube_searches', 0)} searches) | "
+            f"spotify {u.get('spotify_searches', 0)} | "
+            f"itunes {u.get('itunes_searches', 0)} | "
+            f"cache {u.get('cache_hits', 0)}/{looks} hits ({rate})"
+        )
+
+    async def _roll_usage_day(self):
+        """Log and reset counters when the quota day rolls over."""
+        day = self._quota_day()
+        if self._usage.get("day") == day:
+            return
+
+        if self._usage.get("day"):
+            logger.info(f"FM usage for {self._usage['day']}: {self.usage_summary()}")
+
+        self._usage = self._blank_usage(day)
+        self._usage_last_save = 0
+
+    async def record_usage(self, field: str, amount: int = 1):
+        """Increment a usage counter, rolling the day over first if needed."""
+        await self._roll_usage_day()
+        self._usage[field] = int(self._usage.get(field, 0)) + amount
+
+        if field == "youtube_searches":
+            self._usage["youtube_units"] = (
+                int(self._usage.get("youtube_units", 0)) + self.YOUTUBE_SEARCH_COST * amount
+            )
+
+        # Counters change on nearly every command; writing at most once a minute
+        # keeps that off the SD card without risking much on an unclean restart.
+        if time.time() - self._usage_last_save > 60:
+            self._usage_last_save = time.time()
+            await self.save_usage()
+
+    def _cache_key(self, artist: str, track: str) -> str:
+        return f"{self._norm(artist)}|{self._norm(track)}"
+
+    def _cache_get(self, artist: str, track: str) -> Optional[Dict[str, str]]:
+        """Return a cached lookup, or None if absent or stale."""
+        entry = self._media_cache.get(self._cache_key(artist, track))
+        if not entry:
+            return None
+
+        ttl = self.MEDIA_CACHE_TTL_RESOLVED if entry.get("resolved") else self.MEDIA_CACHE_TTL_PARTIAL
+        if time.time() - entry.get("ts", 0) > ttl:
+            return None
+
+        return {k: v for k, v in entry.items() if k not in ("ts", "resolved")}
+
+    def _cache_put(self, artist: str, track: str, media: Dict[str, str], resolved: bool):
+        """Store a lookup, evicting the oldest entries once the cap is hit."""
+        if len(self._media_cache) >= self.MEDIA_CACHE_MAX_ENTRIES:
+            for key in sorted(
+                self._media_cache,
+                key=lambda k: self._media_cache[k].get("ts", 0)
+            )[:len(self._media_cache) - self.MEDIA_CACHE_MAX_ENTRIES + 1]:
+                self._media_cache.pop(key, None)
+
+        self._media_cache[self._cache_key(artist, track)] = {
+            **media, "ts": time.time(), "resolved": resolved
+        }
+
+    async def search_youtube(self, artist: str, track: str) -> Optional[str]:
+        """Find a track on YouTube Music via the Data API.
+
+        Returns None rather than a guess when nothing matches confidently, so
+        the caller falls back to a search page instead of linking a reaction
+        video or an unrelated upload.
+        """
+        if not self.youtube_api_key:
+            return None
+
+        # Quota resets at midnight Pacific. Rather than track that precisely,
+        # back off for an hour at a time once exhausted - the calls would only
+        # fail anyway, and this keeps the log from filling up.
+        if time.time() < self._youtube_quota_exhausted_until:
+            return None
+
+        try:
+            params = {
+                "part": "snippet",
+                "type": "video",
+                "maxResults": 5,
+                "q": f"{artist} {track}",
+                "key": self.youtube_api_key
+            }
+
+            async with self.session.get(
+                "https://www.googleapis.com/youtube/v3/search",
+                params=params,
+                timeout=aiohttp.ClientTimeout(total=8)
+            ) as resp:
+                if resp.status == 403:
+                    body = await resp.text()
+                    if "quotaExceeded" in body or "quota" in body.lower():
+                        self._youtube_quota_exhausted_until = time.time() + 3600
+                        logger.warning(
+                            "YouTube API daily quota exhausted - falling back to "
+                            "search links, will retry in an hour"
+                        )
+                    else:
+                        logger.error(f"YouTube API forbidden (403): {body[:200]}")
+                    return None
+                if resp.status != 200:
+                    logger.warning(f"YouTube search returned {resp.status} for {artist} - {track}")
+                    return None
+
+                await self.record_usage("youtube_searches")
+
+                data = await resp.json()
+                items = data.get("items", [])
+
+                artist_norm = self._norm(artist)
+                for item in items:
+                    snippet = item.get("snippet", {})
+                    title = snippet.get("title", "")
+                    channel = snippet.get("channelTitle", "")
+
+                    # YouTube titles read "Artist - Track (Official Video)", so
+                    # require the track in the title and the artist somewhere.
+                    if not self._video_title_contains(track, title):
+                        continue
+                    if artist_norm not in self._norm(title) and artist_norm not in self._norm(channel):
+                        continue
+
+                    video_id = item.get("id", {}).get("videoId")
+                    if video_id:
+                        return f"https://music.youtube.com/watch?v={video_id}"
+
+                logger.info(f"YouTube found no confident match for {artist} - {track}")
+                return None
+
+        except asyncio.TimeoutError:
+            logger.warning(f"YouTube API timeout for {artist} - {track}")
+            return None
+        except Exception as e:
+            logger.warning(f"YouTube search error for {artist} - {track}: {e}")
+            return None
+
+    async def resolve_track_media(self, artist: str, track: str) -> Dict[str, str]:
+        """Resolve streaming links and album art for a track in one pass.
+
+        Returns spotify/apple/youtube links plus album_art and album_name. Link
+        values always point somewhere usable: a direct track URL where one could
+        be resolved, otherwise that platform's search page.
+        """
+        cached = self._cache_get(artist, track)
+        if cached:
+            await self.record_usage("cache_hits")
+            return cached
+        await self.record_usage("cache_misses")
+
+        clean_artist, clean_track = self.clean_query(artist, track)
+
+        q_enc = urllib.parse.quote_plus(f"{clean_artist} {clean_track}")
         fallback = {
             "spotify": f"https://open.spotify.com/search/{q_enc}",
             "apple": f"https://music.apple.com/us/search?term={q_enc}",
             "youtube": f"https://music.youtube.com/search?q={q_enc}"
         }
-        
-        logger.debug(f"Getting streaming links for: {clean_artist} - {clean_track}")
-        
-        # Get Spotify link and album art
+
+        album_art = ""
+        album_name = ""
+
+        # One Spotify search serves both the link and the preferred album art.
         spotify_result = await self._spotify_search(clean_artist, clean_track)
         spotify_url = spotify_result.get("url") if spotify_result else None
-        
-        # Get Apple Music link
-        apple_url = await self.search_apple_music(clean_artist, clean_track)
-        
-        # Get YouTube via Odesli if we have Spotify
+        if spotify_result:
+            album_art = spotify_result.get("album_art") or ""
+            album_name = spotify_result.get("album_name") or ""
+
+        # iTunes supplies the Apple Music link, and album art when Spotify is
+        # unavailable - it covers a good share of the smaller artists Last.fm
+        # has no artwork for.
+        apple_result = await self.search_apple_music(clean_artist, clean_track)
+        apple_url = apple_result.get("url") if apple_result else None
+        if apple_result:
+            album_art = album_art or apple_result.get("album_art") or ""
+            album_name = album_name or apple_result.get("album_name") or ""
+
+        # Odesli only cross-matches from a Spotify URL, and no longer returns
+        # Apple Music or YouTube at all - take whatever it gives as a bonus.
         youtube_url = None
         if spotify_url:
             odesli_links = await self.get_odesli_links(spotify_url)
             if odesli_links:
-                if not apple_url and odesli_links.get("apple"):
-                    apple_url = odesli_links["apple"]
-                if odesli_links.get("youtube"):
-                    youtube_url = odesli_links["youtube"]
-        
-        return {
+                apple_url = apple_url or odesli_links.get("apple")
+                youtube_url = odesli_links.get("youtube")
+
+        # Only spend YouTube quota when Odesli has left us without a link.
+        if not youtube_url:
+            youtube_url = await self.search_youtube(clean_artist, clean_track)
+
+        media = {
             "spotify": spotify_url or fallback["spotify"],
             "apple": apple_url or fallback["apple"],
-            "youtube": youtube_url or fallback["youtube"]
+            "youtube": youtube_url or fallback["youtube"],
+            "album_art": album_art,
+            "album_name": album_name
         }
+
+        fully_resolved = bool(spotify_url and apple_url and youtube_url and album_art)
+        self._cache_put(artist, track, media, fully_resolved)
+        await self.save_media_cache()
+
+        return media
 
     async def get_odesli_links(self, music_url: str) -> Optional[Dict[str, str]]:
         """Get links from other platforms using Odesli/song.link API."""
@@ -786,10 +1158,10 @@ class FM(commands.Cog):
                 return result if result else None
                 
         except asyncio.TimeoutError:
-            logger.debug("Odesli API timeout")
+            logger.warning("Odesli API timeout")
             return None
         except Exception as e:
-            logger.debug(f"Odesli API error: {e}")
+            logger.warning(f"Odesli API error: {e}")
             return None
 
     async def get_odesli_metadata(self, music_url: str) -> Optional[Dict]:
@@ -844,53 +1216,94 @@ class FM(commands.Cog):
             logger.debug(f"Odesli metadata error: {e}")
             return None
 
-    async def search_apple_music(self, artist: str, track: str) -> Optional[str]:
-        """Search iTunes/Apple Music API for a track and return the Apple Music URL."""
+    async def search_apple_music(self, artist: str, track: str) -> Optional[Dict[str, str]]:
+        """Search iTunes for a track, returning its Apple Music URL and album art.
+
+        Both artist and title must match. Matching on artist alone returns a
+        different song by the same artist roughly one time in seven, which is
+        worse than returning nothing and falling back to a search page.
+        """
         try:
-            query = f"{artist} {track}"
             params = {
-                "term": query,
+                "term": f"{artist} {track}",
                 "entity": "song",
-                "limit": 5,
+                "limit": 25,
                 "country": "US"
             }
-            
+
             async with self.session.get(
                 "https://itunes.apple.com/search",
                 params=params,
                 timeout=aiohttp.ClientTimeout(total=8)
             ) as resp:
                 if resp.status != 200:
-                    logger.debug(f"iTunes search failed: {resp.status}")
+                    logger.warning(f"iTunes search returned {resp.status} for {artist} - {track}")
                     return None
-                
-                data = await resp.json()
+
+                # iTunes serves JSON as text/javascript, which aiohttp refuses
+                # to decode unless the content-type check is disabled.
+                await self.record_usage("itunes_searches")
+
+                data = await resp.json(content_type=None)
                 results = data.get("results", [])
-                
+
                 if not results:
+                    logger.info(f"iTunes has no entry for {artist} - {track}")
                     return None
-                
-                # Try to find best match by checking artist name
-                artist_lower = artist.lower()
-                
+
                 for result in results:
-                    result_artist = result.get("artistName", "").lower()
-                    
-                    # Check if artist matches (partial match okay)
-                    if artist_lower in result_artist or result_artist in artist_lower:
-                        track_url = result.get("trackViewUrl")
-                        if track_url:
-                            return track_url
-                
-                # If no artist match, return first result anyway
-                return results[0].get("trackViewUrl")
-                
+                    if not self._artists_match(artist, result.get("artistName", "")):
+                        continue
+                    if not self._titles_match(track, result.get("trackName", "")):
+                        continue
+
+                    track_url = result.get("trackViewUrl")
+                    if not track_url:
+                        continue
+
+                    # artworkUrl100 is a 100px thumbnail; the same path serves
+                    # any size, and 600 is enough for the 390px card art.
+                    artwork = result.get("artworkUrl100") or ""
+                    if artwork:
+                        artwork = artwork.replace("100x100bb", "600x600bb")
+
+                    return {
+                        "url": track_url,
+                        "album_art": artwork,
+                        "album_name": result.get("collectionName") or ""
+                    }
+
+                logger.info(f"iTunes found no confident match for {artist} - {track}")
+                return None
+
         except asyncio.TimeoutError:
-            logger.debug("iTunes API timeout")
+            logger.warning(f"iTunes API timeout for {artist} - {track}")
             return None
         except Exception as e:
-            logger.debug(f"iTunes search error: {e}")
+            logger.warning(f"iTunes search error for {artist} - {track}: {e}")
             return None
+
+    async def get_lastfm_album_art(self, artist: str, album: str) -> str:
+        """Look up album art via album.getinfo, for tracks whose scrobble has none."""
+        if not artist or not album or not self.api_key:
+            return ""
+
+        data = await self.api_request({
+            "method": "album.getinfo",
+            "artist": artist,
+            "album": album,
+            "api_key": self.api_key,
+            "format": "json"
+        })
+        if not data:
+            return ""
+
+        images = data.get("album", {}).get("image", [])
+        if not images or not isinstance(images, list):
+            return ""
+
+        url = images[-1].get("#text", "") if images[-1] else ""
+        return url if url and self.LASTFM_PLACEHOLDER_HASH not in url else ""
 
     async def get_spotify_token(self) -> Optional[str]:
         """Get a Spotify access token using client credentials flow."""
@@ -959,13 +1372,23 @@ class FM(commands.Cog):
             ) as resp:
                 if resp.status == 401:
                     # Token expired, clear it
+                    logger.warning("Spotify token rejected (401), clearing for retry")
                     self.spotify_token = None
                     self.spotify_token_expires = 0
                     return None
+                if resp.status == 403:
+                    # App-level rejection, not a per-track miss. Usually means the
+                    # account owning the app has no active Premium subscription,
+                    # which disables every endpoint until it is restored.
+                    body = (await resp.text())[:200]
+                    logger.error(f"Spotify API forbidden (403) - album art degraded: {body}")
+                    return None
                 if resp.status != 200:
-                    logger.debug(f"Spotify search failed: {resp.status}")
+                    logger.warning(f"Spotify search failed: {resp.status}")
                     return None
                 
+                await self.record_usage("spotify_searches")
+
                 data = await resp.json()
                 tracks = data.get("tracks", {}).get("items", [])
                 
@@ -980,6 +1403,7 @@ class FM(commands.Cog):
                     ) as resp2:
                         if resp2.status != 200:
                             return None
+                        await self.record_usage("spotify_searches")
                         data = await resp2.json()
                         tracks = data.get("tracks", {}).get("items", [])
                         if not tracks:
@@ -1005,23 +1429,8 @@ class FM(commands.Cog):
                 return {"url": spotify_url, "album_art": album_art, "album_name": album_name}
                 
         except Exception as e:
-            logger.debug(f"Spotify search error: {e}")
+            logger.warning(f"Spotify search error for {artist} - {track}: {e}")
             return None
-
-    async def get_spotify_album_art(self, artist: str, track: str) -> Optional[str]:
-        """Search Spotify for a track and return the album art URL."""
-        result = await self._spotify_search(artist, track)
-        return result.get("album_art") if result else None
-
-    async def get_spotify_track_metadata(self, artist: str, track: str) -> Optional[Dict[str, str]]:
-        """Search Spotify for a track and return album art and album name."""
-        result = await self._spotify_search(artist, track)
-        if result:
-            return {
-                "album_art": result.get("album_art"),
-                "album_name": result.get("album_name")
-            }
-        return None
 
     # =========================================================================
     # LINK DETECTION AND PARSING
@@ -1117,25 +1526,20 @@ class FM(commands.Cog):
             apple_link = links.get("apple") or f"https://music.apple.com/us/search?term={q_enc}"
             youtube_link = links.get("youtube") or f"https://music.youtube.com/search?q={q_enc}"
             
-            # Get album art and album name - Spotify primary, Odesli fallback
-            album_art_url = ""
-            album_name = ""
-            
-            # Try Spotify first (most reliable)
-            spotify_metadata = await self.get_spotify_track_metadata(
-                metadata["artist"], 
-                metadata["title"]
-            )
-            if spotify_metadata:
-                album_art_url = spotify_metadata.get("album_art", "")
-                album_name = spotify_metadata.get("album_name", "")
-            
-            # Fallback to Odesli data if Spotify didn't have it
-            if not album_art_url and metadata.get("album_art"):
-                album_art_url = metadata["album_art"]
-            if not album_name and metadata.get("album"):
-                album_name = metadata["album"]
-            
+            # Odesli resolved this from the shared link itself, so its art and
+            # album name describe the exact track - trust them over a search.
+            album_art_url = metadata.get("album_art") or ""
+            album_name = metadata.get("album") or ""
+
+            # Only search the catalogues if Odesli came back without artwork.
+            if not album_art_url:
+                shared_media = await self.resolve_track_media(
+                    metadata["artist"],
+                    metadata["title"]
+                )
+                album_art_url = shared_media.get("album_art") or ""
+                album_name = album_name or shared_media.get("album_name") or ""
+
             # Create the image (no playcount for link shares)
             try:
                 np_image = await self.create_now_playing_image(
@@ -1371,20 +1775,66 @@ class FM(commands.Cog):
         """Test if the FM cog is working."""
         api_status = "✅" if self.api_key else "❌"
         spotify_status = "✅" if (self.spotify_client_id and self.spotify_client_secret) else "❌"
-        
+        youtube_status = "✅" if self.youtube_api_key else "❌"
+
         # Check music channel
         music_channel_id = None
         if ctx.guild:
             music_channel_id = await self.get_music_channel(ctx.guild.id)
-        
+
         music_channel_status = f"<#{music_channel_id}>" if music_channel_id else "Not set"
-        
+
         await ctx.reply(
             f"✅ FM cog is loaded!\n"
-            f"-# Last.fm API: {api_status} | Spotify API: {spotify_status}\n"
+            f"-# Last.fm API: {api_status} | Spotify API: {spotify_status} | YouTube API: {youtube_status}\n"
             f"-# Music Channel: {music_channel_status}",
             mention_author=False
         )
+
+    @commands.command(name="fmquota", aliases=["fmusage"])
+    async def fmquota(self, ctx: commands.Context):
+        """Show today's API usage against the YouTube quota."""
+        await self._roll_usage_day()
+
+        units = int(self._usage.get("youtube_units", 0))
+        pct = units / self.YOUTUBE_DAILY_QUOTA
+        looks = int(self._usage.get("cache_hits", 0)) + int(self._usage.get("cache_misses", 0))
+        hit_rate = f"{int(self._usage.get('cache_hits', 0)) / looks:.0%}" if looks else "n/a"
+
+        # Twelve blocks reads clearly on mobile without wrapping.
+        filled = min(12, int(pct * 12))
+        bar = "█" * filled + "░" * (12 - filled)
+
+        remaining = max(0, self.YOUTUBE_DAILY_QUOTA - units)
+        colour = discord.Color.green() if pct < 0.6 else (
+            discord.Color.orange() if pct < 0.9 else discord.Color.red()
+        )
+
+        embed = discord.Embed(
+            title="FM API usage",
+            description=f"`{bar}` **{units:,}** / {self.YOUTUBE_DAILY_QUOTA:,} units ({pct:.0%})",
+            color=colour
+        )
+        embed.add_field(
+            name="YouTube",
+            value=f"{self._usage.get('youtube_searches', 0)} searches\n"
+                  f"~{remaining // self.YOUTUBE_SEARCH_COST} left today",
+            inline=True
+        )
+        embed.add_field(
+            name="Other lookups",
+            value=f"Spotify: {self._usage.get('spotify_searches', 0)}\n"
+                  f"iTunes: {self._usage.get('itunes_searches', 0)}",
+            inline=True
+        )
+        embed.add_field(
+            name="Cache",
+            value=f"{hit_rate} hit rate\n{len(self._media_cache):,} tracks stored",
+            inline=True
+        )
+        embed.set_footer(text=f"Quota day {self._usage.get('day', '?')} · resets midnight Pacific")
+
+        await ctx.reply(embed=embed, mention_author=False)
 
     @commands.command(name="fm", aliases=["np"])
     @commands.cooldown(1, 5, commands.BucketType.user)
@@ -1423,26 +1873,15 @@ class FM(commands.Cog):
             track_name = track.get("name", "Unknown Track")
             album = track.get("album", {}).get("#text", "")
             
-            # Get album art and album name - Spotify primary, Last.fm fallback
+            # Art from the scrobble itself is track-accurate and free, so prefer
+            # it over anything a catalogue search guesses at.
             image_url = ""
-            
-            # Try Spotify first (more reliable album art)
-            spotify_metadata = await self.get_spotify_track_metadata(artist, track_name)
-            if spotify_metadata:
-                if spotify_metadata.get("album_art"):
-                    image_url = spotify_metadata["album_art"]
-                if not album and spotify_metadata.get("album_name"):
-                    album = spotify_metadata["album_name"]
-            
-            # Fallback to Last.fm if Spotify didn't have art
-            if not image_url:
-                images = track.get("image", [])
-                if images and isinstance(images, list):
-                    lastfm_url = images[-1].get("#text", "") if images[-1] else ""
-                    # Skip Last.fm placeholder images
-                    if lastfm_url and "2a96cbd8b46e442fc41c2b86b821562f" not in lastfm_url:
-                        image_url = lastfm_url
-            
+            images = track.get("image", [])
+            if images and isinstance(images, list):
+                lastfm_url = images[-1].get("#text", "") if images[-1] else ""
+                if lastfm_url and self.LASTFM_PLACEHOLDER_HASH not in lastfm_url:
+                    image_url = lastfm_url
+
             now_playing = "@attr" in track and track.get("@attr", {}).get("nowplaying") == "true"
 
             # Get playcount for this artist
@@ -1461,8 +1900,22 @@ class FM(commands.Cog):
                 except (KeyError, TypeError):
                     pass
 
-            # Fetch streaming links
-            streaming_links = await self.get_streaming_links(artist, track_name)
+            # Links and, where the scrobble had no usable art, a cover to fall
+            # back on. Spotify and iTunes are both searched here exactly once.
+            media = await self.resolve_track_media(artist, track_name)
+
+            if not image_url:
+                image_url = media.get("album_art") or ""
+            if not album:
+                album = media.get("album_name") or ""
+
+            # Last resort: ask Last.fm for the album's own art. Only reachable
+            # when the scrobble carried an album name but no image.
+            if not image_url and album:
+                image_url = await self.get_lastfm_album_art(artist, album)
+
+            if not image_url:
+                logger.info(f"No album art found for {artist} - {track_name}")
 
             # Create the image
             try:
@@ -1477,10 +1930,10 @@ class FM(commands.Cog):
                 )
                 
                 # Build embed with streaming links
-                spotify_link = streaming_links.get("spotify", "")
-                apple_link = streaming_links.get("apple", "")
-                youtube_link = streaming_links.get("youtube", "")
-                
+                spotify_link = media.get("spotify", "")
+                apple_link = media.get("apple", "")
+                youtube_link = media.get("youtube", "")
+
                 links_text = (
                     f"-# [Spotify]({spotify_link}) • "
                     f"[Apple Music]({apple_link}) • "

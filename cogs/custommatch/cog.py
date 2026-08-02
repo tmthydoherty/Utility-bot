@@ -3004,11 +3004,27 @@ class CustomMatch(commands.Cog):
         # Rivals primary/secondary role-prefs system, which Overwatch must not
         # pick up, so the two gates stay separate.
         if is_overwatch_game(game):
-            # Always ask. Role appetite changes session to session, and every
-            # other check that could bounce this player has already run, so
-            # nobody picks roles only to be turned away. Selecting finishes
-            # the join outright — no second Join click.
+            # Ask only the first time. Once a selection is on file, Join means
+            # join: the picker pre-ticked their saved roles, so the dropdown
+            # fired no change event and the join stalled waiting for a click it
+            # was never going to get. Returning players go straight in and get
+            # an ephemeral naming the roles they queued as; the ☰ menu's Edit
+            # Roles is the way to change them.
             existing_sel = await DatabaseHelper.get_ow_role_selection(user.id, game.game_id)
+
+            if existing_sel:
+                saved = [r for r, _rank in existing_sel]
+                desc = " + ".join(
+                    f"{OW_ROLE_EMOJI[r]} {r}" for r in OW_ROLE_DISPLAY_ORDER if r in saved
+                )
+                await self._finish_queue_join(
+                    interaction, game, queue_id,
+                    join_confirm=(
+                        f"**Joined the {game.name} queue as:**\n{desc}\n"
+                        "-# Change roles any time with **☰ → Edit Roles** on the queue message."
+                    ),
+                )
+                return
 
             async def after_save(inter: discord.Interaction, ordered):
                 await self._ow_join_after_role_select(inter, ordered, game, queue_id)
@@ -3016,7 +3032,7 @@ class CustomMatch(commands.Cog):
             view = OWRoleSelectView(
                 self, game.game_id, game.name, rejoin_hint=False,
                 after_save=after_save,
-                preselected=[r for r, _rank in existing_sel],
+                preselected=[],
             )
             await interaction.response.send_message(
                 f"**Select your roles to join {game.name}.**\n"
@@ -3044,23 +3060,35 @@ class CustomMatch(commands.Cog):
         """An Overwatch player picked their roles from the join dropdown. Their
         selection is already saved; carry straight on into the queue join so the
         whole thing is one click plus one pick."""
-        desc = "  ".join(f"{OW_ROLE_EMOJI[r]} {r}" for r in OW_ROLE_DISPLAY_ORDER if r in ordered)
+        desc = " + ".join(f"{OW_ROLE_EMOJI[r]} {r}" for r in OW_ROLE_DISPLAY_ORDER if r in ordered)
         try:
             await interaction.response.edit_message(
-                content=f"**Roles set:**  {desc}\n-# Joining the queue…", view=None
+                content=f"**Roles set:**\n{desc}\n-# Joining the queue…", view=None
             )
         except Exception as e:
             logger.error(f"OW join: failed to ack role select for {interaction.user.id}: {e}")
             return
-        await self._finish_queue_join(interaction, game, queue_id, responded=True)
+        await self._finish_queue_join(
+            interaction, game, queue_id, responded=True,
+            join_confirm=(
+                f"**Joined the {game.name} queue as:**\n{desc}\n"
+                "-# These roles are saved — next time **Join** puts you straight in. "
+                "Change them with **☰ → Edit Roles**."
+            ),
+        )
 
     async def _finish_queue_join(self, interaction: discord.Interaction, game: GameConfig,
-                                 queue_id: int, responded: bool = False):
+                                 queue_id: int, responded: bool = False,
+                                 join_confirm: Optional[str] = None):
         """The back half of a queue join: eligibility gauntlet, atomic add, embed
         refresh, ready-check pop. Everything here answers over followups, so it
         works whether the join came straight off the Join button (responded=False,
         we defer) or off the Overwatch role dropdown (responded=True, already
-        answered by the message edit)."""
+        answered by the message edit).
+
+        join_confirm, if given, is sent as an ephemeral only once the player is
+        actually in the queue — never before the gauntlet, so a blacklisted or
+        suspended player can't be told they joined and then told they didn't."""
         user = interaction.user
         game_id = game.game_id
 
@@ -3304,6 +3332,20 @@ class CustomMatch(commands.Cog):
                     await db.commit()
                 await interaction.followup.send(join_rejected_msg, ephemeral=True)
                 return
+
+            if join_confirm:
+                try:
+                    if responded:
+                        # The role picker already owns an ephemeral — replace its
+                        # "Joining the queue…" text instead of stacking a second.
+                        await interaction.edit_original_response(
+                            content=join_confirm, view=None)
+                    else:
+                        await interaction.followup.send(join_confirm, ephemeral=True)
+                except Exception as e:
+                    # A missed confirmation must not unwind a completed join.
+                    logger.warning(
+                        f"Queue join confirm failed for {user.id} on queue {queue_id}: {e}")
 
             # Update embed using the message directly (since we deferred)
             try:

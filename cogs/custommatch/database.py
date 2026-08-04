@@ -414,7 +414,19 @@ CREATE TABLE IF NOT EXISTS secondary_modes (
     FOREIGN KEY (game_id) REFERENCES games(game_id) ON DELETE CASCADE
 );
 
+-- Lobby channels kept around read-only after a match so mods can still read the
+-- chat during a dispute. The purge loop deletes them once purge_at passes.
+CREATE TABLE IF NOT EXISTS archived_lobbies (
+    channel_id INTEGER PRIMARY KEY,
+    match_id INTEGER,
+    guild_id INTEGER NOT NULL,
+    short_id TEXT,
+    archived_at TIMESTAMP NOT NULL,
+    purge_at TIMESTAMP NOT NULL
+);
+
 -- Performance indexes
+CREATE INDEX IF NOT EXISTS idx_archived_lobbies_purge ON archived_lobbies(purge_at);
 CREATE INDEX IF NOT EXISTS idx_matches_winning_cancelled ON matches(winning_team, cancelled);
 CREATE INDEX IF NOT EXISTS idx_match_players_player_id ON match_players(player_id);
 CREATE INDEX IF NOT EXISTS idx_player_game_stats_game_id ON player_game_stats(game_id);
@@ -3462,6 +3474,64 @@ class DatabaseHelper:
             await db.execute(
                 "DELETE FROM mod_roles WHERE role_id = ?",
                 (role_id,)
+            )
+            await db.commit()
+
+    # -- Archived lobbies ------------------------------------------------------
+
+    @staticmethod
+    async def add_archived_lobby(channel_id: int, guild_id: int, purge_at: datetime,
+                                 match_id: Optional[int] = None,
+                                 short_id: Optional[str] = None) -> bool:
+        """Record a lobby channel as archived. Returns False if already tracked.
+
+        INSERT OR IGNORE keeps re-archiving idempotent: a channel that gets swept
+        a second time (cleanup_match, then the 12h safety net) must not have its
+        purge deadline pushed back.
+        """
+        async with DatabaseHelper._get_db() as db:
+            cursor = await db.execute(
+                """INSERT OR IGNORE INTO archived_lobbies
+                   (channel_id, match_id, guild_id, short_id, archived_at, purge_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (channel_id, match_id, guild_id, short_id,
+                 datetime.now(timezone.utc).isoformat(), purge_at.isoformat())
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
+    @staticmethod
+    async def is_lobby_archived(channel_id: int) -> bool:
+        async with DatabaseHelper._get_db() as db:
+            async with db.execute(
+                "SELECT 1 FROM archived_lobbies WHERE channel_id = ?", (channel_id,)
+            ) as cursor:
+                return await cursor.fetchone() is not None
+
+    @staticmethod
+    async def get_expired_archived_lobbies() -> List[dict]:
+        """Archived lobbies whose retention window has passed."""
+        async with DatabaseHelper._get_db() as db:
+            async with db.execute(
+                "SELECT * FROM archived_lobbies WHERE purge_at <= ?",
+                (datetime.now(timezone.utc).isoformat(),)
+            ) as cursor:
+                return [dict(row) for row in await cursor.fetchall()]
+
+    @staticmethod
+    async def get_archived_lobbies() -> List[dict]:
+        """All tracked archived lobbies, soonest to purge first."""
+        async with DatabaseHelper._get_db() as db:
+            async with db.execute(
+                "SELECT * FROM archived_lobbies ORDER BY purge_at ASC"
+            ) as cursor:
+                return [dict(row) for row in await cursor.fetchall()]
+
+    @staticmethod
+    async def remove_archived_lobby(channel_id: int):
+        async with DatabaseHelper._get_db() as db:
+            await db.execute(
+                "DELETE FROM archived_lobbies WHERE channel_id = ?", (channel_id,)
             )
             await db.commit()
 

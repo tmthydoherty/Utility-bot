@@ -2135,6 +2135,18 @@ CHANNEL_TARGETS: Dict[str, dict] = {
             "when a queue channel isn't inside any category."
         ),
     },
+    "lobby_archive": {
+        "label": "Lobby archive category",
+        "emoji": "🗄️",
+        "config_key": "lobby_archive_category_id",
+        "types": [discord.ChannelType.category],
+        "blurb": (
+            "Finished lobbies move here instead of being deleted — hidden from "
+            "everyone except the CM Admin and mod roles, then deleted "
+            "automatically after 48 hours. Leave this unset and the bot creates a "
+            "private \"Match Archive\" category the first time it needs one."
+        ),
+    },
     "discussion": {
         "label": "Discussion parent",
         "emoji": "💬",
@@ -2211,6 +2223,11 @@ class ChannelsPage(SettingsPage):
                 continue
             value = await DatabaseHelper.get_config(spec["config_key"])
             server_lines.append(f"{spec['emoji']} {spec['label']} · {_channel_label(guild, value)}")
+            if key == "lobby_archive":
+                held = len(await DatabaseHelper.get_archived_lobbies())
+                server_lines.append(
+                    f"⤷ holding **{held}** lobb{'y' if held == 1 else 'ies'} for mod review"
+                )
         embed.add_field(name="Server-wide", value="\n".join(server_lines), inline=False)
 
         games = await DatabaseHelper.get_all_games()
@@ -2320,7 +2337,10 @@ class AccessPage(SettingsPage):
         )
         embed.add_field(
             name="🔧 Mod roles",
-            value=f"{mods}\n*Can speak and manage messages in every match channel.*",
+            value=(
+                f"{mods}\n*Can speak and manage messages in every match channel, "
+                "and read archived lobbies after the match.*"
+            ),
             inline=False,
         )
         embed.add_field(
@@ -2409,7 +2429,9 @@ class ModRolesPage(SettingsPage):
             title="Mod Roles",
             description=(
                 "These roles can type in and manage messages in every match "
-                f"channel the bot creates.\n\n{body}"
+                "channel the bot creates, and they are the only ones who keep "
+                "read access once a finished lobby is archived.\n\n"
+                f"{body}"
             ),
             color=COLOR_NEUTRAL,
         )

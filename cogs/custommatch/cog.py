@@ -65,6 +65,15 @@ from .views_gameplay import (
 EST = ZoneInfo("America/New_York")
 logger = logging.getLogger('cogs.custommatch')
 
+# Finished lobbies are hidden rather than deleted so mods can still read the chat
+# when a player dispute surfaces after the match. They're purged this many hours
+# later. Discord caps a category at 50 channels, so the archive spills into
+# numbered overflow categories once the first one fills.
+LOBBY_ARCHIVE_HOURS = 48
+LOBBY_ARCHIVE_CATEGORY_KEY = "lobby_archive_category_id"
+LOBBY_ARCHIVE_CATEGORY_NAME = "Match Archive"
+CATEGORY_CHANNEL_LIMIT = 50
+
 
 # =============================================================================
 # MAIN COG
@@ -88,6 +97,7 @@ class CustomMatch(commands.Cog):
         self.stats_retry_poll_task: Optional[asyncio.Task] = None
         self.queue_embed_refresh_task: Optional[asyncio.Task] = None
         self.channel_cleanup_task: Optional[asyncio.Task] = None
+        self.archive_purge_task: Optional[asyncio.Task] = None
         self.vacuum_task: Optional[asyncio.Task] = None
         self.pending_upload_cleanup_task: Optional[asyncio.Task] = None
         self.henrik_api = HenrikDevAPI(bot)
@@ -155,6 +165,8 @@ class CustomMatch(commands.Cog):
         self.queue_embed_refresh_task = asyncio.create_task(self.queue_embed_refresh())
         # Start match channel auto-cleanup (12h after match ends)
         self.channel_cleanup_task = asyncio.create_task(self.match_channel_cleanup())
+        # Start archived-lobby purge (deletes archived lobbies past their retention)
+        self.archive_purge_task = asyncio.create_task(self.archived_lobby_purge())
         # Start weekly database VACUUM
         self.vacuum_task = asyncio.create_task(self.weekly_vacuum())
         # Start periodic cleanup of expired pending uploads
@@ -715,6 +727,8 @@ class CustomMatch(commands.Cog):
             self.queue_embed_refresh_task.cancel()
         if self.channel_cleanup_task:
             self.channel_cleanup_task.cancel()
+        if self.archive_purge_task:
+            self.archive_purge_task.cancel()
         if self.vacuum_task:
             self.vacuum_task.cancel()
         if self.pending_upload_cleanup_task:
@@ -1772,19 +1786,32 @@ class CustomMatch(commands.Cog):
         for guild in self.bot.guilds:
             for match in stale_matches:
                 cleaned_something = False
-                # Delete text channels
-                for col in ('channel_id', 'draft_channel_id'):
-                    ch_id = match[col]
-                    if ch_id:
-                        channel = guild.get_channel(ch_id)
-                        if channel:
-                            try:
-                                await channel.delete(reason="Auto-cleanup: match ended 12+ hours ago")
-                                cleaned_something = True
-                            except (discord.NotFound, discord.Forbidden):
-                                pass
-                            except Exception as e:
-                                logger.error(f"Channel cleanup error for {ch_id}: {e}")
+                # The lobby gets archived rather than deleted; the purge loop
+                # removes it once its retention window closes. Draft channels are
+                # pure bot scaffolding, so those still go straight in the bin.
+                lobby_id = match['channel_id']
+                if lobby_id:
+                    channel = guild.get_channel(lobby_id)
+                    if channel:
+                        try:
+                            await self.archive_lobby_channel(
+                                guild, channel, match_id=match['match_id']
+                            )
+                            cleaned_something = True
+                        except Exception as e:
+                            logger.error(f"Channel archive error for {lobby_id}: {e}")
+
+                draft_id = match['draft_channel_id']
+                if draft_id:
+                    channel = guild.get_channel(draft_id)
+                    if channel:
+                        try:
+                            await channel.delete(reason="Auto-cleanup: match ended 12+ hours ago")
+                            cleaned_something = True
+                        except (discord.NotFound, discord.Forbidden):
+                            pass
+                        except Exception as e:
+                            logger.error(f"Channel cleanup error for {draft_id}: {e}")
 
                 # Delete voice channels
                 for col in ('red_vc_id', 'blue_vc_id'):
@@ -1827,6 +1854,222 @@ class CustomMatch(commands.Cog):
 
         if stale_matches:
             logger.info(f"Channel cleanup: processed {len(stale_matches)} ended matches")
+
+    async def archived_lobby_purge(self):
+        """Background task: delete archived lobby channels past their retention."""
+        await self.bot.wait_until_ready()
+        while not self.bot.is_closed():
+            try:
+                await self._do_archive_purge()
+            except Exception as e:
+                logger.error(f"Error in archived_lobby_purge: {e}", exc_info=True)
+            await asyncio.sleep(1800)  # Run every 30 minutes
+
+    async def _do_archive_purge(self):
+        """Delete every archived lobby whose purge_at has passed."""
+        expired = await DatabaseHelper.get_expired_archived_lobbies()
+        if not expired:
+            return
+
+        purged = 0
+        for row in expired:
+            channel_id = row["channel_id"]
+            guild = self.bot.get_guild(row["guild_id"]) if row.get("guild_id") else None
+            if guild is None:
+                # Guild not in cache yet — don't untrack a channel we can't see.
+                continue
+
+            channel = guild.get_channel(channel_id)
+            if channel is None:
+                # Deleted by hand already — stop tracking it.
+                await DatabaseHelper.remove_archived_lobby(channel_id)
+                continue
+
+            try:
+                await channel.delete(
+                    reason=f"Archived lobby retention ({LOBBY_ARCHIVE_HOURS}h) expired"
+                )
+                purged += 1
+            except discord.NotFound:
+                pass
+            except discord.Forbidden:
+                logger.warning(
+                    f"Archive purge: missing permission to delete lobby {channel_id}; "
+                    "leaving it tracked for the next pass"
+                )
+                continue
+            except Exception as e:
+                logger.error(f"Archive purge: failed to delete lobby {channel_id}: {e}")
+                continue
+
+            await DatabaseHelper.remove_archived_lobby(channel_id)
+
+        if purged:
+            logger.info(f"Archive purge: deleted {purged} expired lobby channel(s)")
+
+    # -------------------------------------------------------------------------
+    # LOBBY ARCHIVE
+    # -------------------------------------------------------------------------
+
+    async def _archive_viewer_overwrites(self, guild: discord.Guild) -> dict:
+        """Permission overwrites for an archived lobby: mods and admins only.
+
+        Read-only even for mods — the match is over, and the point of keeping the
+        channel is preserving the transcript exactly as it was.
+        """
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(
+                view_channel=False, send_messages=False
+            ),
+            guild.me: discord.PermissionOverwrite(
+                view_channel=True, send_messages=True,
+                manage_messages=True, manage_channels=True, read_message_history=True
+            ),
+        }
+
+        viewer = discord.PermissionOverwrite(
+            view_channel=True, read_message_history=True, send_messages=False
+        )
+
+        admin_role_id = await DatabaseHelper.get_config("cm_admin_role_id")
+        if admin_role_id:
+            admin_role = guild.get_role(int(admin_role_id))
+            if admin_role:
+                overwrites[admin_role] = viewer
+
+        for mod_role_id in await DatabaseHelper.get_mod_roles():
+            mod_role = guild.get_role(mod_role_id)
+            if mod_role:
+                overwrites[mod_role] = viewer
+
+        return overwrites
+
+    async def _resolve_archive_category(
+        self, guild: discord.Guild
+    ) -> Optional[discord.CategoryChannel]:
+        """Find (or create) an archive category with room for one more channel.
+
+        The configured category is preferred. Once it hits Discord's 50-channel
+        cap the archive spills into "Match Archive 2", "Match Archive 3", ... so a
+        busy weekend can't wedge archiving entirely.
+        """
+        overwrites = await self._archive_viewer_overwrites(guild)
+        # A category can't grant manage_channels meaningfully to the bot here, and
+        # send_messages on the category would leak into future children.
+        category_overwrites = {
+            target: discord.PermissionOverwrite(
+                view_channel=ow.view_channel, read_message_history=ow.read_message_history
+            )
+            for target, ow in overwrites.items()
+        }
+
+        configured_id = await DatabaseHelper.get_config(LOBBY_ARCHIVE_CATEGORY_KEY)
+        primary = None
+        if configured_id:
+            try:
+                primary = guild.get_channel(int(configured_id))
+            except (TypeError, ValueError):
+                primary = None
+            if not isinstance(primary, discord.CategoryChannel):
+                primary = None
+
+        if primary is not None and len(primary.channels) < CATEGORY_CHANNEL_LIMIT:
+            return primary
+
+        base_name = primary.name if primary is not None else LOBBY_ARCHIVE_CATEGORY_NAME
+
+        # Walk existing overflow categories before making a new one.
+        existing = {c.name: c for c in guild.categories}
+        if primary is None:
+            candidate = existing.get(base_name)
+            if candidate is not None:
+                if len(candidate.channels) < CATEGORY_CHANNEL_LIMIT:
+                    # Adopt it so admins see it reflected in the panel.
+                    await DatabaseHelper.set_config(
+                        LOBBY_ARCHIVE_CATEGORY_KEY, str(candidate.id)
+                    )
+                    return candidate
+                primary = candidate
+
+        for n in range(2, 21):
+            overflow = existing.get(f"{base_name} {n}")
+            if overflow is None:
+                try:
+                    created = await guild.create_category(
+                        name=f"{base_name} {n}" if primary is not None else base_name,
+                        overwrites=category_overwrites,
+                        reason="Lobby archive",
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to create lobby archive category: {e}")
+                    return None
+                if primary is None:
+                    await DatabaseHelper.set_config(
+                        LOBBY_ARCHIVE_CATEGORY_KEY, str(created.id)
+                    )
+                return created
+            if len(overflow.channels) < CATEGORY_CHANNEL_LIMIT:
+                return overflow
+
+        logger.error("Lobby archive: every archive category is full (20 x 50 channels)")
+        return None
+
+    async def archive_lobby_channel(
+        self, guild: discord.Guild, channel: discord.TextChannel,
+        match_id: Optional[int] = None, short_id: Optional[str] = None
+    ) -> bool:
+        """Hide a finished lobby from players and queue it for deletion in 48h.
+
+        Returns True if the channel is now tracked for purge. The DB row is written
+        even when the Discord-side move fails, so a channel we couldn't lock down
+        still gets cleaned up on schedule instead of lingering forever.
+        """
+        if await DatabaseHelper.is_lobby_archived(channel.id):
+            # Already archived by an earlier sweep — don't extend its deadline.
+            return True
+
+        purge_at = datetime.now(timezone.utc) + timedelta(hours=LOBBY_ARCHIVE_HOURS)
+        tracked = await DatabaseHelper.add_archived_lobby(
+            channel.id, guild.id, purge_at, match_id=match_id, short_id=short_id
+        )
+        if not tracked:
+            return True
+
+        try:
+            category = await self._resolve_archive_category(guild)
+            overwrites = await self._archive_viewer_overwrites(guild)
+            edit_kwargs = {
+                "overwrites": overwrites,
+                "sync_permissions": False,
+                "reason": "Match ended — lobby archived for moderator review",
+            }
+            if category is not None:
+                edit_kwargs["category"] = category
+            await channel.edit(**edit_kwargs)
+        except discord.Forbidden:
+            logger.warning(
+                f"Lobby archive: missing permission to archive channel {channel.id}; "
+                "it stays queued for purge"
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Lobby archive: failed to archive channel {channel.id}: {e}")
+            return True
+
+        # A closing note gives mods the retention deadline without needing the panel.
+        try:
+            await channel.send(embed=discord.Embed(
+                description=(
+                    "🗄️ **Lobby archived.** This channel is now visible to moderators "
+                    "only and will be deleted "
+                    f"<t:{int(purge_at.timestamp())}:R>."
+                ),
+                color=COLOR_NEUTRAL,
+            ))
+        except Exception:
+            pass
+
+        return True
 
     # -------------------------------------------------------------------------
     # HELPER METHODS
@@ -8010,14 +8253,19 @@ class CustomMatch(commands.Cog):
         # this covers matches that were cancelled/failed before persistence).
         self._ow_role_assignments.pop(match.get("match_id"), None)
 
-        # Delete match channel
+        # Archive the match channel instead of deleting it — mods keep read access
+        # for LOBBY_ARCHIVE_HOURS in case a player dispute needs the transcript.
         if match["channel_id"] and not skip_match_channel:
             try:
                 channel = guild.get_channel(match["channel_id"])
                 if channel:
-                    await channel.delete()
+                    await self.archive_lobby_channel(
+                        guild, channel,
+                        match_id=match.get("match_id"),
+                        short_id=match.get("short_id"),
+                    )
             except Exception as e:
-                logger.warning(f"cleanup_match: failed to delete match channel {match['channel_id']}: {e}")
+                logger.warning(f"cleanup_match: failed to archive match channel {match['channel_id']}: {e}")
 
         # Delete draft channel
         if match["draft_channel_id"]:

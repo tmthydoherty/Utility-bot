@@ -1539,14 +1539,6 @@ class VC(commands.Cog):
                         except Exception as e:
                             shared.logger.error(f"Self-heal scan error for guild {guild.id}: {e}", exc_info=True)
 
-                # Hub state reconciliation: every 3 minutes
-                if cleanup_iteration % 3 == 0:
-                    for guild in self.bot.guilds:
-                        try:
-                            await self.reconcile_hub_state(guild)
-                        except Exception as e:
-                            shared.logger.error(f"Hub reconciliation error for guild {guild.id}: {e}")
-
                 # Orphaned hub messages: every 5 minutes (API: hub.history)
                 if cleanup_iteration % 5 == 0:
                     for guild in self.bot.guilds:
@@ -1592,34 +1584,6 @@ class VC(commands.Cog):
                 shared.logger.error(f"Periodic cleanup error (iteration #{cleanup_iteration}): {e}", exc_info=True)
 
             await asyncio.sleep(60)
-
-    async def reconcile_hub_state(self, guild):
-        """FALLBACK: Ensure hub state matches active VCs"""
-        hub_id = await shared.get_config(f"hub_channel_id_{guild.id}")
-        if not hub_id:
-            return
-
-        hub = guild.get_channel(int(hub_id))
-        if not hub:
-            return
-
-        # Get active locked VCs (not ghost, not unlocked, not basic)
-        active_locked = [v for v in self.active_vcs.values()
-                        if v.get('guild_id') == guild.id
-                        and not v.get('ghost', False)
-                        and not v.get('unlocked', False)
-                        and not v.get('is_basic', False)]
-
-        # SIMPLIFIED: Always use generalized name or idle name
-        if not active_locked:
-            expected_name = await shared.get_config(f"idle_name_{guild.id}", "🔑-join-locked-vcs")
-        else:
-            expected_name = "🔑-join-locked-vcs"
-
-        # Update if needed
-        if hub.name != expected_name:
-            shared.logger.info(f"Reconciling hub name: '{hub.name}' -> '{expected_name}'")
-            await self.update_hub_name(guild, force=True)
 
     async def self_heal_scan(self, guild):
         """

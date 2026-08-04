@@ -1471,7 +1471,6 @@ class GamePoll(commands.Cog):
         self.bot.add_view(PublicVoteView())
         # Retroactively update active poll messages to include the Game Night Role button
         self.bot.loop.create_task(self._update_active_poll_views())
-        self.bot.loop.create_task(self._update_results_views())
         self.bot.loop.create_task(self._reseed_vc_join_times())
         # Initialize playwright for results card rendering
         if PLAYWRIGHT_AVAILABLE:
@@ -1612,22 +1611,6 @@ class GamePoll(commands.Cog):
                 reseeded += 1
         if reseeded:
             logger.info(f"GamePoll: Re-seeded {reseeded} VC member(s) after restart.")
-
-    async def _update_results_views(self):
-        """Edit any results messages to include the updated ResultsDetailView."""
-        await self.bot.wait_until_ready()
-        async with aiosqlite.connect(DB_PATH) as db:
-            async with db.execute("SELECT poll_id, channel_id, message_id FROM results_messages") as cur:
-                rows = await cur.fetchall()
-        for poll_id, ch_id, msg_id in rows:
-            try:
-                channel = self.bot.get_channel(ch_id)
-                if not channel:
-                    continue
-                msg = await channel.fetch_message(msg_id)
-                await msg.edit(view=ResultsDetailView(poll_id))
-            except Exception as e:
-                logger.debug(f"Could not update results message {msg_id} in {ch_id}: {e}")
 
     # --- PERMISSIONS ---
     def is_admin(self, interaction: discord.Interaction) -> bool:

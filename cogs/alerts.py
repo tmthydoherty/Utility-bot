@@ -42,10 +42,6 @@ WELCOME_COLORS = [
     discord.Color.from_rgb(99, 205, 218),   # Aquamarine
 ]
 
-# Goodbye embed color for kicks made by the inactivity cog
-INACTIVITY_KICK_COLOR = discord.Color.from_rgb(199, 218, 232)  # Pale, desaturated blue
-
-
 # --- Config I/O ---
 def _load_config_sync(file_path: str) -> Dict[str, Any]:
     if not os.path.exists(file_path):
@@ -164,10 +160,6 @@ class Alerts(commands.Cog):
                     task = asyncio.create_task(self._delayed_welcome(after))
                     pending["task"] = task
 
-        # --- Mod alerts: timeout detection ---
-        if not before.timed_out_until and after.timed_out_until:
-            asyncio.create_task(self._handle_timeout(after))
-
     async def _delayed_welcome(self, member: discord.Member, delay: int = ROLE_WAIT_SECONDS):
         """Wait for role additions to settle, then send a tailored welcome."""
         try:
@@ -263,189 +255,26 @@ class Alerts(commands.Cog):
         await channel.send(content=member.mention, embed=embed)
 
     # ------------------------------------------------------------------
-    # EXIT LOGIC
+    # EXIT CLEANUP
     # ------------------------------------------------------------------
     @commands.Cog.listener()
     async def on_member_remove(self, member: discord.Member):
-        if member.bot:
-            return
+        """Drop any welcome still waiting on this member.
 
-        # Clean up any pending welcome
+        The leave/kick/ban and timeout embeds moved to cogs/audit_log.py, which
+        now owns member lifecycle logging along with the exit and mod channel
+        routing that went with it. Only the pending-welcome cleanup belongs here.
+        """
         pending = self._pending_welcomes.pop(member.id, None)
         if pending:
             task = pending.get("task")
             if task and not task.done():
                 task.cancel()
 
-        gc = self._guild_config(member.guild.id)
-        exit_ch_id = gc.get("exit_channel_id")
-        mod_ch_id = gc.get("mod_channel_id")
-        if not exit_ch_id and not mod_ch_id:
-            return
-
-        exit_channel = None
-        if exit_ch_id:
-            exit_channel = member.guild.get_channel(exit_ch_id)
-            if not exit_channel:
-                try:
-                    exit_channel = await member.guild.fetch_channel(exit_ch_id)
-                except Exception:
-                    exit_channel = None
-
-        mod_channel = None
-        if mod_ch_id:
-            mod_channel = member.guild.get_channel(mod_ch_id)
-            if not mod_channel:
-                try:
-                    mod_channel = await member.guild.fetch_channel(mod_ch_id)
-                except Exception:
-                    mod_channel = None
-
-        if not exit_channel and not mod_channel:
-            return
-
-        # Small delay to let audit log populate for kicks/bans
-        await asyncio.sleep(2)
-
-        # Check audit log for kick or ban
-        action_type = "left"
-        moderator = None
-        reason = None
-        is_inactivity_kick = False
-
-        try:
-            # Check for ban first
-            async for entry in member.guild.audit_logs(limit=5, action=discord.AuditLogAction.ban):
-                if entry.target and entry.target.id == member.id:
-                    if (discord.utils.utcnow() - entry.created_at).total_seconds() < 15:
-                        action_type = "banned"
-                        moderator = entry.user
-                        reason = entry.reason
-                        break
-
-            # If not banned, check for kick
-            if action_type == "left":
-                async for entry in member.guild.audit_logs(limit=5, action=discord.AuditLogAction.kick):
-                    if entry.target and entry.target.id == member.id:
-                        if (discord.utils.utcnow() - entry.created_at).total_seconds() < 15:
-                            action_type = "kicked"
-                            moderator = entry.user
-                            reason = entry.reason
-                            # Parse inactivity kicks to attribute to the real admin
-                            if reason and reason.startswith("Inactivity | admin:"):
-                                is_inactivity_kick = True
-                                try:
-                                    admin_id = int(reason.split("admin:")[1])
-                                    admin = member.guild.get_member(admin_id) or await member.guild.fetch_member(admin_id)
-                                    if admin:
-                                        moderator = admin
-                                except (ValueError, IndexError, discord.NotFound):
-                                    pass
-                                reason = "Inactivity"
-                            break
-        except discord.Forbidden:
-            pass  # No audit log permission
-
-        if action_type == "kicked":
-            # Inactivity kicks get their own light blue so they stand out
-            # from regular moderator kicks (orange).
-            color = INACTIVITY_KICK_COLOR if is_inactivity_kick else discord.Color.orange()
-            footer = f"Kicked by {moderator}"
-            if reason:
-                footer += f" — {reason}"
-        elif action_type == "banned":
-            color = discord.Color.red()
-            footer = f"Banned by {moderator}"
-            if reason:
-                footer += f" — {reason}"
-        else:
-            color = discord.Color.yellow()
-            footer = "Left"
-
-        embed = discord.Embed(
-            description=f"{member.name}\n<@{member.id}>",
-            color=color,
-        )
-        embed.set_author(name=member.display_name, icon_url=member.display_avatar.url)
-        embed.set_thumbnail(url=member.display_avatar.url)
-        embed.set_footer(text=footer)
-
-        # Send to exit channel (all events)
-        if exit_channel:
-            await exit_channel.send(embed=embed)
-
-        # Send to mod channel (kicks and bans only, skip inactivity kicks)
-        if mod_channel and action_type in ("kicked", "banned") and not is_inactivity_kick:
-            await mod_channel.send(embed=embed)
-
-    # ------------------------------------------------------------------
-    # TIMEOUT DETECTION
-    # ------------------------------------------------------------------
-    async def _handle_timeout(self, member: discord.Member):
-        gc = self._guild_config(member.guild.id)
-        mod_ch_id = gc.get("mod_channel_id")
-        if not mod_ch_id:
-            return
-
-        channel = member.guild.get_channel(mod_ch_id)
-        if not channel:
-            try:
-                channel = await member.guild.fetch_channel(mod_ch_id)
-            except Exception:
-                return
-
-        # Small delay for audit log to populate
-        await asyncio.sleep(2)
-
-        moderator = None
-        reason = None
-        try:
-            async for entry in member.guild.audit_logs(limit=5, action=discord.AuditLogAction.member_update):
-                if entry.target and entry.target.id == member.id:
-                    if (discord.utils.utcnow() - entry.created_at).total_seconds() < 15:
-                        moderator = entry.user
-                        reason = entry.reason
-                        break
-        except discord.Forbidden:
-            pass
-
-        # Calculate duration
-        duration_str = "Unknown duration"
-        if member.timed_out_until:
-            delta = member.timed_out_until - discord.utils.utcnow()
-            total_seconds = int(delta.total_seconds())
-            if total_seconds > 0:
-                days, remainder = divmod(total_seconds, 86400)
-                hours, remainder = divmod(remainder, 3600)
-                minutes, _ = divmod(remainder, 60)
-                parts = []
-                if days:
-                    parts.append(f"{days}d")
-                if hours:
-                    parts.append(f"{hours}h")
-                if minutes:
-                    parts.append(f"{minutes}m")
-                duration_str = " ".join(parts) if parts else "<1m"
-
-        footer = f"Timed out by {moderator}" if moderator else "Timed out"
-        footer += f" — {duration_str}"
-        if reason:
-            footer += f" — {reason}"
-
-        embed = discord.Embed(
-            description=f"{member.name}\n<@{member.id}>",
-            color=discord.Color.dark_gold(),
-        )
-        embed.set_author(name=member.display_name, icon_url=member.display_avatar.url)
-        embed.set_thumbnail(url=member.display_avatar.url)
-        embed.set_footer(text=footer)
-
-        await channel.send(embed=embed)
-
     # ------------------------------------------------------------------
     # ADMIN PANEL
     # ------------------------------------------------------------------
-    @app_commands.command(name="alerts_panel", description="Admin: Configure the Alerts system (Welcome, Exit & Mod)")
+    @app_commands.command(name="alerts_panel", description="Admin: Configure the welcome system")
     async def alerts_panel(self, interaction: discord.Interaction):
         if not self.bot.is_bot_admin(interaction.user):
             return await interaction.response.send_message("Admin access only.", ephemeral=True)
@@ -486,18 +315,16 @@ class AlertsPanelView(ui.View):
         guild = interaction.guild
 
         welcome_ch = f"<#{gc['welcome_channel_id']}>" if gc.get("welcome_channel_id") else "Not set"
-        exit_ch = f"<#{gc['exit_channel_id']}>" if gc.get("exit_channel_id") else "Not set"
-        mod_ch = f"<#{gc['mod_channel_id']}>" if gc.get("mod_channel_id") else "Not set"
         intro_ch = f"<#{gc['intro_channel_id']}>" if gc.get("intro_channel_id") else "Not set"
         lfg_forum = f"<#{gc['lfg_forum_id']}>" if gc.get("lfg_forum_id") else "Not set"
 
         lines = [
             "**Current Configuration**",
             f"Welcome Channel: {welcome_ch}",
-            f"Exit Channel: {exit_ch}",
-            f"Mod Channel: {mod_ch}",
             f"Intro Channel: {intro_ch}",
             f"LFG Forum: {lfg_forum}",
+            "",
+            "*Exit and mod channels are configured in `/audit_panel`.*",
             "",
             "**Game Mappings**",
         ]
@@ -539,41 +366,9 @@ class ChannelConfigView(ui.View):
             f"Welcome channel set to {select.values[0].mention}", ephemeral=True
         )
 
-    @ui.select(
-        cls=ui.ChannelSelect,
-        placeholder="Exit Channel",
-        min_values=1, max_values=1,
-        channel_types=[
-            discord.ChannelType.text,
-            discord.ChannelType.public_thread,
-            discord.ChannelType.private_thread,
-        ],
-    )
-    async def exit_ch(self, interaction: discord.Interaction, select: ui.ChannelSelect):
-        gc = self.cog._guild_config(self.guild_id)
-        gc["exit_channel_id"] = select.values[0].id
-        await self.cog._save_config()
-        await interaction.response.send_message(
-            f"Exit channel set to {select.values[0].mention}", ephemeral=True
-        )
-
-    @ui.select(
-        cls=ui.ChannelSelect,
-        placeholder="Mod Channel (kick/ban/timeout alerts)",
-        min_values=1, max_values=1,
-        channel_types=[
-            discord.ChannelType.text,
-            discord.ChannelType.public_thread,
-            discord.ChannelType.private_thread,
-        ],
-    )
-    async def mod_ch(self, interaction: discord.Interaction, select: ui.ChannelSelect):
-        gc = self.cog._guild_config(self.guild_id)
-        gc["mod_channel_id"] = select.values[0].id
-        await self.cog._save_config()
-        await interaction.response.send_message(
-            f"Mod channel set to {select.values[0].mention}", ephemeral=True
-        )
+    # The Exit and Mod channel pickers moved to /audit_panel along with the
+    # leave/kick/ban embeds themselves. Leaving them here would have meant a
+    # control that saves to a file nothing reads any more.
 
     @ui.select(
         cls=ui.ChannelSelect,

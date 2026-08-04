@@ -126,18 +126,25 @@ ALLOWED_SETTING_KEYS = {
     "batch_seconds", "log_bot_messages",
 }
 
-# Channel slots the panel can assign, in display order.
+# Channel slots the panel can assign, in display order. A slot names either a
+# settings column, a whole category, or a single event — an event slot overrides
+# its category, so profile churn can be kept out of the members channel without
+# turning it off entirely.
 CHANNEL_TARGETS: Dict[str, Dict[str, Any]] = {
     "default":  {"label": "Default", "column": "default_channel_id",
                  "help": "Fallback for any category without its own channel."},
     "messages": {"label": "Messages", "category": "messages",
                  "help": "Deletes, edits, bulk deletes."},
     "members":  {"label": "Members", "category": "members",
-                 "help": "Joins, names, avatars, nicknames."},
+                 "help": "Joins, nicknames, and anything not split out below."},
     "roles":    {"label": "Roles", "category": "roles",
                  "help": "Member role changes, role edits."},
     "server":   {"label": "Server", "category": "server",
                  "help": "Channel renames and permission changes."},
+    "usernames": {"label": "Usernames", "event": "username_change",
+                  "help": "Username changes only. Falls back to Members."},
+    "avatars":  {"label": "Avatars", "event": "avatar_change",
+                 "help": "Avatar changes only. Falls back to Members."},
     "exit":     {"label": "Exit", "column": "exit_channel_id",
                  "help": "All leaves, kicks and bans."},
     "mod":      {"label": "Mod", "column": "mod_channel_id",
@@ -261,7 +268,8 @@ class AuditDB:
         # guild's entry whenever the panel writes. Reads outnumber writes by
         # several orders of magnitude.
         self._cache: Dict[str, Dict[int, Any]] = {
-            "settings": {}, "categories": {}, "toggles": {}, "ignored": {},
+            "settings": {}, "categories": {}, "events": {},
+            "toggles": {}, "ignored": {},
         }
 
     def _invalidate(self, guild_id: int, *kinds: str):
@@ -299,6 +307,12 @@ class AuditDB:
                 category   TEXT    NOT NULL,
                 channel_id INTEGER,
                 PRIMARY KEY (guild_id, category)
+            );
+            CREATE TABLE IF NOT EXISTS event_channels (
+                guild_id   INTEGER NOT NULL,
+                event_key  TEXT    NOT NULL,
+                channel_id INTEGER,
+                PRIMARY KEY (guild_id, event_key)
             );
             CREATE TABLE IF NOT EXISTS event_toggles (
                 guild_id  INTEGER NOT NULL,
@@ -398,6 +412,41 @@ class AuditDB:
                 )
             await self._conn.commit()
         self._invalidate(guild_id, "categories")
+
+    async def get_event_channels(self, guild_id: int) -> Dict[str, Optional[int]]:
+        """Per-event channel overrides, which win over the category channel."""
+        cached = self._cache["events"].get(guild_id)
+        if cached is not None:
+            return cached
+        async with self._lock:
+            cur = await self._conn.execute(
+                "SELECT event_key, channel_id FROM event_channels WHERE guild_id = ?",
+                (guild_id,),
+            )
+            channels = {r["event_key"]: r["channel_id"] for r in await cur.fetchall()}
+        self._cache["events"][guild_id] = channels
+        return channels
+
+    async def set_event_channel(self, guild_id: int, event_key: str,
+                                channel_id: Optional[int]):
+        if event_key not in EVENTS:
+            logger.error("Rejected channel override for unknown event: %s", event_key)
+            return
+        async with self._lock:
+            if channel_id is None:
+                await self._conn.execute(
+                    "DELETE FROM event_channels WHERE guild_id = ? AND event_key = ?",
+                    (guild_id, event_key),
+                )
+            else:
+                await self._conn.execute(
+                    "INSERT INTO event_channels (guild_id, event_key, channel_id) "
+                    "VALUES (?, ?, ?) ON CONFLICT(guild_id, event_key) "
+                    "DO UPDATE SET channel_id = excluded.channel_id",
+                    (guild_id, event_key, channel_id),
+                )
+            await self._conn.commit()
+        self._invalidate(guild_id, "events")
 
     async def get_toggles(self, guild_id: int) -> Dict[str, bool]:
         """Stored overrides layered over each event's default."""
@@ -710,6 +759,9 @@ class AuditLog(commands.Cog):
         one of them to the exit channel, and kicks and bans additionally to the
         mod channel — except inactivity kicks, which are automated housekeeping
         rather than something a moderator needs to see twice.
+
+        Everything else resolves event override → category → default, so a slot
+        left unset simply inherits rather than dropping the event.
         """
         settings = await self.db.get_settings(guild.id)
 
@@ -731,8 +783,11 @@ class AuditLog(commands.Cog):
             return targets
 
         category = EVENTS[event_key][0]
+        event_channels = await self.db.get_event_channels(guild.id)
         cat_channels = await self.db.get_category_channels(guild.id)
-        channel_id = cat_channels.get(category) or settings["default_channel_id"]
+        channel_id = (event_channels.get(event_key)
+                      or cat_channels.get(category)
+                      or settings["default_channel_id"])
         channel = await self._resolve_channel(guild, channel_id)
         return [channel] if channel else []
 
@@ -2083,11 +2138,13 @@ class ChannelsPage(AuditPage):
     async def build_embed(self, guild: discord.Guild) -> discord.Embed:
         settings = await self.cog.db.get_settings(guild.id)
         cats = await self.cog.db.get_category_channels(guild.id)
+        events = await self.cog.db.get_event_channels(guild.id)
 
         embed = discord.Embed(
             title="Channels",
             description=("Each category falls back to the default channel when it "
-                         "has none of its own.\n"
+                         "has none of its own, and **Usernames** and **Avatars** "
+                         "fall back to Members.\n"
                          "Leaves, kicks and bans always go to **Exit**; kicks and "
                          "bans also go to **Mod**, except inactivity kicks."),
             color=COLOR_NEUTRAL,
@@ -2095,6 +2152,13 @@ class ChannelsPage(AuditPage):
         for key, spec in CHANNEL_TARGETS.items():
             if "column" in spec:
                 value = channel_label(guild, settings[spec["column"]])
+            elif "event" in spec:
+                cid = events.get(spec["event"])
+                value = channel_label(guild, cid)
+                if not cid:
+                    category = EVENTS[spec["event"]][0]
+                    inherited = cats.get(category) or settings["default_channel_id"]
+                    value += f" → {channel_label(guild, inherited)}"
             else:
                 cid = cats.get(spec["category"])
                 value = channel_label(guild, cid)
@@ -2121,6 +2185,10 @@ class ChannelTargetPage(AuditPage):
     async def _save(self, guild_id: int, channel_id: Optional[int]):
         if "column" in self.spec:
             await self.cog.db.set_setting(guild_id, self.spec["column"], channel_id)
+        elif "event" in self.spec:
+            await self.cog.db.set_event_channel(
+                guild_id, self.spec["event"], channel_id
+            )
         else:
             await self.cog.db.set_category_channel(
                 guild_id, self.spec["category"], channel_id
@@ -2139,15 +2207,30 @@ class ChannelTargetPage(AuditPage):
 
     async def build_embed(self, guild: discord.Guild) -> discord.Embed:
         settings = await self.cog.db.get_settings(guild.id)
+        note = ""
         if "column" in self.spec:
             current = settings[self.spec["column"]]
+        elif "event" in self.spec:
+            event_key = self.spec["event"]
+            events = await self.cog.db.get_event_channels(guild.id)
+            current = events.get(event_key)
+            if not current:
+                cats = await self.cog.db.get_category_channels(guild.id)
+                inherited = (cats.get(EVENTS[event_key][0])
+                             or settings["default_channel_id"])
+                note = f"\nInheriting: {channel_label(guild, inherited)}"
+            toggles = await self.cog.db.get_toggles(guild.id)
+            if not toggles.get(event_key):
+                note += (f"\n\n*{EVENTS[event_key][1]} is currently turned off, so "
+                         f"nothing will be posted here until you enable it under "
+                         f"Events.*")
         else:
             cats = await self.cog.db.get_category_channels(guild.id)
             current = cats.get(self.spec["category"])
         return discord.Embed(
             title=self.spec["label"],
             description=(f"{self.spec['help']}\n\n"
-                         f"Currently: {channel_label(guild, current)}"),
+                         f"Currently: {channel_label(guild, current)}{note}"),
             color=COLOR_NEUTRAL,
         )
 

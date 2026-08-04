@@ -7179,26 +7179,63 @@ class CustomMatch(commands.Cog):
             match_id, cancelled=1, ended_at=datetime.now(timezone.utc).isoformat()
         )
 
-        # Stop stats retry so we don't fetch/store stats for a cancelled match
-        await DatabaseHelper.update_stats_retry(
-            match_id, status='exhausted', last_reason='match cancelled'
-        )
+        # Stop stats retry so we don't fetch/store stats for a cancelled match.
+        # Bookkeeping for a side pipeline must never be able to abort the cancel
+        # itself — a raise here used to leave the match un-cleaned: channels,
+        # VCs and team roles all still live with the match already marked dead.
+        try:
+            await DatabaseHelper.update_stats_retry(
+                match_id, status='exhausted', last_reason='match cancelled'
+            )
+        except Exception as e:
+            logger.warning(f"Cancel {match_id}: stats retry update failed: {e}")
 
         # Cancel timeout
         if match_id in self.match_timeout_tasks:
             self.match_timeout_tasks[match_id].cancel()
             del self.match_timeout_tasks[match_id]
 
-        await self.cleanup_match(guild, match)
-
         game = await DatabaseHelper.get_game(match["game_id"])
         short_id = match.get("short_id") or str(match_id)
 
-        # Build detailed log message
-        log_msg = f"Match {short_id} cancelled. Reason: {reason}"
+        # Announce before cleanup: the match channel is about to be deleted, so
+        # the notice goes where it survives — the game channel players watch, and
+        # the admin log.
+        await self._announce_match_cancelled(guild, game, short_id, reason, cancelled_by)
+
+        await self.cleanup_match(guild, match)
+
+    async def _announce_match_cancelled(self, guild: discord.Guild, game: Optional[GameConfig],
+                                        short_id: str, reason: str,
+                                        cancelled_by: Optional[int] = None):
+        """Post the cancellation embed to the game channel and the log channel."""
+        embed = discord.Embed(
+            title="Match Cancelled",
+            color=discord.Color.red(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.add_field(name="Reason", value=reason, inline=False)
         if cancelled_by:
-            log_msg += f" (by <@{cancelled_by}>)"
-        await self.log_action(guild, log_msg)
+            embed.add_field(name="Cancelled by", value=f"<@{cancelled_by}>", inline=True)
+        embed.set_footer(text=f"Match {short_id}")
+
+        targets = []
+        if game and game.game_channel_id:
+            targets.append(game.game_channel_id)
+        log_channel_id = await DatabaseHelper.get_config("log_channel_id")
+        if log_channel_id:
+            targets.append(int(log_channel_id))
+
+        # dict.fromkeys: preserve order, and don't post twice when a game points
+        # its game channel at the log channel.
+        for channel_id in dict.fromkeys(targets):
+            channel = guild.get_channel(channel_id)
+            if not channel:
+                continue
+            try:
+                await channel.send(embed=embed)
+            except Exception as e:
+                logger.error(f"Cancel notice failed in channel {channel_id}: {e}")
     
     # -------------------------------------------------------------------------
     # Marvel Rivals: scoreboard screenshot upload pipeline

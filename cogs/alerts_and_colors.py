@@ -605,10 +605,13 @@ class AlertsAndColors(commands.Cog):
         """Build the dropdown view for a section. Returns None if no roles are configured."""
         if section == "alerts":
             role_ids = cfg["alert_roles"][:MAX_ALERT_ROLES]
+            roles = [r for r in (guild.get_role(rid) for rid in role_ids) if r]
+            roles.sort(key=lambda r: r.name.casefold())
+            # Remove-all stays pinned at the top; the rest is always A-Z.
             options = [discord.SelectOption(label="❌ Remove all alerts", value=REMOVE_VALUE)]
             options += [
-                discord.SelectOption(label=guild.get_role(rid).name[:100], value=str(rid))
-                for rid in role_ids if guild.get_role(rid)
+                discord.SelectOption(label=role.name[:100], value=str(role.id))
+                for role in roles
             ]
             if len(options) <= 1:
                 return None

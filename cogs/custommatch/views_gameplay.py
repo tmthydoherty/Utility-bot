@@ -1297,32 +1297,20 @@ class CancelMatchModal(discord.ui.Modal, title="Cancel Match"):
         reason = self.reason_input.value.strip()
         admin = interaction.user
 
-        # Post cancellation embed in match channel before cleanup
-        match = await DatabaseHelper.get_match(self.match_id)
-        if match and match.get("channel_id"):
-            channel = interaction.guild.get_channel(match["channel_id"])
-            if channel:
-                embed = discord.Embed(
-                    title="Match Cancelled",
-                    color=discord.Color.red(),
-                    timestamp=datetime.now(timezone.utc)
-                )
-                embed.add_field(name="Reason", value=reason, inline=False)
-                embed.add_field(name="Cancelled by", value=admin.mention, inline=True)
-                embed.set_footer(text=f"Match {self.short_id}")
-                try:
-                    await channel.send(embed=embed)
-                    # Give players a moment to see the message before channel is deleted
-                    await asyncio.sleep(5)
-                except Exception:
-                    pass
+        # Answer the modal first. Cancelling tears down channels, VCs and roles,
+        # which comfortably outruns the 3s interaction window; deferring means a
+        # slow cleanup can no longer cost the admin their confirmation.
+        await interaction.response.defer(ephemeral=True)
 
+        # The cancellation embed is posted by cancel_match itself, to the game
+        # channel and the log channel — not the match channel, which cleanup is
+        # about to delete.
         await self.cog.cancel_match(
             interaction.guild, self.match_id,
             reason=reason,
             cancelled_by=admin.id
         )
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"Match {self.short_id} cancelled. Reason: {reason}", ephemeral=True
         )
 

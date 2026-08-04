@@ -76,15 +76,6 @@ async def get_question_counts():
 
 # --- Modals for User Input ---
 
-class ReasonModal(discord.ui.Modal, title="Reason for Decision"):
-    reason = discord.ui.TextInput(label="Reason", style=discord.TextStyle.paragraph, required=True, max_length=512)
-    def __init__(self, original_interaction: discord.Interaction, decision: str): super().__init__(); self.original_interaction = original_interaction; self.decision = decision
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            await interaction.response.defer()
-        except discord.HTTPException:
-            pass # Failed to defer, but proceed anyway
-
 class SuggestionModal(discord.ui.Modal, title="Suggest a Question"):
     question = discord.ui.TextInput(label="Your Question Suggestion", style=discord.TextStyle.paragraph, required=True, max_length=256)
     async def on_submit(self, interaction: discord.Interaction):
@@ -357,10 +348,10 @@ class SuggestionReviewView(discord.ui.View):
     # This view IS persistent and registered in cog_load
     def __init__(self, suggestion_id: int):
         super().__init__(timeout=None); self.suggestion_id = suggestion_id
-        self.approve_button.custom_id = f"qotd_approve_{suggestion_id}"; self.approve_w_reason_button.custom_id = f"qotd_approve_reason_{suggestion_id}"
-        self.deny_button.custom_id = f"qotd_deny_{suggestion_id}"; self.deny_w_reason_button.custom_id = f"qotd_deny_reason_{suggestion_id}"
-    
-    async def _handle_decision(self, interaction: discord.Interaction, decision: str, reason: Optional[str] = None):
+        self.approve_button.custom_id = f"qotd_approve_{suggestion_id}"
+        self.deny_button.custom_id = f"qotd_deny_{suggestion_id}"
+
+    async def _handle_decision(self, interaction: discord.Interaction, decision: str):
         async with aiosqlite.connect(DB_FILE) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute("SELECT * FROM suggestions WHERE id = ?", (self.suggestion_id,)) as cursor:
@@ -400,7 +391,6 @@ class SuggestionReviewView(discord.ui.View):
 
         if suggester:
             try:
-                if reason: dm_message += f"\n\n**Reason:**\n{reason}"
                 await suggester.send(dm_message)
             except discord.Forbidden: pass # Cannot DM user
         
@@ -408,16 +398,8 @@ class SuggestionReviewView(discord.ui.View):
     
     @discord.ui.button(label="Approve", style=discord.ButtonStyle.success)
     async def approve_button(self, interaction: discord.Interaction, button: discord.ui.Button): await self._handle_decision(interaction, "approve")
-    @discord.ui.button(label="Approve w/ Reason", style=discord.ButtonStyle.success, row=1)
-    async def approve_w_reason_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        modal = ReasonModal(interaction, "approve"); await interaction.response.send_modal(modal); timed_out = await modal.wait()
-        if not timed_out: await self._handle_decision(modal.original_interaction, "approve", modal.reason.value)
     @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger)
     async def deny_button(self, interaction: discord.Interaction, button: discord.ui.Button): await self._handle_decision(interaction, "deny")
-    @discord.ui.button(label="Deny w/ Reason", style=discord.ButtonStyle.danger, row=1)
-    async def deny_w_reason_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        modal = ReasonModal(interaction, "deny"); await interaction.response.send_modal(modal); timed_out = await modal.wait()
-        if not timed_out: await self._handle_decision(modal.original_interaction, "deny", modal.reason.value)
 
 class ResetConfirmView(discord.ui.View):
     def __init__(self, cog, panel_message: discord.Message):

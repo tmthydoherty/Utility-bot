@@ -1,64 +1,48 @@
 {
     "global_data": {
         "scores": {
-            "350399886950268941": {
-                "score": 22,
-                "timestamp": "2026-07-27T00:22:22.010964+00:00"
-            },
-            "356774449032331264": {
-                "score": 18,
-                "timestamp": "2026-08-01T00:26:08.225223+00:00"
-            },
-            "676148847147483137": {
-                "score": 21,
-                "timestamp": "2026-07-31T04:22:23.851558+00:00"
-            },
             "739592205265535007": {
-                "score": 23,
-                "timestamp": "2026-07-31T02:09:16.486969+00:00"
-            },
-            "560914996549386242": {
-                "score": 28,
-                "timestamp": "2026-08-01T00:24:30.586669+00:00"
-            },
-            "756992075353948243": {
-                "score": 11,
-                "timestamp": "2026-07-28T15:09:18.981587+00:00"
-            },
-            "629824074268278795": {
-                "score": 12,
-                "timestamp": "2026-07-24T10:32:23.649312+00:00"
-            },
-            "495858386936791040": {
-                "score": 12,
-                "timestamp": "2026-07-31T05:21:35.917893+00:00"
-            },
-            "562801560640552980": {
-                "score": 1,
-                "timestamp": "2026-07-10T00:35:09.431001+00:00"
-            },
-            "732384312200003605": {
-                "score": 3,
-                "timestamp": "2026-07-21T21:34:10.790322+00:00"
-            },
-            "280095356195438592": {
                 "score": 0,
                 "timestamp": null
+            },
+            "356774449032331264": {
+                "score": 1,
+                "timestamp": "2026-08-02T00:39:32.303574+00:00"
+            },
+            "676148847147483137": {
+                "score": 3,
+                "timestamp": "2026-08-04T01:48:31.369536+00:00"
+            },
+            "350399886950268941": {
+                "score": 0,
+                "timestamp": null
+            },
+            "560914996549386242": {
+                "score": 2,
+                "timestamp": "2026-08-03T00:40:19.381821+00:00"
+            },
+            "732384312200003605": {
+                "score": 0,
+                "timestamp": null
+            },
+            "495858386936791040": {
+                "score": 1,
+                "timestamp": "2026-08-03T18:18:01.445013+00:00"
             }
         },
         "user_stats": {
             "356774449032331264": {
-                "correct": 47,
-                "incorrect": 35,
-                "current_streak": 1,
+                "correct": 48,
+                "incorrect": 37,
+                "current_streak": 0,
                 "longest_streak": 6,
-                "all_time_score": 47,
-                "all_time_timestamp": "2026-08-01T00:26:08.225223+00:00",
-                "streak_achieved_at": "2026-08-01T00:26:08.225198+00:00"
+                "all_time_score": 48,
+                "all_time_timestamp": "2026-08-02T00:39:32.303574+00:00",
+                "streak_achieved_at": null
             },
             "350399886950268941": {
                 "correct": 53,
-                "incorrect": 28,
+                "incorrect": 30,
                 "current_streak": 0,
                 "longest_streak": 9,
                 "all_time_score": 53,
@@ -67,7 +51,7 @@
             },
             "739592205265535007": {
                 "correct": 62,
-                "incorrect": 21,
+                "incorrect": 24,
                 "current_streak": 0,
                 "longest_streak": 15,
                 "all_time_score": 62,
@@ -75,13 +59,13 @@
                 "streak_achieved_at": null
             },
             "560914996549386242": {
-                "correct": 70,
+                "correct": 72,
                 "incorrect": 13,
-                "current_streak": 1,
+                "current_streak": 3,
                 "longest_streak": 27,
-                "all_time_score": 70,
-                "all_time_timestamp": "2026-08-01T00:24:30.586669+00:00",
-                "streak_achieved_at": "2026-08-01T00:24:30.586651+00:00"
+                "all_time_score": 72,
+                "all_time_timestamp": "2026-08-03T00:40:19.381821+00:00",
+                "streak_achieved_at": "2026-08-03T00:40:19.381796+00:00"
             },
             "298607678073208832": {
                 "correct": 26,
@@ -93,13 +77,13 @@
                 "streak_achieved_at": null
             },
             "676148847147483137": {
-                "correct": 52,
+                "correct": 55,
                 "incorrect": 30,
-                "current_streak": 0,
+                "current_streak": 3,
                 "longest_streak": 10,
-                "all_time_score": 52,
-                "all_time_timestamp": "2026-07-31T04:22:23.851558+00:00",
-                "streak_achieved_at": null
+                "all_time_score": 55,
+                "all_time_timestamp": "2026-08-04T01:48:31.369536+00:00",
+                "streak_achieved_at": "2026-08-04T01:48:31.369520+00:00"
             },
             "453901510968082432": {
                 "correct": 16,
@@ -120,17 +104,17 @@
                 "streak_achieved_at": null
             },
             "495858386936791040": {
-                "correct": 40,
+                "correct": 41,
                 "incorrect": 14,
                 "current_streak": 1,
                 "longest_streak": 6,
-                "all_time_score": 40,
-                "all_time_timestamp": "2026-07-31T05:21:35.917893+00:00",
-                "streak_achieved_at": "2026-07-31T05:21:35.917865+00:00"
+                "all_time_score": 41,
+                "all_time_timestamp": "2026-08-03T18:18:01.445013+00:00",
+                "streak_achieved_at": "2026-08-03T18:18:01.444982+00:00"
             },
             "732384312200003605": {
                 "correct": 7,
-                "incorrect": 11,
+                "incorrect": 12,
                 "current_streak": 0,
                 "longest_streak": 2,
                 "all_time_score": 7,
@@ -139,7 +123,7 @@
             },
             "756992075353948243": {
                 "correct": 27,
-                "incorrect": 19,
+                "incorrect": 20,
                 "current_streak": 0,
                 "longest_streak": 3,
                 "all_time_score": 27,
@@ -202,144 +186,96 @@
             }
         },
         "daily_question_data": {
-            "quote": "The only power I have is that I believe we can do better.",
-            "character": "Sam Wilson",
-            "movie_title": "The Falcon and the Winter Soldier",
-            "genre": "Action, Adventure, Sci-Fi",
+            "quote": "It's a dangerous thing to mistake speaking without thought for speaking the truth.",
+            "character": "Benoit Blanc",
+            "movie_title": "Glass Onion: A Knives Out Mystery",
+            "genre": "Comedy, Crime, Mystery",
             "difficulty": "easy",
-            "correct": "The Falcon and the Winter Soldier",
+            "correct": "Glass Onion: A Knives Out Mystery",
             "answers": [
-                "Ms. Marvel",
-                "Loki",
-                "The Falcon and the Winter Soldier",
-                "Hawkeye"
+                "See How They Run",
+                "A Haunting in Venice",
+                "Death on the Nile",
+                "Glass Onion: A Knives Out Mystery"
             ],
-            "correct_index": 2,
+            "correct_index": 3,
             "question_type": "movie",
-            "quote_id": 474,
+            "quote_id": 425,
             "guild_id": 1431565435010289778,
             "approved": true
         },
         "daily_interactions": [
             {
                 "user_id": "739592205265535007",
-                "answer_index": 3,
-                "correct": false,
-                "snapshot": {
-                    "streak": 1,
-                    "longest_streak": 15,
-                    "streak_achieved_at": "2026-07-31T02:09:16.486950+00:00",
-                    "correct": 62,
-                    "incorrect": 20,
-                    "all_time_score": 62,
-                    "all_time_timestamp": "2026-07-31T02:09:16.486969+00:00",
-                    "monthly_score": 23,
-                    "monthly_timestamp": "2026-07-31T02:09:16.486969+00:00"
-                }
-            },
-            {
-                "user_id": "732384312200003605",
                 "answer_index": 1,
                 "correct": false,
                 "snapshot": {
                     "streak": 0,
-                    "longest_streak": 2,
+                    "longest_streak": 15,
                     "streak_achieved_at": null,
-                    "correct": 7,
-                    "incorrect": 10,
-                    "all_time_score": 7,
-                    "all_time_timestamp": "2026-07-21T21:34:10.790322+00:00",
-                    "monthly_score": 3,
-                    "monthly_timestamp": "2026-07-21T21:34:10.790322+00:00"
-                }
-            },
-            {
-                "user_id": "560914996549386242",
-                "answer_index": 2,
-                "correct": true,
-                "snapshot": {
-                    "streak": 0,
-                    "longest_streak": 27,
-                    "streak_achieved_at": null,
-                    "correct": 69,
-                    "incorrect": 13,
-                    "all_time_score": 69,
-                    "all_time_timestamp": "2026-07-30T00:17:45.035128+00:00",
-                    "monthly_score": 27,
-                    "monthly_timestamp": "2026-07-30T00:17:45.035128+00:00"
-                }
-            },
-            {
-                "user_id": "350399886950268941",
-                "answer_index": 0,
-                "correct": false,
-                "snapshot": {
-                    "streak": 0,
-                    "longest_streak": 9,
-                    "streak_achieved_at": null,
-                    "correct": 53,
-                    "incorrect": 27,
-                    "all_time_score": 53,
-                    "all_time_timestamp": "2026-07-27T00:22:22.010964+00:00",
-                    "monthly_score": 22,
-                    "monthly_timestamp": "2026-07-27T00:22:22.010964+00:00"
+                    "correct": 62,
+                    "incorrect": 23,
+                    "all_time_score": 62,
+                    "all_time_timestamp": "2026-07-31T02:09:16.486969+00:00",
+                    "monthly_score": 0,
+                    "monthly_timestamp": null
                 }
             },
             {
                 "user_id": "356774449032331264",
                 "answer_index": 2,
-                "correct": true,
+                "correct": false,
                 "snapshot": {
                     "streak": 0,
                     "longest_streak": 6,
                     "streak_achieved_at": null,
-                    "correct": 46,
-                    "incorrect": 35,
-                    "all_time_score": 46,
-                    "all_time_timestamp": "2026-07-28T00:49:49.778905+00:00",
-                    "monthly_score": 17,
-                    "monthly_timestamp": "2026-07-28T00:49:49.778905+00:00"
+                    "correct": 48,
+                    "incorrect": 36,
+                    "all_time_score": 48,
+                    "all_time_timestamp": "2026-08-02T00:39:32.303574+00:00",
+                    "monthly_score": 1,
+                    "monthly_timestamp": "2026-08-02T00:39:32.303574+00:00"
                 }
             },
             {
                 "user_id": "676148847147483137",
                 "answer_index": 3,
-                "correct": false,
+                "correct": true,
                 "snapshot": {
-                    "streak": 1,
+                    "streak": 2,
                     "longest_streak": 10,
-                    "streak_achieved_at": "2026-07-31T04:22:23.851525+00:00",
-                    "correct": 52,
-                    "incorrect": 29,
-                    "all_time_score": 52,
-                    "all_time_timestamp": "2026-07-31T04:22:23.851558+00:00",
-                    "monthly_score": 21,
-                    "monthly_timestamp": "2026-07-31T04:22:23.851558+00:00"
+                    "streak_achieved_at": "2026-08-03T00:00:14.844016+00:00",
+                    "correct": 54,
+                    "incorrect": 30,
+                    "all_time_score": 54,
+                    "all_time_timestamp": "2026-08-03T00:00:14.844045+00:00",
+                    "monthly_score": 2,
+                    "monthly_timestamp": "2026-08-03T00:00:14.844045+00:00"
                 }
             }
         ],
         "daily_answer_times": [],
         "used_quote_ids": [
-            474,
-            451
+            425,
+            437
         ],
         "blocked_users": [],
         "pending_question_data": {
-            "quote": "If you feel it, chase it.",
-            "character": "Tyler Owens",
-            "movie_title": "Twisters",
-            "genre": "Action, Adventure, Thriller",
-            "difficulty": "easy",
-            "correct": "Twisters",
+            "quote": "It's an in-yun if two strangers even walk by each other in the street and their clothes accidentally brush.",
+            "character": "Nora Moon",
+            "movie_title": "Past Lives",
+            "genre": "Drama, Romance",
+            "difficulty": "hard",
+            "correct": "Past Lives",
             "answers": [
-                "Moonfall",
-                "Twisters",
-                "Greenland",
-                "San Andreas"
+                "Minari",
+                "Aftersun",
+                "Past Lives",
+                "Call Me by Your Name"
             ],
-            "correct_index": 1,
+            "correct_index": 2,
             "question_type": "movie",
-            "quote_id": 451,
+            "quote_id": 437,
             "guild_id": 1431565435010289778,
             "approved": true
         }
@@ -348,8 +284,8 @@
         "1431565435010289778": {
             "channel_id": 1463938795131895868,
             "enabled": true,
-            "gateway_message_id": 1532900676340940966,
-            "last_posted_date": "2026-07-31",
+            "gateway_message_id": 1533987841518866718,
+            "last_posted_date": "2026-08-03",
             "last_winner_announcement": null,
             "last_low_quote_alert_date": "2026-07-27",
             "screening_enabled": true,

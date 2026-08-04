@@ -22,9 +22,42 @@ ADMIN_EMBED_COLOR = 0x3498DB
 VOTE_MAP_COUNT = 3
 MAPS_ASSETS_DIR = Path(__file__).parent.parent / "assets" / "maps"
 MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10MB limit for thumbnail downloads
+MAX_SELECT_OPTIONS = 25  # Discord's hard cap on options in a single select menu
 _MAP_NAME_RE = None  # lazy-compiled regex
 
 log_map = logging.getLogger(__name__)
+
+
+# --- Select pagination helpers ---
+def _page_count(total: int) -> int:
+    return max(1, -(-total // MAX_SELECT_OPTIONS))
+
+
+def _page_slice(items: List[Any], page: int) -> List[Any]:
+    return items[page * MAX_SELECT_OPTIONS:(page + 1) * MAX_SELECT_OPTIONS]
+
+
+def _page_placeholder(base: str, total: int, page: int) -> str:
+    pages = _page_count(total)
+    return base if pages <= 1 else f"{base} (page {page + 1}/{pages})"
+
+
+class SelectPageButton(discord.ui.Button):
+    """Steps a paginated select. Its view must implement show_page(interaction, page)."""
+    def __init__(self, delta: int, label: str, disabled: bool):
+        super().__init__(label=label, style=discord.ButtonStyle.secondary, disabled=disabled, row=1)
+        self.delta = delta
+    async def callback(self, interaction: discord.Interaction):
+        await self.view.show_page(interaction, self.view.page + self.delta)
+
+
+def _add_pager(view: discord.ui.View, total: int, page: int):
+    """Adds prev/next buttons when the option list exceeds one page."""
+    pages = _page_count(total)
+    if pages <= 1:
+        return
+    view.add_item(SelectPageButton(-1, "◀ Prev", page <= 0))
+    view.add_item(SelectPageButton(1, "Next ▶", page >= pages - 1))
 
 
 def _safe_map_path(map_name: str) -> Optional[Path]:
@@ -183,7 +216,17 @@ class AdminActionView(discord.ui.View):
         super().__init__(timeout=180)
         self.cog, self.action, self.original_interaction = cog, action, interaction
         self.game_name: Optional[str] = None
+        self.maps: List[str] = []
+        self.page = 0
         self.add_item(GameSelect(cog, action, games))
+    def show_map_select(self, maps: List[str], page: int = 0):
+        self.maps, self.page = maps, page
+        self.clear_items()
+        self.add_item(MapSelect(self.cog, self.action, self.game_name, maps, page))
+        _add_pager(self, len(maps), page)
+    async def show_page(self, interaction: discord.Interaction, page: int):
+        self.show_map_select(self.maps, max(0, min(page, _page_count(len(self.maps)) - 1)))
+        await interaction.response.edit_message(view=self)
     async def on_timeout(self):
         try: await self.original_interaction.edit_original_response(content="This panel has timed out.", view=None)
         except discord.NotFound: pass
@@ -191,7 +234,9 @@ class AdminActionView(discord.ui.View):
 class GameSelect(discord.ui.Select):
     def __init__(self, cog: 'MapVote', action: AdminAction, games: List[str]):
         self.cog, self.action = cog, action
-        options = [discord.SelectOption(label=game) for game in games] or [discord.SelectOption(label="No games configured", value="_placeholder")]
+        if len(games) > MAX_SELECT_OPTIONS:
+            log_map.warning(f"{len(games)} games configured; only the first {MAX_SELECT_OPTIONS} are selectable.")
+        options = [discord.SelectOption(label=game) for game in _page_slice(games, 0)] or [discord.SelectOption(label="No games configured", value="_placeholder")]
         super().__init__(placeholder="Select a game...", options=options)
     async def callback(self, interaction: discord.Interaction):
         if self.values[0] == "_placeholder": return await interaction.response.defer()
@@ -211,8 +256,7 @@ class GameSelect(discord.ui.Select):
                 self.cog._ensure_latest_game_format(self.view.game_name)
                 game_data = self.cog._get_games_config_sync().get(self.view.game_name, {})
                 maps_list = list(game_data.get("maps", {}).keys())
-            self.view.clear_items()
-            self.view.add_item(MapSelect(self.cog, self.action, self.view.game_name, maps_list))
+            self.view.show_map_select(maps_list)
             await interaction.response.edit_message(view=self.view)
         elif self.action == "view_maps":
             await self.cog.logic_view_maps(interaction, self.view.game_name)
@@ -235,10 +279,10 @@ class GameSelect(discord.ui.Select):
             await interaction.edit_original_response(content="", embed=embed, view=view)
 
 class MapSelect(discord.ui.Select):
-    def __init__(self, cog: 'MapVote', action: AdminAction, game_name: str, maps: List[str]):
+    def __init__(self, cog: 'MapVote', action: AdminAction, game_name: str, maps: List[str], page: int = 0):
         self.cog, self.action, self.game_name = cog, action, game_name
-        options = [discord.SelectOption(label=m) for m in maps] or [discord.SelectOption(label="No maps for this game", value="_placeholder")]
-        super().__init__(placeholder="Select a map...", min_values=1, max_values=len(options) if action == "remove_maps" else 1, options=options)
+        options = [discord.SelectOption(label=m) for m in _page_slice(maps, page)] or [discord.SelectOption(label="No maps for this game", value="_placeholder")]
+        super().__init__(placeholder=_page_placeholder("Select a map...", len(maps), page), min_values=1, max_values=len(options) if action == "remove_maps" else 1, options=options)
     async def callback(self, interaction: discord.Interaction):
         if self.values[0] == "_placeholder": return await interaction.response.defer()
         if self.action == "set_thumbnail":
@@ -260,12 +304,13 @@ class ConfirmButton(discord.ui.Button):
         self.view.stop(); await interaction.edit_original_response(content="Action completed.", view=None)
 
 class MapPreviewSelect(discord.ui.Select):
-    def __init__(self, cog: 'MapVote', game_name: str, maps_data: dict):
+    def __init__(self, cog: 'MapVote', game_name: str, maps_data: dict, page: int = 0):
         self.cog = cog
         self.game_name = game_name
         self.maps_data = maps_data
+        all_names = sorted(maps_data.keys())
         options = []
-        for map_name in sorted(maps_data.keys()):
+        for map_name in _page_slice(all_names, page):
             has_thumb = bool(maps_data[map_name].get("url"))
             local_exists = (MAPS_ASSETS_DIR / f"{map_name}.png").exists()
             status = "Custom thumbnail set" if has_thumb else ("Local image only" if local_exists else "No image configured")
@@ -276,7 +321,7 @@ class MapPreviewSelect(discord.ui.Select):
             ))
         if not options:
             options = [discord.SelectOption(label="No maps configured", value="_none")]
-        super().__init__(placeholder="Select a map to preview...", options=options[:25])
+        super().__init__(placeholder=_page_placeholder("Select a map to preview...", len(all_names), page), options=options)
 
     async def callback(self, interaction: discord.Interaction):
         if self.values[0] == "_none":
@@ -296,7 +341,19 @@ class MapPreviewSelect(discord.ui.Select):
 class MapListView(discord.ui.View):
     def __init__(self, cog: 'MapVote', game_name: str, maps_data: dict):
         super().__init__(timeout=120)
-        self.add_item(MapPreviewSelect(cog, game_name, maps_data))
+        self.cog, self.game_name, self.maps_data = cog, game_name, maps_data
+        self.page = 0
+        self._rebuild()
+
+    def _rebuild(self):
+        self.clear_items()
+        self.add_item(MapPreviewSelect(self.cog, self.game_name, self.maps_data, self.page))
+        _add_pager(self, len(self.maps_data), self.page)
+
+    async def show_page(self, interaction: discord.Interaction, page: int):
+        self.page = max(0, min(page, _page_count(len(self.maps_data)) - 1))
+        self._rebuild()
+        await interaction.response.edit_message(view=self)
 
 
 class ModeVoteConfigView(discord.ui.View):
@@ -561,13 +618,30 @@ class NewMapSelectView(discord.ui.View):
         self.cog = cog
         self.game_name = game_name
         self.parent_view = parent_view
-        options = [discord.SelectOption(label=m) for m in available_maps[:25]]
-        select = discord.ui.Select(placeholder="Select maps to flag as new...", options=options, min_values=1, max_values=len(options))
+        self.available_maps = list(available_maps)
+        self.page = 0
+        self._rebuild()
+
+    def _rebuild(self):
+        self.clear_items()
+        options = [discord.SelectOption(label=m) for m in _page_slice(self.available_maps, self.page)] or [discord.SelectOption(label="No maps available", value="_none")]
+        select = discord.ui.Select(
+            placeholder=_page_placeholder("Select maps to flag as new...", len(self.available_maps), self.page),
+            options=options, min_values=1, max_values=len(options)
+        )
         select.callback = self._on_select
         self.add_item(select)
+        _add_pager(self, len(self.available_maps), self.page)
+
+    async def show_page(self, interaction: discord.Interaction, page: int):
+        self.page = max(0, min(page, _page_count(len(self.available_maps)) - 1))
+        self._rebuild()
+        await interaction.response.edit_message(view=self)
 
     async def _on_select(self, interaction: discord.Interaction):
         selected = interaction.data["values"]
+        if selected == ["_none"]:
+            return await interaction.response.defer()
         async with self.cog.config_lock:
             gd = self.cog._get_games_config_sync().get(self.game_name, {})
             duration_days = gd.get("new_map_duration_days", 7)

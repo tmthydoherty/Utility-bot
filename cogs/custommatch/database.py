@@ -3501,7 +3501,11 @@ class DatabaseHelper:
             ) as cursor:
                 return [dict(row) for row in await cursor.fetchall()]
 
-    VALID_RETRY_STATUSES = {'pending', 'success', 'failed', 'abandoned'}
+    # 'exhausted' is the terminal state the retry loop and cancel_match actually
+    # write, and what the cleanup queries prune on. It was missing here, so every
+    # one of those writes raised ValueError instead — which is how a match cancel
+    # ended up aborting before it cleaned anything up.
+    VALID_RETRY_STATUSES = {'pending', 'success', 'failed', 'abandoned', 'exhausted'}
 
     @staticmethod
     async def update_stats_retry(match_id: int, status: str = None,

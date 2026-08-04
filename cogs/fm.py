@@ -280,6 +280,46 @@ class FM(commands.Cog):
             logger.debug(f"Failed to get dominant color: {e}")
             return self.colors["accent"]
 
+    def draw_play_glyph(self, draw: ImageDraw.Draw, x: int, y: int, size: int, fill: tuple):
+        """Draw a play triangle with (x, y) as its top-left bound.
+
+        Noto Sans carries no U+25B6, so typing the character renders a tofu
+        box. Drawing the shape also keeps this working under the default-font
+        fallback, where no symbol coverage is guaranteed at all.
+        """
+        draw.polygon(
+            [(x, y), (x, y + size), (x + size * 0.87, y + size / 2)],
+            fill=fill
+        )
+
+    def draw_note_glyph(self, draw: ImageDraw.Draw, x: int, y: int, size: int, fill: tuple):
+        """Draw an eighth note with (x, y) as its top-left bound.
+
+        Stands in for U+266A on the missing-artwork placeholder, which Noto
+        Sans likewise cannot render.
+        """
+        head_w = size * 0.46
+        head_h = size * 0.34
+        stem_w = max(2, size * 0.07)
+
+        head_y = y + size - head_h
+        draw.ellipse((x, head_y, x + head_w, head_y + head_h), fill=fill)
+
+        # Stem rises from the right edge of the head.
+        stem_x = x + head_w - stem_w
+        draw.rectangle((stem_x, y, stem_x + stem_w, head_y + head_h / 2), fill=fill)
+
+        # Flag, angled off the top of the stem.
+        draw.polygon(
+            [
+                (stem_x + stem_w, y),
+                (stem_x + stem_w + size * 0.30, y + size * 0.19),
+                (stem_x + stem_w + size * 0.25, y + size * 0.42),
+                (stem_x + stem_w, y + size * 0.23),
+            ],
+            fill=fill
+        )
+
     def draw_medal(self, draw: ImageDraw.Draw, x: int, y: int, rank: int, size: int = 24):
         """Draw a medal circle for top 3 ranks or rank number for others."""
         if rank == 1:
@@ -408,9 +448,16 @@ class FM(commands.Cog):
                 radius=20,
                 fill=self.colors["bg_lighter"]
             )
-            # Music note icon placeholder
-            note_font = self.get_font(120, bold=True)
-            draw.text((art_x + 125, art_y + 115), "♪", font=note_font, fill=self.colors["text_muted"])
+            # Music note icon placeholder, centred in the empty art square
+            note_size = 150
+            note_w = note_size * 0.76  # head width plus the flag's reach
+            self.draw_note_glyph(
+                draw,
+                art_x + (art_size - note_w) / 2,
+                art_y + (art_size - note_size) / 2,
+                note_size,
+                self.colors["text_muted"]
+            )
         
         # Accent line on left of album art
         draw.rectangle((art_x - 6, art_y, art_x - 2, art_y + art_size), fill=accent_color)
@@ -460,15 +507,35 @@ class FM(commands.Cog):
         if playcount is not None:
             plays_y = 360
             plays_font = self.get_font(20, bold=True)
-            plays_text = f"▶ {playcount} plays"
-            
+            plays_text = f"{playcount} plays"
+
+            badge_h = 42
+            glyph_size = 15
+            pad_x = 17
+            gap = 9
+
+            text_w = int(plays_font.getlength(plays_text))
+            badge_w = pad_x + glyph_size + gap + text_w + pad_x
+
             self.draw_rounded_rect(
                 draw,
-                (text_x, plays_y, text_x + int(plays_font.getlength(plays_text)) + 34, plays_y + 42),
+                (text_x, plays_y, text_x + badge_w, plays_y + badge_h),
                 radius=10,
                 fill=self.colors["bg_lighter"]
             )
-            draw.text((text_x + 17, plays_y + 9), plays_text, font=plays_font, fill=self.colors["text_secondary"])
+            self.draw_play_glyph(
+                draw,
+                text_x + pad_x,
+                plays_y + (badge_h - glyph_size) / 2,
+                glyph_size,
+                self.colors["text_secondary"]
+            )
+            draw.text(
+                (text_x + pad_x + glyph_size + gap, plays_y + 9),
+                plays_text,
+                font=plays_font,
+                fill=self.colors["text_secondary"]
+            )
         
         # Discord username in bottom right - LARGE
         # Truncate display name to 20 characters

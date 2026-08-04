@@ -392,6 +392,21 @@
 
         .strip-value.muted {{ color: #5c616c; font-weight: 400; }}
 
+        .strip-value .emoji-img {{
+            height: 19px;
+            width: 19px;
+            object-fit: contain;
+            vertical-align: -4px;
+            margin-right: 3px;
+        }}
+
+        /* Unicode emoji, sized to sit level with the custom-emoji images. */
+        .strip-value .emoji-char {{
+            font-size: 18px;
+            vertical-align: -2px;
+            margin-right: 2px;
+        }}
+
         /* --------------------------------------------------- FOOTER ----- */
         .footer {{
             display: flex;

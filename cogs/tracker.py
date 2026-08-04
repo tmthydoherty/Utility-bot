@@ -28,6 +28,48 @@ TEMPLATE_DIR = Path(__file__).parent / "templates"
 
 DONUT_COLORS = ['#5865F2', '#23a559', '#e8637a', '#f0b232', '#a78bfa', '#38bdf8', '#ef4444', '#06b6d4']
 
+CUSTOM_EMOJI_RE = re.compile(r'<a?:([\w-]+):(\d+)>')
+
+# Unicode emoji, matched without a third-party library. Pictographic blocks are
+# taken as emoji on sight; the ambiguous ones (©, ™, ←, ▶ …) only count when
+# they carry U+FE0F, so ordinary prose does not get logged as emoji use. Skin
+# tones and ZWJ sequences are absorbed into a single match, so a family emoji
+# counts once rather than four times.
+_VS16 = "\uFE0F"    # emoji variation selector
+_ZWJ = "\u200D"     # zero-width joiner, used inside compound emoji
+_KEYCAP = "\u20E3"  # combining enclosing keycap
+
+# Pictographic blocks: emoji on sight.
+_EMOJI_BASE = (
+    "[\U0001F300-\U0001F5FF"            # symbols & pictographs
+    "\U0001F600-\U0001F64F"             # emoticons
+    "\U0001F680-\U0001F6FF"             # transport & map
+    "\U0001F7E0-\U0001F7EB"             # coloured circles & squares
+    "\U0001F90C-\U0001F9FF"             # supplemental symbols
+    "\U0001FA70-\U0001FAFF"             # extended-A
+    "\U0001F004\U0001F0CF"              # mahjong tile, joker
+    "\U0001F18E\U0001F191-\U0001F19A"   # squared AB, CL, COOL, NEW …
+    "☀-➿"                     # misc symbols & dingbats
+    "⬅-⬇⬛⬜⭐⭕"
+    "⌚⌛⌨⏏⏩-⏳⏸-⏺Ⓜ]"
+)
+
+# Text-default characters: only emoji when explicitly marked with U+FE0F.
+_EMOJI_TEXT_DEFAULT = (
+    "[©®™‼⁉ℹ↔-↙↩↪"
+    "▪▫▶◀◻-◾〰〽㊗㊙]" + _VS16
+)
+
+# Optional skin tone, then an optional variation selector.
+_EMOJI_MOD = f"[\U0001F3FB-\U0001F3FF]?{_VS16}?"
+
+UNICODE_EMOJI_RE = re.compile(
+    f"[\U0001F1E6-\U0001F1FF]{{2}}"        # regional-indicator flag pairs
+    f"|[0-9#*]{_VS16}?{_KEYCAP}"           # keycaps
+    f"|{_EMOJI_TEXT_DEFAULT}"
+    f"|{_EMOJI_BASE}{_EMOJI_MOD}(?:{_ZWJ}{_EMOJI_BASE}{_EMOJI_MOD})*"
+)
+
 NO_ICON = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='48' height='48'%3E%3Crect width='48' height='48' rx='12' fill='%23313338'/%3E%3Ctext x='24' y='30' text-anchor='middle' fill='%23949ba4' font-size='20' font-family='sans-serif'%3E?%3C/text%3E%3C/svg%3E"
 
 logger = logging.getLogger('betting_bot.tracker')
@@ -99,6 +141,9 @@ class TrackingDB:
         await self._db.execute("CREATE INDEX IF NOT EXISTS idx_msg_guild_time ON message_logs(guild_id, timestamp)")
         await self._db.execute("CREATE INDEX IF NOT EXISTS idx_social_target ON social_interactions(target_user_id, guild_id)")
         await self._db.execute("CREATE INDEX IF NOT EXISTS idx_emoji_id ON emoji_logs(emoji_id, guild_id)")
+        # Unicode emojis have no id to index on, and they roughly double this
+        # table, so the overview's guild+window scan needs its own index.
+        await self._db.execute("CREATE INDEX IF NOT EXISTS idx_emoji_guild_time ON emoji_logs(guild_id, timestamp)")
         await self._db.execute("CREATE INDEX IF NOT EXISTS idx_member_events_guild_time ON member_events(guild_id, timestamp)")
         await self._db.commit()
 
@@ -926,8 +971,11 @@ class UserTracker(commands.Cog):
                     (guild.id, cutoff, *guild_emoji_ids)
                 )
         else:
+            # Unicode emojis all carry a NULL id, so they have to group on the
+            # character instead — grouping on emoji_id alone would pile every
+            # unicode emoji in the server into a single row.
             rows = await self.db.fetch_all(
-                "SELECT emoji_id, emoji_name, count(*) as uses, count(distinct user_id) as users FROM emoji_logs WHERE guild_id = ? AND timestamp > ? GROUP BY emoji_id ORDER BY uses DESC",
+                "SELECT emoji_id, emoji_name, count(*) as uses, count(distinct user_id) as users FROM emoji_logs WHERE guild_id = ? AND timestamp > ? GROUP BY coalesce(emoji_id, emoji_name) ORDER BY uses DESC",
                 (guild.id, cutoff)
             )
 
@@ -958,7 +1006,9 @@ class UserTracker(commands.Cog):
         for i, r in enumerate(top5):
             color = DONUT_COLORS[i % len(DONUT_COLORS)]
             name = r[1] if len(r[1]) <= 16 else r[1][:14] + ".."
-            legend_html += f'<div class="legend-item"><div class="legend-color" style="background:{color}"></div><span class="legend-name">:{name}:</span><span class="legend-count">{r[2]:,}</span></div>\n'
+            # Unicode emojis have no :shortcode:, so they show as the character.
+            label = f":{name}:" if r[0] else name
+            legend_html += f'<div class="legend-item"><div class="legend-color" style="background:{color}"></div><span class="legend-name">{label}</span><span class="legend-count">{r[2]:,}</span></div>\n'
 
         # Emoji list
         emoji_list_html = ""
@@ -968,11 +1018,19 @@ class UserTracker(commands.Cog):
             for i, r in enumerate(page_rows):
                 rank = start + i + 1
                 eid, ename, count, users = r[0], r[1], r[2], r[3]
-                emoji_url = f"https://cdn.discordapp.com/emojis/{eid}.png?size=64"
+                # A NULL id means a unicode emoji: draw the character in the
+                # image slot and leave the name blank, since the glyph is its
+                # own label — repeating it there just reads as a duplicate.
+                if eid:
+                    glyph = f'<img class="emoji-img" src="https://cdn.discordapp.com/emojis/{eid}.png?size=64" alt="">'
+                    label = f":{ename}:"
+                else:
+                    glyph = f'<span class="emoji-img emoji-char">{ename}</span>'
+                    label = ""
                 emoji_list_html += f'''<div class="emoji-item">
                     <span class="emoji-rank">#{rank}</span>
-                    <img class="emoji-img" src="{emoji_url}" alt="">
-                    <span class="emoji-name">:{ename}:</span>
+                    {glyph}
+                    <span class="emoji-name">{label}</span>
                     <div class="emoji-stats"><div class="emoji-uses">{count:,} uses</div><div class="emoji-users">{users} users</div></div>
                 </div>\n'''
 
@@ -1277,11 +1335,20 @@ class UserTracker(commands.Cog):
                             (message.author.id, mention.id, message.guild.id, message.channel.id, ts, "mention")
                         )
             # Custom emoji tracking
-            custom_emojis = re.findall(r'<a?:([\w-]+):(\d+)>', message.content)
+            custom_emojis = CUSTOM_EMOJI_RE.findall(message.content)
             for name, eid in custom_emojis:
                 await conn.execute(
                     "INSERT INTO emoji_logs (guild_id, user_id, emoji_id, emoji_name, timestamp, usage_type) VALUES (?, ?, ?, ?, ?, ?)",
                     (message.guild.id, message.author.id, int(eid), name, ts, "text")
+                )
+            # Unicode emoji tracking. Stored with a NULL emoji_id and the
+            # character itself as the name, so consumers group on the name.
+            # Custom emoji markup is stripped first — the digits in
+            # <:name:123> would otherwise register as keycaps.
+            for match in UNICODE_EMOJI_RE.findall(CUSTOM_EMOJI_RE.sub("", message.content)):
+                await conn.execute(
+                    "INSERT INTO emoji_logs (guild_id, user_id, emoji_id, emoji_name, timestamp, usage_type) VALUES (?, ?, ?, ?, ?, ?)",
+                    (message.guild.id, message.author.id, None, match, ts, "text")
                 )
 
     @commands.Cog.listener()
@@ -1299,11 +1366,17 @@ class UserTracker(commands.Cog):
             (user.id, author_id, guild_id, emoji_name, ts)
         )
 
-        # Log custom emojis in emoji_logs for emoji overview
+        # Log emojis in emoji_logs for emoji overview. Unicode reactions arrive
+        # as a plain str and go in with a NULL id, same as unicode in messages.
         if isinstance(reaction.emoji, (discord.Emoji, discord.PartialEmoji)) and reaction.emoji.id:
             await self.db.execute(
                 "INSERT INTO emoji_logs (guild_id, user_id, emoji_id, emoji_name, timestamp, usage_type) VALUES (?, ?, ?, ?, ?, ?)",
                 (guild_id, user.id, reaction.emoji.id, reaction.emoji.name, ts, "reaction")
+            )
+        elif isinstance(reaction.emoji, str):
+            await self.db.execute(
+                "INSERT INTO emoji_logs (guild_id, user_id, emoji_id, emoji_name, timestamp, usage_type) VALUES (?, ?, ?, ?, ?, ?)",
+                (guild_id, user.id, None, reaction.emoji, ts, "reaction")
             )
 
     @commands.Cog.listener()

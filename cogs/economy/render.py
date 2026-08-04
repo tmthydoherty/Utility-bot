@@ -100,6 +100,29 @@ def rgba(hex_color: str, alpha: float) -> str:
     return f"rgba({r}, {g}, {b}, {alpha})"
 
 
+def emoji_html(top_emoji: dict) -> str:
+    """Render the top emoji as its actual image rather than `:name:` text.
+
+    tracker.py only logs custom emojis, so there is normally an id to build a
+    CDN URL from; `.png` serves a static frame for animated ones too. The alt
+    text falls back to `:name:` if the emoji has since been deleted and the
+    image 404s.
+    """
+    name = esc(top_emoji.get("name") or "emoji")
+    count = f" ×{commas(top_emoji.get('count') or 0)}"
+    emoji_id = top_emoji.get("id")
+    if not emoji_id:
+        # No id means a unicode emoji — Noto Color Emoji draws it directly, so
+        # it only needs sizing up to match the custom-emoji images.
+        return f'<span class="emoji-char">{name}</span>{esc(count)}'
+    # `this.alt` keeps the fallback out of the injected string entirely, so a
+    # deleted emoji degrades to `:name:` instead of a broken-image glyph.
+    return (
+        f'<img class="emoji-img" src="https://cdn.discordapp.com/emojis/{int(emoji_id)}.png?size=64" '
+        f'alt=":{name}:" onerror="this.replaceWith(this.alt)">{esc(count)}'
+    )
+
+
 def accent_for(member) -> str:
     """Use the member's highest coloured role as the card accent."""
     try:
@@ -303,7 +326,7 @@ def build_level_card_data(member, user_row, profile: dict, rank: int, total_rank
         "reactions_given": commas(profile.get("reactions_given") or 0),
         "reactions_received": commas(profile.get("reactions_received") or 0),
         "replies": commas(profile.get("replies") or 0),
-        "top_emoji": esc(f":{top_emoji['name']}: x{top_emoji['count']}") if top_emoji else "—",
+        "top_emoji": emoji_html(top_emoji) if top_emoji else "—",
         "top_emoji_class": "" if top_emoji else "muted",
 
         "footer_left": esc(f"{member.guild.name} · Level Profile"),

@@ -22,7 +22,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import aiosqlite
 import discord
@@ -799,11 +799,37 @@ class AuditLog(commands.Cog):
         toggles = await self.db.get_toggles(guild_id)
         return toggles.get(event_key, False)
 
+    def _ignore_scope(self, guild_id: int,
+                      channel: Union[int, discord.abc.GuildChannel, discord.Thread, None]
+                      ) -> Set[int]:
+        """Every channel id an event in `channel` should be matched against.
+
+        A thread carries its parent along: ignoring #general is meant to cover
+        the threads hanging off it, not just the channel body. `channel` may be
+        an object or a bare id out of a raw payload — ids resolve through the
+        guild cache, which holds the threads the bot can see, and a miss simply
+        leaves no parent to add.
+        """
+        if channel is None:
+            return set()
+        if isinstance(channel, int):
+            channel_id = channel
+            guild = self.bot.get_guild(guild_id)
+            resolved = guild.get_channel_or_thread(channel_id) if guild else None
+        else:
+            channel_id = channel.id
+            resolved = channel
+        ids = {channel_id}
+        if isinstance(resolved, discord.Thread) and resolved.parent_id:
+            ids.add(resolved.parent_id)
+        return ids
+
     async def _is_ignored(self, guild_id: int, *,
-                          channel_id: Optional[int] = None,
+                          channel: Union[int, discord.abc.GuildChannel,
+                                         discord.Thread, None] = None,
                           user_id: Optional[int] = None) -> bool:
         channels, users = await self.db.get_ignored(guild_id)
-        if channel_id is not None and channel_id in channels:
+        if channels and channels & self._ignore_scope(guild_id, channel):
             return True
         if user_id is not None and user_id in users:
             return True
@@ -1473,7 +1499,7 @@ class AuditLog(commands.Cog):
         """Mirror messages so deletes and edits can show real content later."""
         if not self._ready.is_set() or message.guild is None:
             return
-        if await self._is_ignored(message.guild.id, channel_id=message.channel.id,
+        if await self._is_ignored(message.guild.id, channel=message.channel,
                                   user_id=message.author.id):
             return
         if message.author.bot:
@@ -1499,7 +1525,7 @@ class AuditLog(commands.Cog):
             return
 
         after = payload.message
-        if await self._is_ignored(payload.guild_id, channel_id=payload.channel_id,
+        if await self._is_ignored(payload.guild_id, channel=payload.channel_id,
                                   user_id=after.author.id):
             return
         if after.author.bot:
@@ -1543,7 +1569,7 @@ class AuditLog(commands.Cog):
         guild = self.bot.get_guild(payload.guild_id)
         if guild is None:
             return
-        if await self._is_ignored(payload.guild_id, channel_id=payload.channel_id):
+        if await self._is_ignored(payload.guild_id, channel=payload.channel_id):
             return
 
         stored = await self.db.get_message(payload.message_id)
@@ -1605,7 +1631,7 @@ class AuditLog(commands.Cog):
         guild = self.bot.get_guild(payload.guild_id)
         if guild is None:
             return
-        if await self._is_ignored(payload.guild_id, channel_id=payload.channel_id):
+        if await self._is_ignored(payload.guild_id, channel=payload.channel_id):
             return
 
         stored = await self.db.get_messages(payload.message_ids)
@@ -1847,7 +1873,7 @@ class AuditLog(commands.Cog):
                                       after: discord.abc.GuildChannel):
         if not self._ready.is_set():
             return
-        if await self._is_ignored(after.guild.id, channel_id=after.id):
+        if await self._is_ignored(after.guild.id, channel=after):
             return
 
         if before.name != after.name:

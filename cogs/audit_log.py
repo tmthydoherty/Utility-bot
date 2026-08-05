@@ -8,7 +8,7 @@ would otherwise produce ten or twelve near-identical embeds. Events are keyed by
 
 Attribution comes from the audit log. `on_audit_log_entry_create` fills a
 short-lived cache, and anything that misses the cache falls back to polling
-`guild.audit_logs()` the way cogs/alerts.py always has. When the actor turns out
+`guild.audit_logs()` the way cogs/welcome.py always has. When the actor turns out
 to be Vibey acting on a single member, the member is credited first and the bot
 noted in parentheses — that reads correctly for the common case of a user
 clicking a button and the bot carrying out the change on their behalf.
@@ -34,7 +34,7 @@ logger = logging.getLogger('cogs.audit_log')
 DB_PATH = os.path.join("data", "audit_log.db")
 
 # Seeded into guild_settings on first run so exit logging doesn't gap while the
-# panel is being configured. This is the file cogs/alerts.py still owns.
+# panel is being configured. This is the file cogs/welcome.py still owns.
 LEGACY_CONFIG_FILE = "welcome_config.json"
 
 # How long a bucket waits for more of the same kind of event before posting.
@@ -55,10 +55,15 @@ AUDIT_SETTLE_SECONDS = 2
 # ID. Two days covers effectively every delete anyone asks about.
 MESSAGE_RETENTION_SECONDS = 48 * 60 * 60
 
-# A member's onboarding role picks belong in their join embed, not in a separate
-# role-change entry moments later.
+# A member's onboarding picks and any role a cog hands them on arrival belong in
+# their join embed, not in a separate role-change entry moments later. Role
+# changes are held back until the join embed has taken its snapshot, then
+# reported normally — the handoff is on the snapshot itself, not a second timer,
+# so no change can fall between the two and go unlogged.
 JOIN_SETTLE_SECONDS = 30
-JOIN_QUIET_SECONDS = 90
+# Safety net only: drops a tracked join whose snapshot never ran, so a failed
+# _log_join can't suppress that member's role changes forever.
+JOIN_TRACK_TTL_SECONDS = 90
 
 # Kicks issued by cogs/inactivity.py, which get their own muted colour so they
 # don't read as moderator action.
@@ -592,7 +597,7 @@ class AuditDB:
     async def migrate_from_legacy(self):
         """Seed exit/mod channels from welcome_config.json on first run.
 
-        cogs/alerts.py owned leave/kick/ban logging before this cog existed. Its
+        cogs/welcome.py owned leave/kick/ban logging before this cog existed. Its
         config is the only place those channel IDs live, and re-picking them by
         hand after deploy would mean a window with no exit logging at all.
         """
@@ -1195,10 +1200,13 @@ class AuditLog(commands.Cog):
         self._apply_identity(embed, events, "Joined")
         embed.set_footer(text=f"Account created {fmt_account_age(member.created_at)}")
 
+        # Every role they hold once onboarding and any on-join grant have
+        # settled — onboarding picks, the newcomer role, an invite role — rather
+        # than onboarding alone, since they all arrive in the same moment.
         roles = d.get("roles") or []
         if roles:
             embed.add_field(
-                name=f"Roles from onboarding ({len(roles)})",
+                name=f"Roles on join ({len(roles)})",
                 value=truncate(", ".join(roles), 1024),
                 inline=False,
             )
@@ -1666,16 +1674,24 @@ class AuditLog(commands.Cog):
         asyncio.create_task(self._log_join(member))
 
     async def _log_join(self, member: discord.Member):
-        """Wait for onboarding to settle so the roles land in the join embed."""
+        """Wait for onboarding and any on-join cog grants to settle so every role
+        the member ends up with lands in the join embed."""
         await asyncio.sleep(JOIN_SETTLE_SECONDS)
         try:
-            fresh = member.guild.get_member(member.id)
-            if fresh is None:
-                fresh = await member.guild.fetch_member(member.id)
-        except discord.HTTPException:
-            fresh = member  # left again already, or unfetchable
+            try:
+                fresh = member.guild.get_member(member.id)
+                if fresh is None:
+                    fresh = await member.guild.fetch_member(member.id)
+            except discord.HTTPException:
+                fresh = member  # left again already, or unfetchable
 
-        roles = [r.name for r in getattr(fresh, "roles", []) if not r.is_default()]
+            roles = [r.name for r in getattr(fresh, "roles", []) if not r.is_default()]
+        finally:
+            # Release the member before submitting: from here on their role
+            # changes are ordinary edits and get their own embed. In a finally
+            # so a failure above can't mute them until the TTL sweep.
+            self._recent_joins.pop(member.id, None)
+
         await self.submit(LogEvent(
             event_key="member_join",
             guild_id=member.guild.id,
@@ -1782,12 +1798,12 @@ class AuditLog(commands.Cog):
             await self._log_role_change(before, after)
 
     async def _log_role_change(self, before: discord.Member, after: discord.Member):
-        # Onboarding role picks are reported by the join embed instead.
-        joined_at = self._recent_joins.get(after.id)
-        if joined_at is not None:
-            if time.monotonic() - joined_at < JOIN_QUIET_SECONDS:
-                return
-            self._recent_joins.pop(after.id, None)
+        # Still tracked means their join embed hasn't snapshotted yet, so these
+        # roles — onboarding picks, the newcomer role, an invite role — will be
+        # listed there. _log_join stops tracking them the moment it snapshots,
+        # so anything later is a real edit and falls through to its own embed.
+        if after.id in self._recent_joins:
+            return
 
         before_ids = {r.id for r in before.roles}
         after_ids = {r.id for r in after.roles}
@@ -1924,7 +1940,7 @@ class AuditLog(commands.Cog):
         except Exception as e:
             logger.error("Message purge failed: %s", e, exc_info=True)
 
-        cutoff = time.monotonic() - JOIN_QUIET_SECONDS
+        cutoff = time.monotonic() - JOIN_TRACK_TTL_SECONDS
         for uid, ts in list(self._recent_joins.items()):
             if ts < cutoff:
                 self._recent_joins.pop(uid, None)

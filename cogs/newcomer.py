@@ -11,11 +11,20 @@ from dataclasses import dataclass
 from PIL import Image, ImageDraw, ImageFont
 import os
 
+from utils.newcomer_role_sources import summary as newcomer_role_summary
+
 # --- CONFIGURATION ---
 DB_NAME = "intro_system.db"
 # How long an intro discussion thread lives before the bot deletes it (with its
 # Lore Drop banner). The Q&A post in the intro channel is kept as the record.
 INTRO_THREAD_LIFETIME_DAYS = 7
+# Level a newcomer must reach before the newcomer role is swapped for the member
+# role. Levels come from the economy cog, whose 60s per-user XP cooldown is what
+# makes this un-spammable — a raw message count is not. Overridable in the panel
+# via the member_role_level setting; the swap is skipped until both roles are
+# set. Voice time counts toward it, which is deliberate: voice-only members
+# would otherwise stay newcomers forever and keep drawing inactivity nudges.
+DEFAULT_MEMBER_ROLE_LEVEL = 2
 # Font paths - Noto Sans for broad Unicode coverage
 FONT_PATH_BOLD = "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf"
 FONT_PATH_REG = "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf"
@@ -109,13 +118,77 @@ class IntroCog(commands.Cog):
         # Sentinel distinguishes "cached as missing" from "not yet cached".
         self._settings_cache = {}
         self._settings_missing = object()
+        # Gates anything that reads the DB before init_db has created the tables.
+        self._db_ready = asyncio.Event()
+        # Members mid-swap from newcomer to member role. Two messages landing
+        # together would otherwise both cross the threshold and both swap.
+        self._graduating = set()
         self.bot.loop.create_task(self.init_db())
+        self._backfill_task = self.bot.loop.create_task(self._run_backfill())
         self.decay_task.start()
         self.thread_cleanup_task.start()
 
     def cog_unload(self):
         self.decay_task.cancel()
         self.thread_cleanup_task.cancel()
+        self._backfill_task.cancel()
+
+    async def _run_backfill(self):
+        """backfill_newcomer_role with its own error handling — it runs as a
+        bare task, so an escaping exception would be swallowed by the loop.
+
+        The config check rides along: it wants the same "tables built, gateway
+        up" moment, and neither job should stop the other from running.
+        """
+        try:
+            await self.backfill_newcomer_role()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"Newcomer role backfill failed: {e}", exc_info=True)
+
+        try:
+            await self._warn_if_unconfigured()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"Newcomer config check failed: {e}", exc_info=True)
+
+    async def _config_warnings(self):
+        """Settings whose absence silently switches a feature off.
+
+        An unset newcomer_role makes the reply-points branch a no-op that is
+        indistinguishable from a working feature nobody happens to trigger —
+        that state went unnoticed for three months. Shared by the boot check
+        and the panel so the two can never disagree.
+        """
+        problems = []
+        newcomer_id, member_id = await self._role_setting_ids()
+
+        if not newcomer_id:
+            problems.append(
+                "No newcomer role is set — reply points are DISABLED. "
+                "Set one in /newcomer_panel → Newcomer Role."
+            )
+        elif self.bot.guilds and all(not g.get_role(newcomer_id) for g in self.bot.guilds):
+            problems.append(
+                f"The configured newcomer role ({newcomer_id}) no longer exists in any "
+                "guild — reply points are DISABLED until it is re-selected."
+            )
+
+        if not member_id:
+            problems.append(
+                "No member role is set — newcomers never graduate off the newcomer "
+                "role. Set one in /newcomer_panel → Member Role."
+            )
+        return problems
+
+    async def _warn_if_unconfigured(self):
+        """Log the config warnings once per boot."""
+        await self._db_ready.wait()
+        await self.bot.wait_until_ready()
+        for problem in await self._config_warnings():
+            logger.warning(f"Newcomer: {problem}")
 
     async def _get_setting(self, db, key):
         """Cached read of a settings row. Returns the string value or None."""
@@ -236,8 +309,21 @@ class IntroCog(commands.Cog):
                     PRIMARY KEY (user_id, hour_key)
                 )
             ''')
-            
+
+            # Superseded by the economy cog's levels as the graduation trigger.
+            await db.execute("DROP TABLE IF EXISTS message_counts")
+
+            # Left behind by the 5-base-role x 3-tier system the tier_rework_v2
+            # migration replaced. Nothing has read either since, but they stayed
+            # populated, so the database looked correctly configured while
+            # settings.newcomer_role — the key the reply-points branch actually
+            # reads — was empty. Not migrated into it on purpose: base_rank 1 is
+            # the *member* role, so seeding from it would set the wrong role.
+            await db.execute("DROP TABLE IF EXISTS base_roles")
+            await db.execute("DROP TABLE IF EXISTS role_config")
+
             await db.commit()
+        self._db_ready.set()
 
     # --- IMAGE GENERATION ---
     def generate_lore_banner(self, username, color_index=0):
@@ -378,7 +464,12 @@ class IntroCog(commands.Cog):
             return await interaction.response.send_message("Admin access only.", ephemeral=True)
 
         view = AdminPanelView(self)
-        await interaction.response.send_message("**Newcomer Panel**\nSelect a module to configure:", view=view, ephemeral=True)
+        body = "**Newcomer Panel**\nSelect a module to configure:"
+        # Anything silently switched off gets said here, not just in the log.
+        warnings = await self._config_warnings()
+        if warnings:
+            body = "\n".join(f"⚠️ {p}" for p in warnings) + "\n\n" + body
+        await interaction.response.send_message(body, view=view, ephemeral=True)
 
     # --- EVENTS ---
     @commands.Cog.listener()
@@ -481,14 +572,22 @@ class IntroCog(commands.Cog):
                 except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                     replied_to = None
 
-            if (
-                replied_to
-                and not replied_to.author.bot
-                and replied_to.author.id != message.author.id
-            ):
+            # Who the reply is really aimed at. Normally the author of the
+            # message replied to — but the intro posts are written by the bot,
+            # so a reply to one is a welcome aimed at the newcomer it is about.
+            target_id = None
+            if replied_to:
+                if replied_to.author.bot:
+                    target_id = await self._intro_owner_for_message(
+                        message.channel.id, replied_to.id
+                    )
+                else:
+                    target_id = replied_to.author.id
+
+            if target_id and target_id != message.author.id:
                 # Resolve the target as a Member via the guild so we can read .roles.
                 # replied_to.author may be a User, not a Member.
-                target_member = message.guild.get_member(replied_to.author.id)
+                target_member = message.guild.get_member(target_id)
 
                 async with aiosqlite.connect(self.db_path) as db:
                     role_value = await self._get_setting(db, 'newcomer_role')
@@ -557,8 +656,14 @@ class IntroCog(commands.Cog):
                                     (message.author.id, hour_key, award, award),
                                 )
                                 await db.commit()
-                                logger.debug(
-                                    f"VIP reply: awarded {award} to {message.author} for replying to {target_member}"
+                                # INFO, not debug: the root logger runs at INFO, so
+                                # a debug line here writes nowhere and the whole
+                                # reply-points path looks identical whether it is
+                                # working or silently disabled.
+                                logger.info(
+                                    f"Reply points: awarded {fmt_points(award)} to {message.author} "
+                                    f"({message.author.id}) for replying to newcomer {target_member} "
+                                    f"({target_member.id})"
                                 )
                                 await self.check_role_upgrade(message.author, db)
 
@@ -650,6 +755,297 @@ class IntroCog(commands.Cog):
                 await db.execute("INSERT INTO hourly_points (user_id, hour_key, points_earned) VALUES (?, ?, ?) ON CONFLICT(user_id, hour_key) DO UPDATE SET points_earned = points_earned + ?", (user_id, hour_key, points_to_add, points_to_add))
                 await db.commit()
                 await self.check_role_upgrade(message.author, db)
+
+    async def _newcomer_role(self, guild, db):
+        """The role set in the panel, resolved against `guild`. None if unset,
+        malformed, or deleted from the server."""
+        value = await self._get_setting(db, 'newcomer_role')
+        if not value:
+            return None
+        try:
+            return guild.get_role(int(value))
+        except ValueError:
+            return None
+
+    async def _role_setting_ids(self):
+        """(newcomer_role_id, member_role_id), either possibly None.
+
+        Served from the settings cache. on_message runs for every message in the
+        server, so this only opens the DB on the first read after startup or a
+        panel change — a missing key caches as None and doesn't re-query.
+        """
+        keys = ('newcomer_role', 'member_role')
+        if any(self._settings_cache.get(k, self._settings_missing) is self._settings_missing
+               for k in keys):
+            async with aiosqlite.connect(self.db_path) as db:
+                for key in keys:
+                    await self._get_setting(db, key)
+
+        ids = []
+        for key in keys:
+            value = self._settings_cache.get(key)
+            try:
+                ids.append(int(value) if value else None)
+            except ValueError:
+                ids.append(None)
+        return ids[0], ids[1]
+
+    async def _intro_channel_ids(self):
+        """(intro_channel_id, thread_parent_id), either possibly None.
+
+        Served from the settings cache for the same reason as
+        _role_setting_ids: this is on the path of every reply in the server.
+        """
+        keys = ('intro_channel_id', 'thread_channel_id')
+        if any(self._settings_cache.get(k, self._settings_missing) is self._settings_missing
+               for k in keys):
+            async with aiosqlite.connect(self.db_path) as db:
+                for key in keys:
+                    await self._get_setting(db, key)
+
+        ids = []
+        for key in keys:
+            value = self._settings_cache.get(key)
+            try:
+                ids.append(int(value) if value else None)
+            except ValueError:
+                ids.append(None)
+        return ids[0], ids[1]
+
+    async def _intro_owner_for_message(self, channel_id, message_id):
+        """The newcomer an intro post is about, or None if it isn't one.
+
+        Both halves of an intro are posted by the bot — the Q&A image in the
+        intro channel and the Lore Drop banner in the thread parent — so
+        without this, welcoming someone by replying to their own intro is the
+        one reply that earns nothing.
+
+        The channel check comes first so an ordinary reply to any other bot
+        (trivia, polls, music) costs no database round trip at all.
+        """
+        intro_id, parent_id = await self._intro_channel_ids()
+        if channel_id not in (intro_id, parent_id):
+            return None
+
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "SELECT user_id FROM intro_metadata WHERE qa_msg_id = ? OR lore_msg_id = ?",
+                (message_id, message_id),
+            )
+            row = await cursor.fetchone()
+        return row[0] if row else None
+
+    async def _member_role_level(self):
+        """Level at which a newcomer becomes a member."""
+        async with aiosqlite.connect(self.db_path) as db:
+            value = await self._get_setting(db, 'member_role_level')
+        try:
+            return int(value) if value else DEFAULT_MEMBER_ROLE_LEVEL
+        except ValueError:
+            return DEFAULT_MEMBER_ROLE_LEVEL
+
+    @commands.Cog.listener()
+    async def on_member_level_up(self, user_id, old_level, new_level):
+        """Dispatched by the economy cog's leveling engine on a real level gain."""
+        newcomer_id, member_id = await self._role_setting_ids()
+        if not newcomer_id or not member_id:
+            return
+        if new_level < await self._member_role_level():
+            return
+
+        # XP is tracked per user, not per guild, so act only where both roles
+        # actually exist — that scopes this to the real server on its own.
+        for guild in self.bot.guilds:
+            if not guild.get_role(newcomer_id) or not guild.get_role(member_id):
+                continue
+            member = guild.get_member(user_id)
+            if member and not member.bot:
+                await self._swap_to_member_role(member, newcomer_id, member_id)
+
+    async def _swap_to_member_role(self, member, newcomer_id, member_id, reason="Reached member level"):
+        """Give the member role if they lack it, then take the newcomer role away
+        if they have it. Doing nothing is a valid outcome.
+
+        Add-before-remove on purpose: if the second call fails the member is left
+        holding both roles, which the hourly audit will finish. The reverse order
+        could strip their only role and leave them with nothing.
+        """
+        if member.id in self._graduating:
+            return
+        self._graduating.add(member.id)
+        try:
+            guild = member.guild
+            member_role = guild.get_role(member_id)
+            if not member_role:
+                logger.warning(f"Member role {member_id} no longer exists in {guild.name}.")
+                return
+
+            if not any(r.id == member_id for r in member.roles):
+                try:
+                    await member.add_roles(member_role, reason=reason)
+                except discord.Forbidden:
+                    logger.warning(
+                        f"Missing permissions to give {member_role.name} to {member.name} "
+                        f"({member.id}) — the bot needs Manage Roles and a role above it."
+                    )
+                    return
+                except discord.HTTPException as e:
+                    logger.warning(f"Could not give {member_role.name} to {member.name}: {e}")
+                    return
+
+            # Only now is it safe to drop the newcomer role.
+            newcomer_role = guild.get_role(newcomer_id)
+            if newcomer_role and any(r.id == newcomer_id for r in member.roles):
+                try:
+                    await member.remove_roles(newcomer_role, reason=reason)
+                except discord.HTTPException as e:
+                    logger.warning(
+                        f"Gave {member_role.name} to {member.name} but could not remove "
+                        f"{newcomer_role.name}: {e}"
+                    )
+                    return
+
+            logger.info(f"{member.name} ({member.id}) — {reason}, swapped to {member_role.name}.")
+        finally:
+            self._graduating.discard(member.id)
+
+    async def _levelled_user_ids(self, level):
+        """Every user id at or above `level`, straight from the economy cog.
+        None (not an empty set) if that cog isn't available to ask."""
+        economy = self.bot.get_cog("Economy")
+        if not economy or not getattr(economy, "db", None):
+            return None
+        rows = await economy.db.fetchall(
+            "SELECT user_id FROM users WHERE level >= ?", (level,)
+        )
+        return {row["user_id"] for row in rows}
+
+    async def audit_member_role_swaps(self, dry_run=False):
+        """Self-heal: anyone holding the newcomer role who is already at the
+        member level gets swapped over.
+
+        Covers level-ups missed while the bot was down, half-applied swaps
+        (both roles held because the remove failed), and members who levelled
+        before the roles were configured. Returns the members it did (or would)
+        swap, so this doubles as the dry run.
+        """
+        newcomer_id, member_id = await self._role_setting_ids()
+        if not newcomer_id or not member_id:
+            return []
+
+        level = await self._member_role_level()
+        due = await self._levelled_user_ids(level)
+        if due is None:
+            logger.warning("Economy cog unavailable — skipping member role audit.")
+            return []
+        if not due:
+            return []
+
+        swapped = []
+        for guild in self.bot.guilds:
+            if not guild.get_role(newcomer_id) or not guild.get_role(member_id):
+                continue
+            for user_id in due:
+                member = guild.get_member(user_id)
+                if not member or member.bot:
+                    continue
+                if not any(r.id == newcomer_id for r in member.roles):
+                    continue
+                swapped.append(member)
+                if not dry_run:
+                    await self._swap_to_member_role(
+                        member, newcomer_id, member_id, reason=f"Reached level {level}"
+                    )
+                    await asyncio.sleep(1)
+        return swapped
+
+    async def _grant_newcomer_role(self, member, role, reason):
+        """The one place the newcomer role is added. True if it was granted."""
+        if member.bot or any(r.id == role.id for r in member.roles):
+            return False
+        try:
+            await member.add_roles(role, reason=reason)
+            return True
+        except discord.Forbidden:
+            logger.warning(
+                f"Missing permissions to give {role.name} to {member.name} ({member.id}) — "
+                "the bot needs Manage Roles and a role above it."
+            )
+        except discord.HTTPException as e:
+            logger.warning(f"Could not give {role.name} to {member.name} ({member.id}): {e}")
+        return False
+
+    @commands.Cog.listener()
+    async def on_member_join(self, member):
+        """Give every new arrival the newcomer role set in the panel."""
+        if member.bot:
+            return
+        async with aiosqlite.connect(self.db_path) as db:
+            role = await self._newcomer_role(member.guild, db)
+        if role:
+            await self._grant_newcomer_role(member, role, "Newcomer role on join")
+
+    async def backfill_newcomer_role(self):
+        """Catch joins the bot missed while it was offline.
+
+        A join is only ever missed while the gateway is disconnected, so this
+        runs once per boot instead of on a loop. The watermark is seeded on the
+        first run and only ever moves forward, which means members who joined
+        before this feature existed are never touched, and a mod stripping the
+        role by hand is permanent — the backfill can't resurrect it.
+        """
+        await self._db_ready.wait()
+        await self.bot.wait_until_ready()
+
+        # Taken before the scan so anyone joining mid-scan is still covered on
+        # the next boot if their on_member_join lands in the gap.
+        started_at = datetime.datetime.now(datetime.timezone.utc)
+
+        async with aiosqlite.connect(self.db_path) as db:
+            since_value = await self._get_setting(db, 'newcomer_backfill_since')
+
+            since = None
+            if since_value:
+                try:
+                    since = datetime.datetime.fromisoformat(since_value)
+                    # joined_at is always tz-aware; a naive watermark would raise
+                    # on comparison rather than just being wrong.
+                    if since.tzinfo is None:
+                        since = since.replace(tzinfo=datetime.timezone.utc)
+                except ValueError:
+                    logger.warning(f"Unreadable newcomer_backfill_since ({since_value!r}); reseeding.")
+
+            if since is not None:
+                for guild in self.bot.guilds:
+                    role = await self._newcomer_role(guild, db)
+                    if not role:
+                        continue
+                    missed = [
+                        m for m in guild.members
+                        if not m.bot
+                        and m.joined_at is not None
+                        and m.joined_at > since
+                        and not any(r.id == role.id for r in m.roles)
+                    ]
+                    granted = 0
+                    for member in missed:
+                        if await self._grant_newcomer_role(member, role, "Newcomer role (missed while offline)"):
+                            granted += 1
+                        await asyncio.sleep(1)
+                    if granted:
+                        logger.info(
+                            f"Newcomer backfill ({guild.name}): gave {role.name} to {granted} "
+                            f"member(s) who joined while the bot was offline."
+                        )
+
+            # Advance unconditionally: with no role configured, "the future"
+            # starts now rather than retroactively once one is chosen.
+            await db.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('newcomer_backfill_since', ?)",
+                (started_at.isoformat(),),
+            )
+            await db.commit()
+        self._invalidate_setting('newcomer_backfill_since')
 
     @commands.Cog.listener()
     async def on_member_remove(self, member):
@@ -949,6 +1345,14 @@ class IntroCog(commands.Cog):
                 await self._audit_stale_tier_roles()
             except Exception as e:
                 logger.error(f"Audit failed: {e}", exc_info=True)
+
+            # Audit: nobody who reached the member level is still a newcomer
+            try:
+                swapped = await self.audit_member_role_swaps()
+                if swapped:
+                    logger.info(f"Member role audit: swapped {len(swapped)} newcomer(s).")
+            except Exception as e:
+                logger.error(f"Member role audit failed: {e}", exc_info=True)
         except Exception as e:
             await self.bot.error_reporter.report("Newcomer", f"decay_task: {e}")
 
@@ -1451,7 +1855,31 @@ class AdminPanelView(ui.View):
 
     @ui.button(label="Newcomer Role", style=discord.ButtonStyle.secondary, row=0)
     async def newcomer_role_btn(self, interaction, button):
-        await interaction.response.send_message("Select Newcomer Role to Track:", view=NewcomerRoleSelectView(self.cog), ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        others = await newcomer_role_summary(
+            self.cog.bot, interaction.guild, exclude="Newcomer cog"
+        )
+        await interaction.followup.send(
+            "**Select Newcomer Role to Track**\n"
+            "Granted on join, removed at the member level.\n\n"
+            f"Two other cogs keep their own newcomer role and are set separately:\n{others}",
+            view=NewcomerRoleSelectView(self.cog),
+            ephemeral=True,
+        )
+
+    @ui.button(label="Member Role", style=discord.ButtonStyle.secondary, row=0)
+    async def member_role_btn(self, interaction, button):
+        await interaction.response.defer(ephemeral=True)
+        level = await self.cog._member_role_level()
+        newcomer_id, member_id = await self.cog._role_setting_ids()
+        current = interaction.guild.get_role(member_id) if member_id else None
+        await interaction.followup.send(
+            f"**Member Role** — currently {current.mention if current else '*unset*'}.\n"
+            f"A newcomer is swapped onto it on reaching **level {level}** "
+            f"(economy cog), losing the newcomer role.",
+            view=MemberRoleSelectView(self.cog),
+            ephemeral=True,
+        )
 
     @ui.button(label="Tier / VIP Roles", style=discord.ButtonStyle.secondary, row=1)
     async def roles_btn(self, interaction, button):
@@ -1630,6 +2058,80 @@ class NewcomerRoleSelectView(ui.View):
             await db.commit()
         self.cog._invalidate_setting('newcomer_role')
         await interaction.response.send_message(f"Newcomer role set to {role.name}", ephemeral=True)
+
+class MemberRoleSelectView(ui.View):
+    def __init__(self, cog):
+        super().__init__()
+        self.cog = cog
+
+    @ui.select(cls=ui.RoleSelect, placeholder="Select Member Role", min_values=1, max_values=1)
+    async def member_role(self, interaction, select):
+        role = select.values[0]
+        async with aiosqlite.connect(self.cog.db_path) as db:
+            await db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('member_role', ?)", (str(role.id),))
+            await db.commit()
+        self.cog._invalidate_setting('member_role')
+        level = await self.cog._member_role_level()
+        await interaction.response.send_message(
+            f"Member role set to {role.name} — newcomers swap onto it at level {level}.",
+            ephemeral=True,
+        )
+
+    @ui.button(label="Change Level", style=discord.ButtonStyle.secondary, row=1)
+    async def change_level(self, interaction, button):
+        level = await self.cog._member_role_level()
+        await interaction.response.send_modal(MemberRoleLevelModal(self.cog, level))
+
+    @ui.button(label="Preview Who'd Swap", style=discord.ButtonStyle.secondary, row=1)
+    async def preview(self, interaction, button):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            pending = await self.cog.audit_member_role_swaps(dry_run=True)
+        except Exception as e:
+            return await interaction.followup.send(f"Preview failed: {e}", ephemeral=True)
+
+        level = await self.cog._member_role_level()
+        if not pending:
+            return await interaction.followup.send(
+                f"No newcomer is at level {level} yet — nothing would change.", ephemeral=True
+            )
+        names = ", ".join(m.display_name for m in pending[:30])
+        more = f" …and {len(pending) - 30} more" if len(pending) > 30 else ""
+        await interaction.followup.send(
+            f"**{len(pending)}** newcomer(s) are already level {level} and would be "
+            f"swapped to the member role by the next hourly audit:\n{names}{more}",
+            ephemeral=True,
+        )
+
+
+class MemberRoleLevelModal(ui.Modal, title="Level Required for Member Role"):
+    level = ui.TextInput(label="Level", max_length=4)
+
+    def __init__(self, cog, current):
+        super().__init__()
+        self.cog = cog
+        self.level.default = str(current)
+
+    async def on_submit(self, interaction):
+        try:
+            value = int(self.level.value)
+            if value < 1:
+                raise ValueError
+        except ValueError:
+            return await interaction.response.send_message(
+                "Enter a whole number of 1 or more.", ephemeral=True
+            )
+        async with aiosqlite.connect(self.cog.db_path) as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('member_role_level', ?)",
+                (str(value),),
+            )
+            await db.commit()
+        self.cog._invalidate_setting('member_role_level')
+        await interaction.response.send_message(
+            f"Newcomers now become members at level {value}.", ephemeral=True
+        )
+
 
 class PointThresholdModal(ui.Modal, title="Points Required per Tier"):
     t2 = ui.TextInput(label="Tier 2 Points", max_length=4)
@@ -1901,7 +2403,17 @@ class PointListView(ui.View):
 
         async with aiosqlite.connect(self.cog.db_path) as db:
             if mode == "30days":
-                cursor = await db.execute("SELECT user_id, points FROM user_points WHERE points > 0 ORDER BY points DESC")
+                # Straight off the ledger, which carries a real earned_at date.
+                # user_points is only a running balance: it tracks this closely
+                # because points decay at 30 days, but anything that lands there
+                # without a ledger row behind it can never decay back out and
+                # sticks to the list forever.
+                thirty_days_ago = (datetime.date.today() - datetime.timedelta(days=30)).isoformat()
+                cursor = await db.execute(
+                    "SELECT user_id, SUM(points) FROM point_ledger WHERE earned_at >= ? "
+                    "GROUP BY user_id HAVING SUM(points) > 0 ORDER BY SUM(points) DESC",
+                    (thirty_days_ago,)
+                )
                 self.data = await cursor.fetchall()
             elif mode == "60days":
                 thirty_days_ago = (datetime.date.today() - datetime.timedelta(days=30)).isoformat()

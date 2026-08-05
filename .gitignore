@@ -25,6 +25,7 @@ bot.log*
 *.db-shm
 *.db-wal
 *.db-journal
+*.db.bak-*
 
 # Runtime data files
 bot_data.json

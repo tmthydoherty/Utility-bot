@@ -124,7 +124,11 @@ export function Topbar({
           <kbd className="rounded border border-[var(--border-strong)] px-1 font-mono text-[10px]">⌘K</kbd>
         </div>
 
-        <DropdownMenu>
+        {/* modal={false} is deliberate. Radix's modal mode locks body scroll
+            and compensates for the scrollbar it removes, which visibly shunts
+            the whole page sideways the moment the menu opens. A small account
+            menu does not need a focus trap or a scroll lock. */}
+        <DropdownMenu modal={false}>
           <DropdownMenuTrigger asChild>
             <button
               type="button"

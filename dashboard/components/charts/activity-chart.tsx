@@ -36,7 +36,14 @@ export function ActivityChart({
   valueLabel?: string;
 }) {
   const [hover, setHover] = React.useState<number | null>(null);
-  const [width, setWidth] = React.useState(720);
+  // Starts at zero, not at a guess.
+  //
+  // This used to default to 720. An <svg width="720"> makes its grid track
+  // 720px wide, and a CSS grid item is `min-width: auto` by default — so the
+  // track never shrank back once measured, and the whole page scrolled
+  // sideways on a phone forever. Rendering nothing until the real width is
+  // known means the chart can only ever be as wide as its container.
+  const [width, setWidth] = React.useState(0);
   const wrapRef = React.useRef<HTMLDivElement>(null);
   const gradientId = React.useId();
 
@@ -81,7 +88,15 @@ export function ActivityChart({
   const active = hover !== null ? data[hover] : undefined;
 
   return (
-    <div ref={wrapRef} className={cn("relative w-full select-none", className)}>
+    <div
+      ref={wrapRef}
+      // The ref has to be mounted for the observer to measure anything, so the
+      // wrapper always renders and reserves the height. min-w-0 stops it from
+      // being sized by its own contents.
+      className={cn("relative w-full min-w-0 select-none", className)}
+      style={{ minHeight: height }}
+    >
+      {width > 0 && (
       <svg
         width={width}
         height={height}
@@ -174,6 +189,7 @@ export function ActivityChart({
           {data[data.length - 1]?.label}
         </text>
       </svg>
+      )}
 
       {active && hover !== null && (
         <div

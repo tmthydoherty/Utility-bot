@@ -95,8 +95,11 @@ export default async function OverviewPage({
         ))}
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-3">
-        <Reveal className="lg:col-span-2">
+      {/* min-w-0 on the tracks and on each item: without it a grid item is
+          sized by its content and a single wide child (the chart) widens the
+          whole page rather than being constrained by it. */}
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+        <Reveal className="min-w-0">
           <Card className="h-full p-5 sm:p-6">
             <div className="flex items-start justify-between gap-4">
               <div>
@@ -113,7 +116,7 @@ export default async function OverviewPage({
           </Card>
         </Reveal>
 
-        <Reveal delay={1}>
+        <Reveal delay={1} className="min-w-0">
           <Card className="flex h-full flex-col p-5 sm:p-6">
             <div className="flex items-start justify-between gap-4">
               <div>

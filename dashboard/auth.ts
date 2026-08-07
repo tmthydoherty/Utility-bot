@@ -25,6 +25,27 @@ import { checkGuildAdmin } from "@/lib/auth/authorize";
  */
 const UNAVAILABLE_GRACE_MS = 30 * 60 * 1000;
 
+/**
+ * The signed-in user's *Discord* ID.
+ *
+ * Not `user.id`. Without a database adapter Auth.js mints a random UUID for
+ * `user.id` (and copies it into `token.sub`), so reading it here sends
+ * something like "103f700b-518b-…" to Discord's members endpoint, which
+ * answers 400 "not snowflake" — surfacing to the user as "couldn't reach
+ * Discord" and denying every single login. The provider's own identifier is on
+ * `profile.id`, with `account.providerAccountId` carrying the same value.
+ */
+function discordUserId(
+  profile: { id?: unknown } | null | undefined,
+  account: { providerAccountId?: string | null } | null | undefined,
+): string | null {
+  const candidate = profile?.id ?? account?.providerAccountId;
+  if (typeof candidate !== "string") return null;
+  // Validate here rather than letting Discord reject it: a bad ID is a bug on
+  // our side, and it should not look like an outage.
+  return /^\d{17,20}$/.test(candidate) ? candidate : null;
+}
+
 export const { handlers, auth, signIn, signOut } = NextAuth({
   ...authConfig,
 
@@ -36,17 +57,18 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
      * before any session cookie is written, so a rejected account leaves no
      * trace of a login at all.
      */
-    async signIn({ user }) {
-      if (!user.id) return false;
-      const result = await checkGuildAdmin(user.id);
+    async signIn({ profile, account }) {
+      const discordId = discordUserId(profile, account);
+      if (!discordId) return false;
+      const result = await checkGuildAdmin(discordId);
       if (result.ok) return true;
       return `${AUTH_PAGES.denied}?reason=${result.reason}`;
     },
 
-    async jwt({ token, user }) {
-      // First call after a successful sign-in.
-      if (user?.id) {
-        token.uid = user.id;
+    async jwt({ token, account, profile }) {
+      // First call after a successful sign-in. `account` is only present then.
+      if (account) {
+        token.uid = discordUserId(profile, account) ?? undefined;
         token.checkedAt = 0; // force an immediate authoritative check below
       }
 

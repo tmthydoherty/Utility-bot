@@ -26,6 +26,15 @@ export const DENY_MESSAGES: Record<DenyReason, string> = {
 };
 
 export async function checkGuildAdmin(userId: string): Promise<AuthorizationResult> {
+  // Reject a malformed ID before it reaches Discord. Passing one through gets a
+  // 400 that lands in the catch below and reports as "couldn't reach Discord" —
+  // an outage message for what is actually a bug on our side, which is exactly
+  // how the UUID-vs-snowflake mix-up stayed hidden.
+  if (!/^\d{17,20}$/.test(userId)) {
+    console.error(`[authorize] refusing to check a non-snowflake user id: ${userId}`);
+    return { ok: false, reason: "unavailable" };
+  }
+
   try {
     const guildId = env.VIBEY_GUILD_ID;
 

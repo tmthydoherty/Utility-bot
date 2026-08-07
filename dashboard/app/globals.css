@@ -173,8 +173,33 @@
     font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
-    /* Kills the horizontal rubber-band that glass blur edges can cause. */
-    overflow-x: hidden;
+  }
+
+  /*
+   * Nothing may scroll the page sideways.
+   *
+   * `clip` rather than `hidden`: overflow-x:hidden on body silently makes it a
+   * scroll container, which on iOS lets `position: fixed` children (the bottom
+   * tab bar) drift while the page is panned. `clip` cuts the overflow without
+   * creating a scroll port, so the tab bar stays welded to the viewport.
+   *
+   * This is a safety net, not the fix — a child that forces the page wider is
+   * still a bug to correct at the source (see the width note in
+   * components/charts/activity-chart.tsx). It just stops one stray element
+   * from ruining every page on a phone.
+   */
+  html,
+  body {
+    overflow-x: clip;
+    max-width: 100%;
+  }
+
+  /* An intrinsically-sized SVG or image should never widen its container. */
+  svg,
+  img,
+  video,
+  canvas {
+    max-width: 100%;
   }
 
   ::selection {

@@ -52,11 +52,22 @@ export async function checkGuildAdmin(userId: string): Promise<AuthorizationResu
     if (isAdministrator) return { ok: true, grantedBy: "administrator" };
 
     return { ok: false, reason: "no-admin" };
-  } catch {
+  } catch (error) {
     // Fail closed. A Discord outage locking admins out for a few minutes is a
     // far better failure than an outage letting anyone in — and every other
     // branch above returns an explicit decision, so reaching here really does
     // mean "we don't know".
+    //
+    // It must also say *why*. This catch was silent to begin with, and the
+    // first time it fired in production the only evidence anywhere was a
+    // user-facing "couldn't reach Discord" — no stack, no status, nothing in
+    // the journal. An authorisation path that fails invisibly is one you
+    // cannot debug at exactly the moment you need to.
+    console.error(
+      `[authorize] guild admin check failed for user ${userId}:`,
+      error instanceof Error ? `${error.name}: ${error.message}` : error,
+      error instanceof Error && error.stack ? `\n${error.stack}` : "",
+    );
     return { ok: false, reason: "unavailable" };
   }
 }

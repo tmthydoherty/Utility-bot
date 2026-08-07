@@ -1,0 +1,28 @@
+# Merge into /etc/cloudflared/config.yml (and ~/.cloudflared/config.yml, which
+# is currently a copy of it).
+#
+# Order matters: cloudflared takes the FIRST matching rule, and the bare
+# `service: http_status:404` at the end matches everything. Both new hostnames
+# must sit above it.
+#
+# After editing:  sudo systemctl restart cloudflared
+#
+# The resulting file should read:
+#
+# tunnel: d983157c-4adc-4417-8ddf-e849632bd3da
+# credentials-file: /home/tmthy/.cloudflared/d983157c-4adc-4417-8ddf-e849632bd3da.json
+#
+# ingress:
+#   - hostname: survivor-app.org
+#     service: http://localhost:3000
+#   - hostname: vibe-y.us
+#     service: http://localhost:3100
+#   - hostname: www.vibe-y.us
+#     service: http://localhost:3100
+#   - service: http_status:404
+
+ingress:
+  - hostname: vibe-y.us
+    service: http://localhost:3100
+  - hostname: www.vibe-y.us
+    service: http://localhost:3100

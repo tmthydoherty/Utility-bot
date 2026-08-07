@@ -1,0 +1,60 @@
+[Unit]
+Description=Vibey Dashboard (Next.js)
+Documentation=file:///home/tmthy/Vibey/dashboard/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tmthy
+Group=tmthy
+WorkingDirectory=/home/tmthy/Vibey/dashboard
+
+# 3000 is taken by the survivor-app.org site already behind the same tunnel.
+Environment=NODE_ENV=production
+Environment=PORT=3100
+EnvironmentFile=/home/tmthy/Vibey/dashboard/.env.local
+
+ExecStart=/usr/bin/npm run start
+Restart=always
+RestartSec=5
+# Give up and stay down if it crash-loops, rather than hammering a Pi that is
+# also running four Discord bots.
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vibey-dashboard
+
+# --- Hardening -------------------------------------------------------------
+# The dashboard holds the bot token and is the one process here reachable from
+# the internet, so it gets the tightest sandbox that still lets it work.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# ProtectHome=read-only makes the whole home tree read-only; these are the only
+# two places the process legitimately writes.
+ReadWritePaths=/home/tmthy/Vibey/dashboard/data
+ReadWritePaths=/home/tmthy/Vibey/dashboard/.next
+
+# Comfortably above the ~200MB it actually uses; a leak gets killed rather than
+# taking the bots down with it.
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

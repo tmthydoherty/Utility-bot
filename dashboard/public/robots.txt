@@ -1,0 +1,4 @@
+# Private admin surface. Nothing here should ever be indexed — a login page in
+# search results is free reconnaissance for anyone looking for a way in.
+User-agent: *
+Disallow: /

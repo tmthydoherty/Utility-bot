@@ -1,0 +1,18 @@
+node_modules/
+.next/
+out/
+next-env.d.ts
+*.tsbuildinfo
+
+# Secrets — Discord client secret and the bot token live here.
+.env
+.env*.local
+
+# The root .gitignore has a blanket `.env.*`, which also swallows the template.
+# It contains no values, and losing it means nobody can tell what needs setting.
+!.env.example
+
+# Dashboard-local SQLite (audit log, rate limiter, settings drafts).
+data/*.db
+data/*.db-shm
+data/*.db-wal

@@ -1,0 +1,495 @@
+@import "tailwindcss";
+
+/*
+ * Tokens.
+ *
+ * Every component reads these names and never a literal colour, which is the
+ * only reason a second theme is a re-valuing rather than a rewrite. The dark
+ * set is the default and lives on :root so a document with no data-theme yet
+ * (the split second before the pre-paint script runs) still paints dark
+ * instead of flashing white.
+ */
+:root,
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: #0a0a0f;
+  --bg-elevated: #101017;
+  --bg-inset: #08080c;
+
+  /* Glass: translucent white over the canvas, not a solid grey. */
+  --surface: rgb(255 255 255 / 0.045);
+  --surface-hover: rgb(255 255 255 / 0.07);
+  --surface-active: rgb(255 255 255 / 0.1);
+  --surface-solid: #14141c;
+
+  --border: rgb(255 255 255 / 0.09);
+  --border-strong: rgb(255 255 255 / 0.16);
+
+  --fg: #f4f4f6;
+  --fg-muted: #9ca0ae;
+  --fg-subtle: #6b6f7d;
+
+  --accent: #8b5cf6;
+  --accent-hover: #9d74f8;
+  --accent-2: #d946ef;
+  --accent-fg: #ffffff;
+  --accent-soft: rgb(139 92 246 / 0.14);
+
+  --success: #34d399;
+  --success-soft: rgb(52 211 153 / 0.14);
+  --warning: #fbbf24;
+  --warning-soft: rgb(251 191 36 / 0.14);
+  --danger: #f87171;
+  --danger-soft: rgb(248 113 113 / 0.14);
+
+  --ring: rgb(139 92 246 / 0.6);
+
+  /* Four-step elevation. Dark UIs read depth from glow, not drop shadow. */
+  --elev-1: 0 1px 2px rgb(0 0 0 / 0.4);
+  --elev-2: 0 4px 16px -4px rgb(0 0 0 / 0.5);
+  --elev-3: 0 12px 40px -12px rgb(0 0 0 / 0.6);
+  --elev-4: 0 24px 70px -20px rgb(0 0 0 / 0.7);
+  --glow: 0 0 0 1px rgb(139 92 246 / 0.3), 0 10px 40px -12px rgb(139 92 246 / 0.45);
+
+  /* Restrained on purpose. The first pass ran these two to three times
+   * stronger and the aurora stopped being a backdrop — it tinted every glass
+   * surface on top of it, so a stat tile read as purple rather than as dark
+   * glass. The canvas has to stay near-black for the accent to mean anything. */
+  --aurora-1: rgb(139 92 246 / 0.22);
+  --aurora-2: rgb(217 70 239 / 0.16);
+  --aurora-3: rgb(56 189 248 / 0.1);
+  --aurora-opacity: 0.85;
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #f6f6fa;
+  --bg-elevated: #ffffff;
+  --bg-inset: #eeeef4;
+
+  --surface: rgb(255 255 255 / 0.78);
+  --surface-hover: rgb(255 255 255 / 0.95);
+  --surface-active: #ffffff;
+  --surface-solid: #ffffff;
+
+  --border: rgb(12 12 24 / 0.08);
+  --border-strong: rgb(12 12 24 / 0.16);
+
+  --fg: #14141c;
+  --fg-muted: #55596b;
+  --fg-subtle: #7b8095;
+
+  --accent: #7c3aed;
+  --accent-hover: #6d28d9;
+  --accent-2: #c026d3;
+  --accent-fg: #ffffff;
+  --accent-soft: rgb(124 58 237 / 0.1);
+
+  --success: #059669;
+  --success-soft: rgb(5 150 105 / 0.1);
+  --warning: #b45309;
+  --warning-soft: rgb(180 83 9 / 0.1);
+  --danger: #dc2626;
+  --danger-soft: rgb(220 38 38 / 0.1);
+
+  --ring: rgb(124 58 237 / 0.5);
+
+  --elev-1: 0 1px 2px rgb(12 12 24 / 0.05);
+  --elev-2: 0 4px 16px -4px rgb(12 12 24 / 0.1);
+  --elev-3: 0 12px 40px -12px rgb(12 12 24 / 0.14);
+  --elev-4: 0 24px 70px -20px rgb(12 12 24 / 0.18);
+  --glow: 0 0 0 1px rgb(124 58 237 / 0.22), 0 10px 40px -12px rgb(124 58 237 / 0.3);
+
+  --aurora-1: rgb(139 92 246 / 0.16);
+  --aurora-2: rgb(217 70 239 / 0.12);
+  --aurora-3: rgb(56 189 248 / 0.1);
+  --aurora-opacity: 0.55;
+}
+
+/* Expose the tokens to Tailwind so `bg-surface`, `text-fg-muted` etc. exist
+ * and follow the theme without a dark: variant on every single element. */
+@theme inline {
+  --color-bg: var(--bg);
+  --color-bg-elevated: var(--bg-elevated);
+  --color-bg-inset: var(--bg-inset);
+  --color-surface: var(--surface);
+  --color-surface-hover: var(--surface-hover);
+  --color-surface-active: var(--surface-active);
+  --color-surface-solid: var(--surface-solid);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-fg: var(--fg);
+  --color-fg-muted: var(--fg-muted);
+  --color-fg-subtle: var(--fg-subtle);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-2: var(--accent-2);
+  --color-accent-fg: var(--accent-fg);
+  --color-accent-soft: var(--accent-soft);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+
+  --radius-xs: 6px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 24px;
+  --radius-2xl: 32px;
+
+  --shadow-elev-1: var(--elev-1);
+  --shadow-elev-2: var(--elev-2);
+  --shadow-elev-3: var(--elev-3);
+  --shadow-elev-4: var(--elev-4);
+  --shadow-glow: var(--glow);
+
+  /* Motion scale. Named so nothing invents its own duration. */
+  --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out-quint: cubic-bezier(0.83, 0, 0.17, 1);
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+    /* iOS Safari: stop the address bar collapse from resizing 100vh mid-scroll. */
+    scroll-behavior: smooth;
+  }
+
+  body {
+    background-color: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    /* Kills the horizontal rubber-band that glass blur edges can cause. */
+    overflow-x: hidden;
+  }
+
+  ::selection {
+    background: var(--accent-soft);
+    color: var(--fg);
+  }
+
+  /* One focus treatment everywhere, and it is always visible. Removing the
+   * outline without replacing it is how a dashboard becomes unusable by
+   * keyboard, so this is deliberately not overridable per-component. */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+    border-radius: var(--radius-xs);
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--border-strong);
+    border-radius: 999px;
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--fg-subtle);
+    background-clip: content-box;
+  }
+
+  /* Chrome/Safari autofill repaints the input with its own yellow. */
+  input:-webkit-autofill,
+  input:-webkit-autofill:focus {
+    -webkit-text-fill-color: var(--fg);
+    -webkit-box-shadow: 0 0 0 1000px var(--surface-solid) inset;
+    caret-color: var(--fg);
+  }
+}
+
+@layer components {
+  /* The house surface: translucent, blurred, hairline-bordered, with a soft
+   * top highlight so a card reads as a pane of glass rather than a grey box. */
+  .glass {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    backdrop-filter: blur(20px) saturate(140%);
+    -webkit-backdrop-filter: blur(20px) saturate(140%);
+    position: relative;
+  }
+
+  .glass-highlight::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding: 1px;
+    background: linear-gradient(
+      160deg,
+      rgb(255 255 255 / 0.14),
+      rgb(255 255 255 / 0) 40%
+    );
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    pointer-events: none;
+  }
+
+  [data-theme="light"] .glass-highlight::before {
+    background: linear-gradient(160deg, rgb(255 255 255 / 0.9), rgb(255 255 255 / 0) 45%);
+  }
+
+  .text-gradient {
+    background: linear-gradient(100deg, var(--fg) 10%, var(--accent) 55%, var(--accent-2) 95%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  .accent-gradient {
+    background-image: linear-gradient(100deg, var(--accent), var(--accent-2));
+  }
+
+  /* Hairline separator that fades at both ends — reads as intentional where a
+   * hard 1px line across a glass panel reads as a seam. */
+  .rule {
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--border), transparent);
+  }
+
+  /*
+   * Enter/exit for Radix poppers (tooltip, dropdown, popover).
+   *
+   * These live in CSS rather than in the animation library because Radix
+   * unmounts on close and only keeps the element around while
+   * data-state="closed" is animating — driving that from React means
+   * coordinating presence with a library that already handles it.
+   */
+  .pop-anim {
+    animation: pop-in 0.15s var(--ease-out-quint);
+    transform-origin: var(--radix-popper-transform-origin, center);
+  }
+
+  .pop-anim[data-state="closed"] {
+    animation: pop-out 0.1s ease-in forwards;
+  }
+
+  .overlay-anim {
+    animation: fade-in 0.2s var(--ease-out-quint);
+  }
+
+  .overlay-anim[data-state="closed"] {
+    animation: fade-out 0.15s ease-in forwards;
+  }
+
+  /* The content column sits beside the sidebar, but only where the sidebar
+   * exists. An inline style cannot express a breakpoint, and the width has to
+   * stay a variable so the save bar can align to the same edge. */
+  .shell-content {
+    padding-left: 0;
+  }
+
+  @media (min-width: 1024px) {
+    .shell-content {
+      padding-left: var(--sidebar-width, 17rem);
+    }
+  }
+
+  /* Compact density tightens the vertical rhythm without changing type size —
+   * shrinking the text would trade scannability for the same win. */
+  [data-density="compact"] .shell-content main {
+    --density-gap: 1rem;
+  }
+}
+
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: scale(0.95) translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes pop-out {
+  to {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes fade-out {
+  to {
+    opacity: 0;
+  }
+}
+
+/*
+ * Aurora backdrop.
+ *
+ * Pure CSS on purpose: this is a full-viewport, always-on animation, and
+ * driving it from JS on a Raspberry Pi-served dashboard would burn main-thread
+ * time on every device forever. Three blurred blobs on long, offset cycles
+ * read as organic without ever repeating visibly.
+ *
+ * `transform` only — no width/left/filter animation — so it stays on the
+ * compositor.
+ */
+.aurora {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  pointer-events: none;
+  opacity: var(--aurora-opacity);
+  contain: strict;
+}
+
+.aurora::before,
+.aurora::after,
+.aurora > span {
+  content: "";
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(120px);
+  will-change: transform;
+}
+
+.aurora::before {
+  width: 60vmax;
+  height: 60vmax;
+  top: -22vmax;
+  left: -14vmax;
+  background: var(--aurora-1);
+  animation: aurora-a 26s var(--ease-in-out-quint) infinite;
+}
+
+.aurora::after {
+  width: 48vmax;
+  height: 48vmax;
+  top: -6vmax;
+  right: -16vmax;
+  background: var(--aurora-2);
+  animation: aurora-b 34s var(--ease-in-out-quint) infinite;
+}
+
+.aurora > span {
+  width: 42vmax;
+  height: 42vmax;
+  bottom: -20vmax;
+  left: 28vw;
+  background: var(--aurora-3);
+  animation: aurora-c 30s var(--ease-in-out-quint) infinite;
+}
+
+@keyframes aurora-a {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(12vw, 8vh, 0) scale(1.18);
+  }
+}
+
+@keyframes aurora-b {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1.1);
+  }
+  50% {
+    transform: translate3d(-14vw, 12vh, 0) scale(0.9);
+  }
+}
+
+@keyframes aurora-c {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(0.95);
+  }
+  50% {
+    transform: translate3d(10vw, -14vh, 0) scale(1.25);
+  }
+}
+
+/* A backgrounded tab should cost nothing. Set by ThemeProvider on
+ * visibilitychange — browsers throttle rAF but not CSS compositor animations. */
+[data-tab-hidden="true"] .aurora::before,
+[data-tab-hidden="true"] .aurora::after,
+[data-tab-hidden="true"] .aurora > span {
+  animation-play-state: paused;
+}
+
+/* Shimmer used by skeletons. */
+@keyframes shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+.shimmer::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, var(--surface-hover), transparent);
+  animation: shimmer 1.6s infinite;
+}
+
+/*
+ * Reduced motion is not a nicety here — vestibular triggers are real and this
+ * design leans hard on movement. Everything collapses, including the aurora,
+ * which stops entirely rather than slowing down.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .aurora::before,
+  .aurora::after,
+  .aurora > span {
+    animation: none !important;
+  }
+
+  .shimmer::after {
+    animation: none !important;
+    opacity: 0.5;
+  }
+}
+
+/* Same, but user-chosen from the dashboard's own settings rather than the OS. */
+[data-motion="reduced"] .aurora::before,
+[data-motion="reduced"] .aurora::after,
+[data-motion="reduced"] .aurora > span {
+  animation: none !important;
+}

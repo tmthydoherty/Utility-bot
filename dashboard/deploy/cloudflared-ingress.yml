@@ -1,28 +1,42 @@
-# Merge into /etc/cloudflared/config.yml (and ~/.cloudflared/config.yml, which
-# is currently a copy of it).
+# READ THIS BEFORE EDITING ANY cloudflared CONFIG FILE ON THIS PI.
 #
-# Order matters: cloudflared takes the FIRST matching rule, and the bare
-# `service: http_status:404` at the end matches everything. Both new hostnames
-# must sit above it.
+# The tunnel here is *remotely managed*. The systemd unit runs
 #
-# After editing:  sudo systemctl restart cloudflared
+#     cloudflared --no-autoupdate tunnel run --token <token>
 #
-# The resulting file should read:
+# with no --config flag, which means its ingress rules come from Cloudflare
+# (Zero Trust -> Networks -> Tunnels -> Public Hostnames) and NOT from any file
+# on disk. Editing /etc/cloudflared/config.yml has no effect whatsoever.
 #
-# tunnel: d983157c-4adc-4417-8ddf-e849632bd3da
-# credentials-file: /home/tmthy/.cloudflared/d983157c-4adc-4417-8ddf-e849632bd3da.json
+# That file is also a decoy: it names tunnel d983157c-4adc-4417-8ddf-e849632bd3da,
+# which is dead. The tunnel actually running is:
 #
-# ingress:
-#   - hostname: survivor-app.org
-#     service: http://localhost:3000
-#   - hostname: vibe-y.us
-#     service: http://localhost:3100
-#   - hostname: www.vibe-y.us
-#     service: http://localhost:3100
-#   - service: http_status:404
-
-ingress:
-  - hostname: vibe-y.us
-    service: http://localhost:3100
-  - hostname: www.vibe-y.us
-    service: http://localhost:3100
+#     ff423710-c286-488d-b7c3-078b019bd342
+#
+# Confirm it yourself rather than trusting either file — decode the `t` field of
+# the token in the unit:
+#
+#     systemctl cat cloudflared | sed -n 's/.*--token \(.*\)/\1/p' \
+#       | python3 -c "import sys,base64,json;print(json.loads(base64.b64decode(sys.stdin.read().strip()+'=='))['t'])"
+#
+# DNS records for a tunnel hostname must CNAME to <TUNNEL-ID>.cfargotunnel.com
+# using the id above. Pointing at the dead tunnel's id resolves fine and then
+# fails with Cloudflare error 530 / 1033, which reads like the origin is down
+# rather than like a wrong target.
+#
+# The current ingress (set 2026-08-06):
+#
+#     nbahub.survivor-app.org  -> http://localhost:9090
+#     survivor-app.org         -> http://localhost:3000
+#     vibe-y.us                -> http://localhost:3100   (this dashboard)
+#     www.vibe-y.us            -> http://localhost:3100
+#     (catch-all)              -> http_status:404
+#
+# To change it, either use the Zero Trust dashboard, or PUT to
+# /accounts/<account>/cfd_tunnel/<tunnel>/configurations. Whichever you use,
+# keep the catch-all last — cloudflared takes the first matching rule, so any
+# rule after it is unreachable.
+#
+# Adding a Public Hostname through the Zero Trust dashboard creates the DNS
+# record for you. Adding one through the API does not — you have to create the
+# CNAME separately.

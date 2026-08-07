@@ -15,7 +15,13 @@ Environment=NODE_ENV=production
 Environment=PORT=3100
 EnvironmentFile=/home/tmthy/Vibey/dashboard/.env.local
 
-ExecStart=/usr/bin/npm run start
+# Absolute path to the nvm Node, not `npm run start`.
+# /usr/bin/node on this Pi is v18; the build targets the v20 that nvm provides
+# and that an interactive shell picks up. systemd gets no shell and no nvm
+# init, so it would silently run the wrong runtime. vibeymusic.service pins the
+# same path for the same reason. Calling next's binary directly also drops the
+# npm wrapper process, so systemd supervises the server itself.
+ExecStart=/home/tmthy/.nvm/versions/node/v20.20.0/bin/node /home/tmthy/Vibey/dashboard/node_modules/next/dist/bin/next start -p 3100
 Restart=always
 RestartSec=5
 # Give up and stay down if it crash-loops, rather than hammering a Pi that is
@@ -45,7 +51,11 @@ RestrictRealtime=true
 RestrictNamespaces=true
 LockPersonality=true
 MemoryDenyWriteExecute=false
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# AF_NETLINK is required: Node enumerates network interfaces at startup via
+# uv_interface_addresses(), which uses a netlink socket on Linux. Without it
+# the process dies with a bare "Unknown system error 97" before serving
+# anything. It grants no network reach — netlink is kernel-local.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 
 # ProtectHome=read-only makes the whole home tree read-only; these are the only
 # two places the process legitimately writes.

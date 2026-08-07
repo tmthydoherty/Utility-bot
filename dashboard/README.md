@@ -99,21 +99,30 @@ sudo systemctl enable --now vibey-dashboard
 sudo systemctl status vibey-dashboard
 ```
 
-Then merge `deploy/cloudflared-ingress.yml` into `/etc/cloudflared/config.yml`
-(above the `http_status:404` catch-all) and
-`sudo systemctl restart cloudflared`.
+### The tunnel
+
+**Do not edit `/etc/cloudflared/config.yml` — it is not what runs.** The tunnel
+is remotely managed from Cloudflare Zero Trust, and that file is a leftover
+naming a dead tunnel. Read `deploy/cloudflared-ingress.yml` before touching
+anything tunnel-related; it explains how to find the live tunnel ID and where
+the real ingress lives.
+
+The dashboard's rules (`vibe-y.us` and `www.vibe-y.us` → `localhost:3100`) are
+already in place.
 
 ### One-time manual steps
 
-1. **Cloudflare** — add `vibe-y.us` as a site and point the registrar's
-   nameservers at the two Cloudflare provides.
+1. ~~Cloudflare nameservers~~ — not needed. The domain was bought through
+   Cloudflare Registrar, so the zone was already active.
 2. **DNS** — CNAME `@` and `www` →
-   `d983157c-4adc-4417-8ddf-e849632bd3da.cfargotunnel.com`, proxied.
+   `ff423710-c286-488d-b7c3-078b019bd342.cfargotunnel.com`, proxied (orange).
+   Note the tunnel ID: the one in `/etc/cloudflared/config.yml` is dead, and
+   pointing at it gives a Cloudflare 530 that looks like the origin is down.
 3. **Discord Developer Portal** → OAuth2 → add redirect URLs
    `https://vibe-y.us/api/auth/callback/discord` and
-   `http://localhost:3100/api/auth/callback/discord`, then put the Client ID and
-   Client Secret in `.env.local`.
-4. Set `AUTH_URL=https://vibe-y.us` in `.env.local` once DNS is live.
+   `http://localhost:3100/api/auth/callback/discord`, then put the Client
+   Secret in `.env.local`.
+4. `AUTH_URL=https://vibe-y.us` in `.env.local` (already set).
 
 ## Layout
 

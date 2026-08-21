@@ -170,7 +170,7 @@ class AdminActions:
 
 
     async def ow_role_ranks(self, interaction: discord.Interaction, button: discord.ui.Button = None):
-        games = [g for g in await DatabaseHelper.get_all_games() if is_overwatch_game(g)]
+        games = [g for g in await DatabaseHelper.get_all_games(enabled_only=True) if is_overwatch_game(g)]
         if not games:
             await self.render(interaction, flash="⚠️ No Overwatch game configured.")
             return
@@ -246,7 +246,7 @@ class AdminActions:
         await interaction.response.send_modal(modal)
 
     async def force_start(self, interaction: discord.Interaction, button: discord.ui.Button):
-        games = await DatabaseHelper.get_all_games()
+        games = await DatabaseHelper.get_all_games(enabled_only=True)
         if not games:
             await self.render(interaction, flash="⚠️ No games configured.")
             return
@@ -319,7 +319,7 @@ class AdminActions:
         )
 
     async def clear_queue(self, interaction: discord.Interaction, button: discord.ui.Button = None):
-        games = await DatabaseHelper.get_all_games()
+        games = await DatabaseHelper.get_all_games(enabled_only=True)
         if not games:
             await self.render(interaction, flash="⚠️ No games configured.")
             return
@@ -377,7 +377,7 @@ class AdminActions:
             await self.render_original(interaction, "Cancelled.")
 
     async def queue_start(self, interaction: discord.Interaction, button: discord.ui.Button = None):
-        games = await DatabaseHelper.get_all_games()
+        games = await DatabaseHelper.get_all_games(enabled_only=True)
         if not games:
             await self.render(interaction, flash="⚠️ No games configured.")
             return
@@ -421,7 +421,7 @@ class AdminActions:
         await self.show_child(interaction, view, "Suspensions")
 
     async def remove_from_queue(self, interaction: discord.Interaction, button: discord.ui.Button = None):
-        games = await DatabaseHelper.get_all_games()
+        games = await DatabaseHelper.get_all_games(enabled_only=True)
         if not games:
             await self.render(interaction, flash="⚠️ No games configured.")
             return
@@ -449,7 +449,7 @@ class AdminActions:
         await self.show_child(interaction, view, "Adjust W/L — select a user")
 
     async def set_player_mmr_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        games = await DatabaseHelper.get_all_games()
+        games = await DatabaseHelper.get_all_games(enabled_only=True)
         if not games:
             await self.render(interaction, flash="⚠️ No games configured.")
             return
@@ -457,7 +457,7 @@ class AdminActions:
         await self.show_child(interaction, view, "Set Player MMR — select a user and game")
 
     async def view_player_mmr_btn(self, interaction: discord.Interaction, button: discord.ui.Button = None):
-        games = await DatabaseHelper.get_all_games()
+        games = await DatabaseHelper.get_all_games(enabled_only=True)
         if not games:
             await self.render(interaction, flash="⚠️ No games configured.")
             return
@@ -465,7 +465,7 @@ class AdminActions:
         await self.show_child(interaction, view, "User View — select a user and game")
 
     async def set_platform_btn(self, interaction: discord.Interaction, button: discord.ui.Button = None):
-        games = [g for g in await DatabaseHelper.get_all_games() if g.pc_enabled]
+        games = [g for g in await DatabaseHelper.get_all_games(enabled_only=True) if g.pc_enabled]
         if not games:
             await interaction.response.send_message(
                 "No PC-enabled games. Enable PC players in Game Settings > Toggles first.",
@@ -481,7 +481,7 @@ class AdminActions:
         await self.show_child(interaction, view, "IGN — select a user")
 
     async def setup_new_user(self, interaction: discord.Interaction, button: discord.ui.Button):
-        games = await DatabaseHelper.get_all_games()
+        games = await DatabaseHelper.get_all_games(enabled_only=True)
         if not games:
             await self.render(interaction, flash="⚠️ No games configured.")
             return
@@ -504,7 +504,7 @@ class AdminActions:
         await self.show_child(interaction, view, "Start Discussion — select a user")
 
     async def penalty_settings(self, interaction: discord.Interaction, button: discord.ui.Button):
-        games = await DatabaseHelper.get_all_games()
+        games = await DatabaseHelper.get_all_games(enabled_only=True)
         if not games:
             await self.render(interaction, flash="⚠️ No games configured.")
             return
@@ -2795,12 +2795,19 @@ class MMRViewUserSelectView(discord.ui.View):
         )
 
 
-async def _setup_advance_to_rank(interaction, cog, game_id, user_id, display_name, platform):
+async def _setup_advance_to_rank(interaction, cog, game_id, user_id, display_name, platform,
+                                 completion=None, self_service=False):
     """Advance new-user setup to the rank step (or the manual-MMR fallback),
     carrying the chosen platform through so the PC seed bump can be applied.
 
     Overwatch forks here: it rates every role separately, so it walks one rank
-    dropdown per role instead of a single one for the player."""
+    dropdown per role instead of a single one for the player.
+
+    ``completion``/``self_service`` are set when a player is registering
+    themselves off a queue join: on finish, ``completion(interaction, game)``
+    takes over instead of the admin summary, and the copy asks for *peak* rank.
+    This path is only reached with a rank ladder configured (the caller checks),
+    so the manual-MMR modal fallback is admin-only."""
     mmr_roles = await DatabaseHelper.get_mmr_roles_with_labels(game_id)
     if not mmr_roles:
         # No labeled ranks configured: fall back to manual MMR entry.
@@ -2811,15 +2818,18 @@ async def _setup_advance_to_rank(interaction, cog, game_id, user_id, display_nam
     game = await DatabaseHelper.get_game(game_id)
     if game and is_overwatch_game(game):
         view = OWSetupRoleRankView(cog, game_id, user_id, mmr_roles, platform,
-                                   list(OW_ROLE_DISPLAY_ORDER))
+                                   list(OW_ROLE_DISPLAY_ORDER),
+                                   completion=completion, self_service=self_service)
         await interaction.response.edit_message(content=view.prompt(display_name), view=view)
         return
 
-    view = SetupUserRankSelectView(cog, game_id, user_id, mmr_roles, platform)
-    await interaction.response.edit_message(
-        content=f"Select rank for **{display_name}**:",
-        view=view
+    view = SetupUserRankSelectView(cog, game_id, user_id, mmr_roles, platform,
+                                   completion=completion, self_service=self_service)
+    prompt = (
+        "Select your **peak rank** — your highest ever, not your current:"
+        if self_service else f"Select rank for **{display_name}**:"
     )
+    await interaction.response.edit_message(content=prompt, view=view)
 
 
 UNRANKED_VALUE = "UNRANKED"
@@ -2848,7 +2858,8 @@ class OWSetupRoleRankView(discord.ui.View):
                  remaining: Optional[List[str]] = None,
                  ranks: Optional[Dict[str, int]] = None,
                  role_ids: Optional[Dict[str, int]] = None,
-                 existing_only: bool = False):
+                 existing_only: bool = False,
+                 completion=None, self_service: bool = False):
         super().__init__(timeout=180)
         self.cog = cog
         self.game_id = game_id
@@ -2861,6 +2872,11 @@ class OWSetupRoleRankView(discord.ui.View):
         # True when re-ranking an existing player: don't re-grant the verified
         # role and never lower an aggregate MMR they already earned.
         self.existing_only = existing_only
+        # Set when the player is registering themselves off a queue join:
+        # completion(interaction, game) finishes the flow (role select + queue
+        # join) in place of the admin summary, and the copy asks for peak rank.
+        self.completion = completion
+        self.self_service = self_service
 
         options = []
         # Unranked belongs to first-time setup, where the admin is asked about
@@ -2882,8 +2898,9 @@ class OWSetupRoleRankView(discord.ui.View):
                 value=str(role_id),
             ))
 
-        select = discord.ui.Select(placeholder=f"Select {self.current} rank...",
-                                   options=options[:25])
+        ph = (f"Select your peak {self.current} rank..."
+              if self.self_service else f"Select {self.current} rank...")
+        select = discord.ui.Select(placeholder=ph, options=options[:25])
         select.callback = self.on_select
         self.add_item(select)
 
@@ -2894,6 +2911,10 @@ class OWSetupRoleRankView(discord.ui.View):
     def prompt(self, display_name: str) -> str:
         done = len(self.ranks) + 1
         total = done + len(self.remaining) - 1
+        if self.self_service:
+            return (f"**Setting you up.** Pick your **peak {OW_ROLE_EMOJI[self.current]} "
+                    f"{self.current}** rank — highest ever, not current. "
+                    f"Choose *Unranked* for any role you don't play.  ({done}/{total})")
         return (f"**{OW_ROLE_EMOJI[self.current]} {self.current}** rank for "
                 f"**{display_name}**  ({done}/{total})")
 
@@ -2913,6 +2934,7 @@ class OWSetupRoleRankView(discord.ui.View):
             nxt = OWSetupRoleRankView(
                 self.cog, self.game_id, self.user_id, self.mmr_roles, self.platform,
                 remaining, self.ranks, self.role_ids, self.existing_only,
+                completion=self.completion, self_service=self.self_service,
             )
             await interaction.response.edit_message(content=nxt.prompt(name), view=nxt)
             return
@@ -2920,12 +2942,14 @@ class OWSetupRoleRankView(discord.ui.View):
         await _ow_finalize_setup(
             interaction, self.cog, self.game_id, self.user_id, self.platform,
             self.ranks, self.role_ids, self.mmr_roles, self.existing_only,
+            completion=self.completion, self_service=self.self_service,
         )
 
 
 async def _ow_finalize_setup(interaction, cog, game_id, user_id, platform,
                              ranks: Dict[str, int], role_ids: Dict[str, int],
-                             mmr_roles: Dict[int, dict], existing_only: bool = False):
+                             mmr_roles: Dict[int, dict], existing_only: bool = False,
+                             completion=None, self_service: bool = False):
     """Persist an Overwatch per-role setup.
 
     Only roles the admin actually ranked get an ``ow_role_stats`` row -- an
@@ -3012,32 +3036,59 @@ async def _ow_finalize_setup(interaction, cog, game_id, user_id, platform,
     if game.verified_role_id and not existing_only:
         lines.append("- Verified role assigned")
 
-    await interaction.response.edit_message(content="\n".join(lines), view=None)
-
-    summary = ", ".join(f"{r} {written[r]}" for r in OW_ROLE_DISPLAY_ORDER if r in written)
+    # A complete per-role summary in display order: a role that was ranked shows
+    # its seeded MMR, a role left unranked says so explicitly, and a preserved or
+    # unchanged role shows the rating it kept. Listing only the ranked roles hid
+    # the fact that the others were deliberately set to unranked.
+    summary_parts = []
+    for r in OW_ROLE_DISPLAY_ORDER:
+        if r in written:
+            summary_parts.append(f"{r} {written[r]}")
+        elif r in protected:
+            summary_parts.append(f"{r} kept {existing[r].effective_mmr}")
+        elif r in existing:
+            summary_parts.append(f"{r} {existing[r].effective_mmr}")
+        else:
+            summary_parts.append(f"{r} unranked")
+    summary = ", ".join(summary_parts)
     log_platform = f" [{platform.upper()}]" if game.pc_enabled else ""
-    await cog.log_action(
-        interaction.guild,
-        f"{'OW role ranks updated' if existing_only else 'New user setup'}: **{name}**"
-        f"{log_platform} ({game.name}) — {summary or 'no changes'} by {interaction.user.display_name}",
-        prefix="❕"
-    )
+    if self_service:
+        message = (f"Self-registered: **{name}**{log_platform} ({game.name}) — "
+                   f"{summary or 'no roles ranked'}")
+    else:
+        action = "OW role ranks updated" if existing_only else "New user setup"
+        message = (f"{action}: **{name}**{log_platform} ({game.name}) — "
+                   f"{summary or 'no changes'} by {interaction.user.display_name}")
+    await cog.log_action(interaction.guild, message, prefix="❕")
+
+    # Self-registration hands off to the caller, which owns the rest of the
+    # single ephemeral (Overwatch role pick, then the queue join). MMR, roles
+    # and the log above are already written, so the player is fully set up.
+    if completion is not None:
+        await completion(interaction, game)
+        return
+
+    await interaction.response.edit_message(content="\n".join(lines), view=None)
 
 
 class SetupUserPlatformSelectView(discord.ui.View):
     """New-user setup platform step (Console/PC), shown before rank when a game
     has PC players enabled."""
 
-    def __init__(self, cog: 'CustomMatch', game_id: int, user_id: int):
+    def __init__(self, cog: 'CustomMatch', game_id: int, user_id: int,
+                 completion=None, self_service: bool = False):
         super().__init__(timeout=120)
         self.cog = cog
         self.game_id = game_id
         self.user_id = user_id
+        self.completion = completion
+        self.self_service = self_service
 
     async def _choose(self, interaction: discord.Interaction, platform: str):
         member = interaction.guild.get_member(self.user_id)
         name = member.display_name if member else str(self.user_id)
-        await _setup_advance_to_rank(interaction, self.cog, self.game_id, self.user_id, name, platform)
+        await _setup_advance_to_rank(interaction, self.cog, self.game_id, self.user_id, name, platform,
+                                     completion=self.completion, self_service=self.self_service)
 
     @discord.ui.button(label="Console", style=discord.ButtonStyle.primary)
     async def console_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -3097,13 +3148,18 @@ class SetupUserSelectView(discord.ui.View):
 class SetupUserRankSelectView(discord.ui.View):
     """Step 3: Select rank label to assign to the new user."""
 
-    def __init__(self, cog: 'CustomMatch', game_id: int, user_id: int, mmr_roles: Dict[int, dict], platform: str = 'console'):
+    def __init__(self, cog: 'CustomMatch', game_id: int, user_id: int, mmr_roles: Dict[int, dict], platform: str = 'console',
+                 completion=None, self_service: bool = False):
         super().__init__(timeout=120)
         self.cog = cog
         self.game_id = game_id
         self.user_id = user_id
         self.mmr_roles = mmr_roles  # {role_id: {'mmr': int, 'label': str|None}}
         self.platform = platform
+        # Set when the player is registering themselves off a queue join:
+        # completion(interaction, game) joins them into the queue afterwards.
+        self.completion = completion
+        self.self_service = self_service
 
         options = []
         for role_id, data in sorted(mmr_roles.items(), key=lambda x: x[1]['mmr']):
@@ -3114,7 +3170,8 @@ class SetupUserRankSelectView(discord.ui.View):
                 value=str(role_id)
             ))
 
-        select = discord.ui.Select(placeholder="Select rank...", options=options[:25])
+        ph = "Select your peak rank..." if self_service else "Select rank..."
+        select = discord.ui.Select(placeholder=ph, options=options[:25])
         select.callback = self.on_select
         self.add_item(select)
 
@@ -3171,13 +3228,29 @@ class SetupUserRankSelectView(discord.ui.View):
         if game.verified_role_id:
             lines.append(f"- Verified role assigned")
 
-        await interaction.response.edit_message(content="\n".join(lines), view=None)
         log_platform = f" [{self.platform.upper()}]" if game.pc_enabled else ""
-        await self.cog.log_action(
-            interaction.guild,
-            f"New user setup: **{name}**{log_platform} registered for **{game.name}** with rank **{label_used}** ({mmr_val} MMR) by {interaction.user.display_name}",
-            prefix="\u2755"
-        )
+        if self.self_service:
+            await self.cog.log_action(
+                interaction.guild,
+                f"Self-registered: **{name}**{log_platform} for **{game.name}** "
+                f"with peak rank **{label_used}** ({mmr_val} MMR)",
+                prefix="\u2755"
+            )
+        else:
+            await self.cog.log_action(
+                interaction.guild,
+                f"New user setup: **{name}**{log_platform} registered for **{game.name}** with rank **{label_used}** ({mmr_val} MMR) by {interaction.user.display_name}",
+                prefix="\u2755"
+            )
+
+        # Self-registration: MMR, rank role and verified role are all set above;
+        # hand off to the caller to join the player into the queue in the same
+        # ephemeral. Admin setup shows the summary instead.
+        if self.completion is not None:
+            await self.completion(interaction, game)
+            return
+
+        await interaction.response.edit_message(content="\n".join(lines), view=None)
 
 
 class SetupUserModal(discord.ui.Modal, title="Setup New User"):

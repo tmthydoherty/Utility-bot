@@ -14,6 +14,7 @@ import logging
 import typing
 import io
 from pathlib import Path
+from utils.module_config_sync import ConfigSyncAgent
 
 try:
     from playwright.async_api import async_playwright
@@ -978,6 +979,9 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
         self.reveal_timestamps, self.don_reveal_timestamps, self.cheat_test_timestamps = {}, {}, {}
         self._name_cache: dict[str, str] = {}  # user_id_str -> display_name cache
         self.image_generator = TriviaImageGenerator()
+        self._settings_sync = ConfigSyncAgent(
+            "trivia", self._settings_snapshot, self._settings_apply, bot=bot
+        )
         self.bot.loop.create_task(self.setup_hook())
 
     async def setup_hook(self):
@@ -985,6 +989,7 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
         self.session = aiohttp.ClientSession()
         await self.image_generator.initialize()
         self.bot.add_view(DailyGatewayView(self))
+        await self._settings_sync.start()
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -995,11 +1000,48 @@ class DailyTrivia(commands.Cog, name="DailyTrivia"):
 
     async def cog_unload(self):
         self.trivia_loop.cancel(); self.cache_refill_loop.cancel(); self.backup_save_loop.cancel()
+        self._settings_sync.stop()
         await self.save_config_now()
         if self.session and not self.session.closed:
             await self.session.close()
         await self.image_generator.close()
     
+    async def _settings_snapshot(self) -> dict:
+        out = {}
+        async with self.config_lock:
+            guild_settings_pool = self.config.get("guild_settings", {})
+            for gid_str, gs in guild_settings_pool.items():
+                out[gid_str] = {
+                    "enabled": bool(gs.get("enabled")),
+                    "channel_id": str(gs.get("channel_id")) if gs.get("channel_id") else None,
+                    "admin_role_id": str(gs.get("admin_role_id")) if gs.get("admin_role_id") else None,
+                    "winner_role_id": str(gs.get("winner_role_id")) if gs.get("winner_role_id") else None,
+                    "anti_cheat_results_channel_id": str(gs.get("anti_cheat_results_channel_id")) if gs.get("anti_cheat_results_channel_id") else None
+                }
+        return out
+
+    async def _settings_apply(self, guild_id: str, values: dict):
+        async with self.config_lock:
+            gid = int(guild_id)
+            gs = self.get_guild_settings(gid)
+            
+            if "enabled" in values:
+                gs["enabled"] = bool(values["enabled"])
+            if "channel_id" in values:
+                raw = values["channel_id"]
+                gs["channel_id"] = int(raw) if raw else None
+            if "admin_role_id" in values:
+                raw = values["admin_role_id"]
+                gs["admin_role_id"] = int(raw) if raw else None
+            if "winner_role_id" in values:
+                raw = values["winner_role_id"]
+                gs["winner_role_id"] = int(raw) if raw else None
+            if "anti_cheat_results_channel_id" in values:
+                raw = values["anti_cheat_results_channel_id"]
+                gs["anti_cheat_results_channel_id"] = int(raw) if raw else None
+                
+            self.config_is_dirty = True
+
     async def cog_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         log_trivia.error(f"Error in command '{interaction.command.name}': {error}", exc_info=True)
         msg = "You don't have permission for this." if isinstance(error, app_commands.CheckFailure) else "An unexpected error occurred."

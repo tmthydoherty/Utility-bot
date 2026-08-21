@@ -16,6 +16,8 @@ from typing import Optional, Dict, List, Tuple
 import colorsys
 import logging
 
+from utils.config_store import get_store
+
 # Set up logging for this cog (INFO level for production)
 logger = logging.getLogger("FM_Cog")
 logger.setLevel(logging.INFO)
@@ -735,45 +737,29 @@ class FM(commands.Cog):
             return await asyncio.to_thread(_save)
 
     async def load_settings(self) -> Dict:
-        """Load settings from JSON file."""
-        async with self._file_lock:
-            def _load():
-                try:
-                    if not os.path.exists(self.settings_file):
-                        return {}
-                    with open(self.settings_file, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                        if not isinstance(data, dict):
-                            return {}
-                        return data
-                except (json.JSONDecodeError, Exception) as e:
-                    logger.error(f"Failed to load settings: {e}")
-                    return {}
-            return await asyncio.to_thread(_load)
+        """Load settings, served from cache after the first read.
+
+        get_music_channel() calls this for every message in the server, so
+        re-reading the file each time was pure waste. Writes still go straight
+        to disk (atomically), so the file on disk is never behind.
+        """
+        store = await get_store(self.settings_file)
+        return await store.read()
 
     async def save_settings(self, settings: Dict) -> bool:
-        """Save settings to JSON file."""
-        async with self._file_lock:
-            def _save():
-                try:
-                    temp_file = self.settings_file + ".tmp"
-                    with open(temp_file, "w", encoding="utf-8") as f:
-                        json.dump(settings, f, indent=4)
-                    os.replace(temp_file, self.settings_file)
-                    return True
-                except Exception as e:
-                    logger.error(f"Failed to save settings: {e}")
-                    try:
-                        if os.path.exists(temp_file):
-                            os.remove(temp_file)
-                    except Exception:
-                        pass
-                    return False
-            return await asyncio.to_thread(_save)
+        """Save settings to JSON file and refresh the cache.
+
+        Returns whether the write actually reached disk — callers report
+        success to the user off the back of this.
+        """
+        store = await get_store(self.settings_file)
+        return await store.write(settings)
 
     async def get_music_channel(self, guild_id: int) -> Optional[int]:
         """Get the configured music channel for a guild."""
-        settings = await self.load_settings()
+        # Read-only and on the message hot path, so skip the defensive copy.
+        store = await get_store(self.settings_file)
+        settings = await store.peek()
         guild_settings = settings.get(str(guild_id), {})
         return guild_settings.get("music_channel")
 

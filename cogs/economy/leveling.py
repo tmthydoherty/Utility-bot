@@ -2,7 +2,8 @@
 
 Standard Mee6-style progression: random XP per message behind a per-user
 cooldown, plus XP per minute spent in voice. Deliberately silent — nothing
-announces a level-up anywhere.
+announces a level-up anywhere. Crossing a level does dispatch the internal
+`member_level_up` event, which other cogs listen for; it posts nothing itself.
 """
 
 import logging
@@ -154,11 +155,20 @@ class LevelingEngine:
             (amount, user_id),
             commit=False,
         )
-        row = await self.db.fetchone("SELECT xp FROM users WHERE user_id = ?", (user_id,))
+        row = await self.db.fetchone(
+            "SELECT xp, level FROM users WHERE user_id = ?", (user_id,)
+        )
+        old_level = row["level"] if row else 0
         new_level = level_from_xp(row["xp"] if row else 0)
         await self.db.execute(
             "UPDATE users SET level = ? WHERE user_id = ?", (new_level, user_id)
         )
+
+        # Still no announcement anywhere — this is a bare signal other cogs can
+        # act on (the newcomer cog swaps its role on it). Only fired on a real
+        # gain, so recalculate_levels and XP removals stay silent.
+        if new_level > old_level:
+            self.cog.bot.dispatch("member_level_up", user_id, old_level, new_level)
 
     def prune_memory(self, max_age: float = 3600.0):
         """Shed cooldown entries for users who have gone quiet.

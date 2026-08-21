@@ -452,6 +452,7 @@ async def migrate_db():
 
         # Add new columns to games table if they don't exist
         game_migrations = [
+            ("enabled", "INTEGER DEFAULT 1"),
             ("vc_creation_enabled", "INTEGER DEFAULT 0"),
             ("queue_role_required", "INTEGER DEFAULT 1"),
             ("dm_ready_up", "INTEGER DEFAULT 0"),
@@ -852,6 +853,7 @@ class DatabaseHelper:
             queue_channel_id=row["queue_channel_id"],
             verified_role_id=row["verified_role_id"],
             ready_timer_seconds=row["ready_timer_seconds"] or 60,
+            enabled=bool(row["enabled"]) if "enabled" in row.keys() else True,
             vc_creation_enabled=bool(row["vc_creation_enabled"]) if "vc_creation_enabled" in row.keys() else False,
             queue_role_required=bool(row["queue_role_required"]) if "queue_role_required" in row.keys() else True,
             dm_ready_up=bool(row["dm_ready_up"]) if "dm_ready_up" in row.keys() else False,
@@ -898,11 +900,18 @@ class DatabaseHelper:
         )
 
     @staticmethod
-    async def get_all_games() -> List[GameConfig]:
+    async def get_all_games(enabled_only: bool = False) -> List[GameConfig]:
+        """All configured games. Pass ``enabled_only=True`` for operational
+        surfaces (setup/admin pickers, autocompletes, schedule) that should skip
+        games an admin has toggled off; management pages pass the default so a
+        disabled game can still be found and switched back on."""
         async with DatabaseHelper._get_db() as db:
             async with db.execute("SELECT * FROM games") as cursor:
                 rows = await cursor.fetchall()
-                return [DatabaseHelper._row_to_game_config(row) for row in rows]
+                games = [DatabaseHelper._row_to_game_config(row) for row in rows]
+        if enabled_only:
+            games = [g for g in games if g.enabled]
+        return games
 
     @staticmethod
     async def add_game(name: str, player_count: int, queue_type: str = "mmr",
@@ -931,7 +940,7 @@ class DatabaseHelper:
     # Valid column names for games table - prevents SQL injection
     VALID_GAME_COLUMNS = {
         'name', 'player_count', 'queue_type', 'captain_selection',
-        'queue_channel_id', 'verified_role_id', 'ready_timer_seconds',
+        'queue_channel_id', 'verified_role_id', 'ready_timer_seconds', 'enabled',
         'schedule_enabled', 'schedule_open_days', 'schedule_open_time',
         'schedule_close_time', 'schedule_down_message_id', 'vc_creation_enabled',
         'queue_role_required', 'dm_ready_up',

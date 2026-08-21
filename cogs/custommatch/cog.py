@@ -41,8 +41,10 @@ from .models import (
     display_width, pad_to_width, truncate_to_width,
 )
 from .database import DatabaseHelper, DB_PATH, init_db, migrate_db
+from cogs.custommatch_config_sync import CustomMatchConfigSync
 from .api_clients import HenrikDevAPI, MarvelRivalsAPI, RivalsVisionClient, RivalsScoreboardResult
 from .stats_generator import StatsCardGenerator, PLAYWRIGHT_AVAILABLE
+from utils.perms import is_bot_admin, is_admin_interaction
 from .views_settings import (
     BaseMatchView, ConfirmView, GameSelectDropdown, SettingsView,
     RivalsSettingsView, RivalsIGNResolverView, RivalsCorrectStatsModal,
@@ -91,6 +93,11 @@ class CustomMatch(commands.Cog):
         self._ow_role_assignments: Dict[int, Dict[int, str]] = {}  # match_id -> {player_id: OW role}
         self.queue_timeout_task: Optional[asyncio.Task] = None
         self.penalty_decay_task: Optional[asyncio.Task] = None
+        # Dashboard → bot command bridge. The website drains no reads through here
+        # (it reads custommatch.db directly, read-only); this only applies the
+        # imperative writes it queues — see cogs/custommatch_config_sync.py.
+        self._cmbridge = CustomMatchConfigSync()
+        self.config_sync_task: Optional[asyncio.Task] = None
         self.rating_audit_task: Optional[asyncio.Task] = None
         self.queue_schedule_task: Optional[asyncio.Task] = None
         self.orphan_cleanup_task: Optional[asyncio.Task] = None
@@ -173,6 +180,12 @@ class CustomMatch(commands.Cog):
         self.pending_upload_cleanup_task = asyncio.create_task(self._pending_upload_cleanup())
         # Initialize stats card generator
         await self.stats_generator.initialize()
+        # Start the dashboard command bridge drain loop.
+        try:
+            await self._cmbridge.ensure()
+            self.config_sync_task = asyncio.create_task(self._config_sync_loop())
+        except Exception as e:
+            logger.error(f"Failed to start Custom Matches config bridge: {e}")
         logger.info("CustomMatch cog loaded, database initialized.")
 
     async def restore_queues(self):
@@ -733,6 +746,8 @@ class CustomMatch(commands.Cog):
             self.vacuum_task.cancel()
         if self.pending_upload_cleanup_task:
             self.pending_upload_cleanup_task.cancel()
+        if self.config_sync_task:
+            self.config_sync_task.cancel()
         for task in self.rivals_reminder_tasks.values():
             task.cancel()
         # Close API session
@@ -742,6 +757,254 @@ class CustomMatch(commands.Cog):
         await self.stats_generator.close()
         # Close persistent DB connection
         await DatabaseHelper.close()
+
+    # -------------------------------------------------------------------------
+    # DASHBOARD COMMAND BRIDGE
+    # -------------------------------------------------------------------------
+
+    # The global config keys the dashboard is allowed to set through global_set.
+    # Anything outside this set is rejected — the bridge is internet-adjacent, so
+    # it writes only the keys the settings UI actually owns.
+    GLOBAL_CONFIG_KEYS = {
+        "log_channel_id", "cm_admin_channel_id", "cm_admin_role_id",
+        "cm_discussion_parent_channel_id", "category_id",
+        "rivals_admin_channel_id", "role_emojis",
+    }
+
+    async def _config_sync_loop(self):
+        """Drain the dashboard's command queue every ~10s and apply each one.
+
+        Reads are not served here — the website reads ``custommatch.db`` directly,
+        read-only. This only applies the imperative writes it queued, then advances
+        ``applied`` so the loop stays idle until the next change.
+        """
+        await self.bot.wait_until_ready()
+        while not self.bot.is_closed():
+            try:
+                revision, commands_ = await self._cmbridge.read_commands()
+                if commands_:
+                    for cmd in commands_:
+                        try:
+                            await self._apply_config_command(cmd)
+                        except Exception as e:
+                            logger.error(
+                                f"Custom Matches bridge command {cmd.get('type')!r} failed: {e}",
+                                exc_info=True,
+                            )
+                        # Delete on both success and failure: a command that can't
+                        # apply (a game already gone, a bad value) must not wedge
+                        # every command queued behind it.
+                        await self._cmbridge.mark_command_done(cmd["id"])
+                    await self._cmbridge.mark_applied(revision)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"Custom Matches config sync loop error: {e}")
+            await asyncio.sleep(10)
+
+    def _coerce_game_fields(self, fields: dict) -> dict:
+        """Turn a web field map into values ``update_game`` can bind.
+
+        Bools become 0/1, dict/list values (schedule grids) become JSON text, and
+        an unknown column is dropped with a log rather than failing the whole save.
+        """
+        out = {}
+        for key, value in fields.items():
+            if key not in DatabaseHelper.VALID_GAME_COLUMNS:
+                logger.warning(f"Custom Matches bridge: dropping unknown game column {key!r}")
+                continue
+            if isinstance(value, bool):
+                out[key] = int(value)
+            elif isinstance(value, (dict, list)):
+                out[key] = json.dumps(value)
+            else:
+                out[key] = value
+        return out
+
+    async def _clone_game(self, source_id: int, new_name: str, guild):
+        """Duplicate a game's config under a new name, ranks included.
+
+        Copies the raw ``games`` row so every column comes across exactly, then
+        drops the live-message pointers (a clone must not adopt the original's
+        posted queue or leaderboard) and copies the MMR ladder.
+        """
+        async with DatabaseHelper._get_db() as db:
+            async with db.execute("SELECT * FROM games WHERE game_id = ?", (source_id,)) as cur:
+                row = await cur.fetchone()
+            if not row:
+                raise ValueError(f"clone: source game {source_id} not found")
+
+            cols = [k for k in row.keys() if k != "game_id"]
+            values = []
+            for c in cols:
+                if c == "name":
+                    values.append(new_name)
+                elif c in ("leaderboard_message_id", "schedule_down_message_id"):
+                    values.append(None)
+                else:
+                    values.append(row[c])
+            placeholders = ",".join("?" for _ in cols)
+            await db.execute(
+                f"INSERT INTO games ({','.join(cols)}) VALUES ({placeholders})", values
+            )
+            async with db.execute("SELECT game_id FROM games WHERE name = ?", (new_name,)) as cur:
+                new_row = await cur.fetchone()
+            new_id = new_row[0]
+            await db.execute(
+                "INSERT INTO game_mmr_roles (game_id, role_id, mmr_value, label) "
+                "SELECT ?, role_id, mmr_value, label FROM game_mmr_roles WHERE game_id = ?",
+                (new_id, source_id),
+            )
+            await db.commit()
+            source_name = row["name"]
+
+        if guild:
+            await self.log_action(
+                guild, f"Game **{new_name}** cloned from **{source_name}** via the dashboard.", prefix="🎮"
+            )
+
+    async def _apply_config_command(self, cmd: dict):
+        """Apply one queued dashboard command to the live custom-match state."""
+        ctype = cmd.get("type")
+        p = cmd.get("payload") or {}
+        guild = self.bot.guilds[0] if self.bot.guilds else None
+
+        if ctype == "game_update":
+            game_id = int(p["game_id"])
+            fields = self._coerce_game_fields(p.get("fields") or {})
+            if fields:
+                await DatabaseHelper.update_game(game_id, **fields)
+                await self.refresh_game_queue_embeds(game_id)
+            game = await DatabaseHelper.get_game(game_id)
+            if guild and game:
+                await self.log_action(
+                    guild, f"Settings updated for **{game.name}** from the dashboard.", prefix="🎮"
+                )
+            return
+
+        if ctype == "game_add":
+            name = str(p["name"]).strip()
+            player_count = int(p.get("player_count") or 10)
+            queue_type = str(p.get("queue_type") or "mmr")
+            captain_selection = str(p.get("captain_selection") or "random")
+            game_id = await DatabaseHelper.add_game(name, player_count, queue_type, captain_selection)
+            fields = self._coerce_game_fields(p.get("fields") or {})
+            if fields:
+                await DatabaseHelper.update_game(game_id, **fields)
+            if guild:
+                await self.log_action(guild, f"Game **{name}** created from the dashboard.", prefix="🎮")
+            return
+
+        if ctype == "game_clone":
+            await self._clone_game(int(p["source_game_id"]), str(p["name"]).strip(), guild)
+            return
+
+        if ctype == "game_delete":
+            game_id = int(p["game_id"])
+            game = await DatabaseHelper.get_game(game_id)
+            await DatabaseHelper.delete_game(game_id)
+            if guild and game:
+                await self.log_action(guild, f"Game **{game.name}** deleted from the dashboard.", prefix="🗑️")
+            return
+
+        if ctype == "global_set":
+            key = str(p.get("key"))
+            if key not in self.GLOBAL_CONFIG_KEYS:
+                raise ValueError(f"global_set: disallowed key {key!r}")
+            value = p.get("value")
+            await DatabaseHelper.set_config(key, "" if value is None else str(value))
+            if guild:
+                await self.log_action(guild, f"`{key}` updated from the dashboard.", prefix="⚙️")
+            return
+
+        if ctype == "mod_role_add":
+            await DatabaseHelper.add_mod_role(int(p["role_id"]))
+            return
+        if ctype == "mod_role_remove":
+            await DatabaseHelper.remove_mod_role(int(p["role_id"]))
+            return
+
+        if ctype == "blacklist_add":
+            until = None
+            if p.get("until"):
+                try:
+                    until = datetime.fromisoformat(str(p["until"]))
+                except ValueError:
+                    until = None
+            await DatabaseHelper.blacklist_player(int(p["player_id"]), until)
+            return
+        if ctype == "blacklist_remove":
+            await DatabaseHelper.unblacklist_player(int(p["player_id"]))
+            return
+
+        if ctype == "rank_set":
+            await DatabaseHelper.set_mmr_role(
+                int(p["game_id"]), int(p["role_id"]), int(p["mmr_value"]), p.get("label")
+            )
+            return
+        if ctype == "rank_remove":
+            await DatabaseHelper.remove_mmr_role(int(p["game_id"]), int(p["role_id"]))
+            return
+
+        if ctype in ("player_mmr_set", "player_offset_set"):
+            game_id = int(p["game_id"])
+            player_id = int(p["player_id"])
+            stats = await DatabaseHelper.get_player_stats(player_id, game_id)
+            if ctype == "player_mmr_set":
+                stats.mmr = int(p["mmr"])
+            else:
+                stats.admin_offset = int(p["admin_offset"])
+            await DatabaseHelper.update_player_stats(stats)
+            return
+
+        if ctype == "player_ign_set":
+            await DatabaseHelper.set_player_ign(int(p["player_id"]), int(p["game_id"]), str(p["ign"]))
+            return
+
+        if ctype == "penalty_clear":
+            if p.get("kind") == "decline":
+                await DatabaseHelper.clear_decline_penalty(int(p["player_id"]))
+            else:
+                await DatabaseHelper.clear_ready_penalty(int(p["player_id"]))
+            return
+
+        if ctype == "suspension_remove":
+            await DatabaseHelper.remove_suspension(int(p["suspension_id"]))
+            return
+
+        logger.warning(f"Custom Matches bridge: unknown command type {ctype!r}")
+
+    async def refresh_game_queue_embeds(self, game_id: int):
+        """Re-render this game's live queue message(s) after a settings change.
+
+        A dashboard edit changes the row the queue embed is built from, so the
+        posted message is rebuilt to match — the same thing the Discord settings
+        panel does after every toggle.
+        """
+        from .views_gameplay import QueueView, ReadyCheckView
+
+        guild = self.bot.guilds[0] if self.bot.guilds else None
+        if not guild:
+            return
+        for queue_id, queue_state in list(self.queues.items()):
+            if queue_state.game_id != game_id or not queue_state.message_id:
+                continue
+            channel = guild.get_channel(queue_state.channel_id)
+            if not channel:
+                continue
+            try:
+                msg = await channel.fetch_message(queue_state.message_id)
+                fresh_game = await DatabaseHelper.get_game(game_id)
+                embed = await self.create_queue_embed(fresh_game, queue_state, guild)
+                if queue_state.state == "ready_check":
+                    view = ReadyCheckView(self, game_id, queue_id)
+                else:
+                    view = QueueView(self, game_id, queue_id)
+                await msg.edit(embed=embed, view=view)
+            except discord.NotFound:
+                pass
+            except Exception as e:
+                logger.error(f"Error refreshing queue embed for game {game_id}: {e}")
 
     # -------------------------------------------------------------------------
     # BACKGROUND TASKS
@@ -1058,7 +1321,8 @@ class CustomMatch(commands.Cog):
         await self.bot.wait_until_ready()
         while not self.bot.is_closed():
             try:
-                games = await DatabaseHelper.get_all_games()
+                # Disabled games stay dormant — never auto-open their queue.
+                games = await DatabaseHelper.get_all_games(enabled_only=True)
                 scheduled_games = [g for g in games if g.schedule_enabled and g.queue_channel_id]
 
                 for game in scheduled_games:
@@ -2077,9 +2341,12 @@ class CustomMatch(commands.Cog):
 
     async def is_cm_admin(self, member: discord.Member) -> bool:
         """Check if member is a CM admin."""
-        if member.guild_permissions.administrator:
+        # Server admins (permission or the bot's admin role) always qualify;
+        # cm_admin_role_id grants it for this cog specifically.
+        if is_bot_admin(member, self.bot):
             return True
-        
+
+
         admin_role_id = await DatabaseHelper.get_config("cm_admin_role_id")
         if admin_role_id:
             return any(r.id == int(admin_role_id) for r in member.roles)
@@ -3207,6 +3474,100 @@ class CustomMatch(commands.Cog):
                 self._claimed_interactions = dict(keep)
         return True
 
+    async def _begin_self_setup(self, interaction: discord.Interaction,
+                                game: GameConfig, queue_id: int):
+        """An unregistered player hit Join on a game that has a rank ladder.
+
+        Walk them through the same peak-rank setup an admin uses — one rank per
+        role for Overwatch, a single rank otherwise — inside one ephemeral, then
+        seed their MMR, grant the queue role and drop them into ``queue_id``.
+        The completion closure carries ``queue_id`` so the setup views (which
+        know nothing about queues) can hand back here to finish the join."""
+        from .views_gameplay import SetupUserPlatformSelectView
+
+        async def completion(inter: discord.Interaction, g: GameConfig):
+            await self._self_setup_finish(inter, g, queue_id)
+
+        if game.pc_enabled:
+            # Crossplay game: ask Console/PC first, exactly like admin setup, so
+            # the PC seed bump is applied. The platform view edits this ephemeral
+            # onward into the rank step.
+            view = SetupUserPlatformSelectView(
+                self, game.game_id, interaction.user.id,
+                completion=completion, self_service=True,
+            )
+            await interaction.response.send_message(
+                f"**Let's get you set up for {game.name}.**\n"
+                "Are you on **Console** or **PC**?",
+                view=view,
+                ephemeral=True,
+            )
+            return
+
+        await self._send_self_setup_rank_step(interaction, game, completion)
+
+    async def _send_self_setup_rank_step(self, interaction: discord.Interaction,
+                                         game: GameConfig, completion):
+        """Send the first rank step of self-setup as a fresh ephemeral (the admin
+        path edits an existing one, so it can't be reused for the opening send)."""
+        from .views_gameplay import OWSetupRoleRankView, SetupUserRankSelectView
+
+        mmr_roles = await DatabaseHelper.get_mmr_roles_with_labels(game.game_id)
+        user = interaction.user
+        if is_overwatch_game(game):
+            view = OWSetupRoleRankView(
+                self, game.game_id, user.id, mmr_roles, 'console',
+                list(OW_ROLE_DISPLAY_ORDER),
+                completion=completion, self_service=True,
+            )
+            content = view.prompt(user.display_name)
+        else:
+            view = SetupUserRankSelectView(
+                self, game.game_id, user.id, mmr_roles, 'console',
+                completion=completion, self_service=True,
+            )
+            content = (
+                f"**Let's get you set up for {game.name}.**\n"
+                "Select your **peak rank** — your highest ever, not your current:"
+            )
+        await interaction.response.send_message(content=content, view=view, ephemeral=True)
+
+    async def _self_setup_finish(self, interaction: discord.Interaction,
+                                 game: GameConfig, queue_id: int):
+        """Setup wrote the player's MMR and granted the queue role; now put them
+        in the queue, editing the same ephemeral rather than sending a new one.
+
+        Overwatch needs one more pick first: per-role *ranks* are the hidden
+        rating, but the balancer also needs the *roles they're willing to queue*
+        for a 2-2-2. That's the identical dropdown a registered player sees, so
+        reuse it and let its after_save finish the join."""
+        if is_overwatch_game(game):
+            async def after_save(inter: discord.Interaction, ordered):
+                await self._ow_join_after_role_select(inter, ordered, game, queue_id)
+
+            view = OWRoleSelectView(
+                self, game.game_id, game.name, rejoin_hint=False,
+                after_save=after_save, preselected=[],
+            )
+            await interaction.response.edit_message(
+                content=(
+                    f"**You're set up for {game.name}!**\n"
+                    "Last step — pick every role you're willing to play "
+                    "(matches form strict 2-2-2 from these):"
+                ),
+                view=view,
+            )
+            return
+
+        await interaction.response.edit_message(
+            content=f"**You're set up for {game.name}!** Joining the queue…",
+            view=None,
+        )
+        await self._finish_queue_join(
+            interaction, game, queue_id, responded=True,
+            join_confirm=f"✅ You're all set up and in the **{game.name}** queue!",
+        )
+
     async def handle_queue_join(self, interaction: discord.Interaction, game_id: int, queue_id: int):
         """Handle a player joining the queue."""
         if not self._claim_interaction(interaction):
@@ -3216,6 +3577,14 @@ class CustomMatch(commands.Cog):
 
         if not game:
             await interaction.response.send_message("Game no longer exists.", ephemeral=True)
+            return
+
+        # A disabled game is dormant: its data is intact but the queue is closed.
+        if not game.enabled:
+            await interaction.response.send_message(
+                "This game is currently unavailable. Please check back later.",
+                ephemeral=True,
+            )
             return
 
         # Auto-update Riot ID in the background (non-blocking)
@@ -3255,9 +3624,15 @@ class CustomMatch(commands.Cog):
                 )
                 return
 
-        # Remove from any other waiting queue for the SAME game (one queue per game)
+        # Same-game dedupe. A player holds at most one slot in a given queue
+        # *type* (main or secondary) for a game — no double-counting the same
+        # roster. Multi-queuing is allowed everywhere else: across different
+        # games, and across a game's main + secondary queues. The moment any
+        # one of a player's queues pops a ready check, start_ready_check() pulls
+        # them out of all the others.
         for qid, qs in list(self.queues.items()):
             if qid != queue_id and qs.game_id == game_id \
+                    and qs.is_secondary == queue_state.is_secondary \
                     and user.id in qs.players and qs.state == "waiting":
                 del qs.players[user.id]
                 qs.grace_timers.pop(user.id, None)
@@ -3279,6 +3654,16 @@ class CustomMatch(commands.Cog):
         # Check verified role (if required) - no DB call, just role check
         if game.queue_role_required and game.verified_role_id:
             if not any(r.id == game.verified_role_id for r in user.roles):
+                # Unregistered. If the game has a rank ladder configured, let the
+                # player set themselves up right here: they pick their peak rank
+                # (per role for Overwatch), which seeds their MMR, grants the
+                # queue role, and drops them into this queue — all in one edited
+                # ephemeral. With no ladder there's nothing to ask, so fall back
+                # to the verification ticket / plain notice.
+                has_ladder = bool(await DatabaseHelper.get_mmr_roles_with_labels(game.game_id))
+                if has_ladder:
+                    await self._begin_self_setup(interaction, game, queue_id)
+                    return
                 if game.verification_topic:
                     view = VerificationTicketView(self, game)
                     await interaction.response.send_message(
@@ -3559,11 +3944,18 @@ class CustomMatch(commands.Cog):
                         )
                         return
 
-                # Clean up orphaned queue entries for this user (same game only)
+                # Clean up orphaned queue entries for this user, scoped to the
+                # same game *and* queue type. Multi-queue means we must not drop
+                # the player's rows in other games' queues (or this game's other
+                # queue type) — those are legitimate simultaneous memberships,
+                # and start_ready_check() is what clears them when one pops.
                 await db.execute(
                     """DELETE FROM queue_players WHERE player_id = ? AND queue_id != ?
-                       AND queue_id IN (SELECT queue_id FROM active_queues WHERE game_id = ?)""",
-                    (user.id, queue_id, game_id)
+                       AND queue_id IN (
+                           SELECT queue_id FROM active_queues
+                           WHERE game_id = ? AND is_secondary = ?
+                       )""",
+                    (user.id, queue_id, game_id, int(queue_state.is_secondary))
                 )
 
                 # Add to queue in DB
@@ -3590,23 +3982,18 @@ class CustomMatch(commands.Cog):
             async with self.queue_locks.setdefault(queue_id, asyncio.Lock()):
                 if queue_state.state != "waiting":
                     join_rejected_in_lock = True
-                else:
-                    # Check if player is already in a waiting queue for a different game (A2)
-                    for qid, qs in self.queues.items():
-                        if qid != queue_id and qs.game_id != game_id \
-                                and user.id in qs.players and qs.state == "waiting":
-                            join_rejected_in_lock = True
-                            join_rejected_msg = "You're already in a queue for another game."
-                            break
 
                 if not join_rejected_in_lock:
-                    # Remove from other waiting queues for different games.
-                    # Allow coexistence in main + secondary queue for the same game.
+                    # Multi-queue: a player may wait in as many queues as they
+                    # like at once (different games, and a game's main +
+                    # secondary). We only dedupe *within the same game and queue
+                    # type* so a player never holds two slots in the same
+                    # roster. start_ready_check() is what pulls a player out of
+                    # every other queue the instant one of them pops.
                     for qid, qs in list(self.queues.items()):
-                        if qid != queue_id and user.id in qs.players and qs.state == "waiting":
-                            # Skip same-game queues where one is secondary and the other isn't
-                            if qs.game_id == game_id and qs.is_secondary != queue_state.is_secondary:
-                                continue
+                        if qid != queue_id and user.id in qs.players and qs.state == "waiting" \
+                                and qs.game_id == game_id \
+                                and qs.is_secondary == queue_state.is_secondary:
                             del qs.players[user.id]
                             qs.grace_timers.pop(user.id, None)
 
@@ -4792,9 +5179,40 @@ class CustomMatch(commands.Cog):
         sorted_by_val = sorted(player_ids, key=lambda p: peak_val[p], reverse=True)
         top1, top2 = sorted_by_val[0], sorted_by_val[1]
         bottom1, bottom2 = sorted_by_val[-1], sorted_by_val[-2]
-        apply_bottom_sep = (
-            bottom1 not in (top1, top2) and bottom2 not in (top1, top2)
-        )
+
+        # Top-2 of each role, ranked by that role's own MMR (only players who
+        # actually selected the role). Keeping the two best of any single role on
+        # opposite teams stops one side stacking, e.g. both strongest tanks.
+        def _role_top2(role):
+            ranked = sorted(
+                (p for p in player_ids if role in sel_map[p]),
+                key=lambda p: role_mmr[(p, role)], reverse=True,
+            )
+            return (ranked[0], ranked[1]) if len(ranked) >= 2 else None
+
+        tank_top2 = _role_top2('Tank')
+        dps_top2 = _role_top2('DPS')
+        support_top2 = _role_top2('Support')
+
+        # Separation constraints in priority order: each names a pair that must
+        # land on opposite teams. They are applied hardest-first, and any one is
+        # dropped only if enforcing it would leave no valid split — so the softer
+        # role rules never block a balanced, viable match.
+        #   1. overall top-2 MMR   — always separated
+        #   2. top-2 Tank          — always separated (tank swings games most)
+        #   3. bottom-2 MMR        — existing behaviour
+        #   4. top-2 DPS           — nice-to-have
+        #   5. top-2 Support       — nice-to-have
+        separations = [('top-2 MMR', (top1, top2))]
+        if tank_top2:
+            separations.append(('top-2 Tank', tank_top2))
+        # Bottom-2 only when it doesn't overlap the protected top-2 pair
+        if bottom1 not in (top1, top2) and bottom2 not in (top1, top2):
+            separations.append(('bottom-2 MMR', (bottom1, bottom2)))
+        if dps_top2:
+            separations.append(('top-2 DPS', dps_top2))
+        if support_top2:
+            separations.append(('top-2 Support', support_top2))
 
         prev_map = await DatabaseHelper.get_previous_team_assignment(
             player_ids, game_id,
@@ -4813,25 +5231,17 @@ class CustomMatch(commands.Cog):
                 )
             return assign_cache[key]
 
-        # candidates: (weighted_diff, repeat_penalty, red_frozen, role_map)
-        candidates = []
+        # Every split that yields a valid 2-2-2 on both sides, scored but not yet
+        # separation-filtered: (weighted_diff, repeat_penalty, red_frozen, role_map)
+        all_candidates = []
         for red_group in itertools.combinations(player_ids, team_size):
-            red_set = set(red_group)
-            # top-2 separation
-            if (top1 in red_set) == (top2 in red_set):
-                continue
-            # bottom-2 separation
-            if apply_bottom_sep and (bottom1 in red_set) == (bottom2 in red_set):
-                continue
-            blue_group = tuple(p for p in player_ids if p not in red_set)
-
             red_str, red_assign = _team_assignment(red_group)
             if red_assign is None:
                 continue
+            blue_group = tuple(p for p in player_ids if p not in set(red_group))
             blue_str, blue_assign = _team_assignment(blue_group)
             if blue_assign is None:
                 continue
-
             diff = abs(red_str - blue_str)
             if prev_map:
                 repeat_penalty = (
@@ -4840,43 +5250,32 @@ class CustomMatch(commands.Cog):
                 )
             else:
                 repeat_penalty = 0
-            role_map = {**red_assign, **blue_assign}
-            candidates.append((diff, repeat_penalty, frozenset(red_group), role_map))
-
-        # Retry without bottom-2 constraint if it over-constrained
-        if not candidates and apply_bottom_sep:
-            logger.warning(
-                f"balance_teams_overwatch: bottom-2 separation over-constrained for "
-                f"game {game_id}, retrying without it"
+            all_candidates.append(
+                (diff, repeat_penalty, frozenset(red_group),
+                 {**red_assign, **blue_assign})
             )
-            for red_group in itertools.combinations(player_ids, team_size):
-                red_set = set(red_group)
-                if (top1 in red_set) == (top2 in red_set):
-                    continue
-                blue_group = tuple(p for p in player_ids if p not in red_set)
-                red_str, red_assign = _team_assignment(red_group)
-                if red_assign is None:
-                    continue
-                blue_str, blue_assign = _team_assignment(blue_group)
-                if blue_assign is None:
-                    continue
-                diff = abs(red_str - blue_str)
-                repeat_penalty = 0
-                if prev_map:
-                    repeat_penalty = (
-                        sum(1 for p in red_group if prev_map.get(p) == 'red')
-                        + sum(1 for p in blue_group if prev_map.get(p) == 'blue')
-                    )
-                candidates.append((diff, repeat_penalty, frozenset(red_group),
-                                   {**red_assign, **blue_assign}))
 
-        if not candidates:
+        if not all_candidates:
             logger.error(
                 f"balance_teams_overwatch: no valid 2-2-2 split for game {game_id} "
                 f"(roster cannot form two teams); falling back to single-MMR balancer"
             )
             red, blue = await self.balance_teams_mmr(player_ids, game_id)
             return red, blue, {}
+
+        # Apply the separation constraints hardest-first. A pair is separated when
+        # exactly one of its members is on red. Any constraint that would empty the
+        # pool is skipped (logged), so lower-priority role rules yield gracefully.
+        candidates = all_candidates
+        for label, (a, b) in separations:
+            kept = [c for c in candidates if (a in c[2]) != (b in c[2])]
+            if kept:
+                candidates = kept
+            else:
+                logger.warning(
+                    f"balance_teams_overwatch: {label} separation over-constrained "
+                    f"for game {game_id}; skipping it"
+                )
 
         # Filter by minimum swap percentage when force-shuffling
         if force_shuffle_from and min_swap_pct > 0:
@@ -9698,7 +10097,7 @@ class CustomMatch(commands.Cog):
 
     @app_commands.command(name="cm_settings", description="Open the settings panel (Server Admin)")
     async def settings_cmd(self, interaction: discord.Interaction):
-        if not interaction.user.guild_permissions.administrator:
+        if not is_admin_interaction(interaction):
             await interaction.response.send_message("You need Administrator permission.", ephemeral=True)
             return
 
@@ -10091,7 +10490,7 @@ class CustomMatch(commands.Cog):
 
     @stats_cmd.autocomplete('game')
     async def stats_game_autocomplete(self, interaction: discord.Interaction, current: str):
-        games = await DatabaseHelper.get_all_games()
+        games = await DatabaseHelper.get_all_games(enabled_only=True)
         return [
             app_commands.Choice(name=g.name, value=str(g.game_id))
             for g in (games or [])
@@ -10432,7 +10831,7 @@ class CustomMatch(commands.Cog):
 
     @h2h_cmd.autocomplete('game')
     async def h2h_game_autocomplete(self, interaction: discord.Interaction, current: str):
-        games = await DatabaseHelper.get_all_games()
+        games = await DatabaseHelper.get_all_games(enabled_only=True)
         return [
             app_commands.Choice(name=g.name, value=str(g.game_id))
             for g in (games or [])
@@ -10958,7 +11357,7 @@ class CustomMatch(commands.Cog):
 
     @serverstats_cmd.autocomplete('game')
     async def serverstats_game_autocomplete(self, interaction: discord.Interaction, current: str):
-        games = await DatabaseHelper.get_all_games()
+        games = await DatabaseHelper.get_all_games(enabled_only=True)
         return [
             app_commands.Choice(name=g.name, value=str(g.game_id))
             for g in (games or [])

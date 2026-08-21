@@ -1,4 +1,6 @@
 import discord
+
+from utils.perms import is_admin_interaction
 from discord.ext import commands
 from discord import app_commands
 import asyncio
@@ -6,9 +8,7 @@ import io
 
 # Custom check that taps into the 'is_bot_admin' function defined in your main.py
 def is_bot_admin_check(interaction: discord.Interaction) -> bool:
-    if hasattr(interaction.client, 'is_bot_admin'):
-        return interaction.client.is_bot_admin(interaction.user)
-    return interaction.user.guild_permissions.administrator
+    return is_admin_interaction(interaction)
 
 
 def parse_emoji(text: str) -> discord.PartialEmoji | None:

@@ -909,6 +909,11 @@ class GameConfig:
     vc_creation_enabled: bool = False
     queue_role_required: bool = True
     dm_ready_up: bool = False
+    # When False the game is dormant: its data (MMR, stats, settings) is kept
+    # untouched, but it drops out of every operational surface — setup/admin
+    # pickers, leaderboard and stat autocompletes, schedule auto-open — and its
+    # queue refuses new joiners. Flip it back on and everything resumes as-is.
+    enabled: bool = True
 
     queue_timeout_minutes: int = 180
     penalty_1st_minutes: int = 60

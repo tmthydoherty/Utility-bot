@@ -8,6 +8,7 @@ a component row. All three are checkable offline, so they are checked here.
 Run: .venv/bin/python tests/audit_log/check_audit_log.py
 """
 import asyncio
+import json
 import os
 import sys
 import tempfile
@@ -188,10 +189,10 @@ async def check_db(fails, db):
     # a message older than the retention window must be purged
     async with db._lock:
         await db._conn.execute(
-            "INSERT OR REPLACE INTO message_cache VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO message_cache VALUES (?,?,?,?,?,?,?,?,?)",
             (101, gid, 200, 300, "old", "[]",
              int(datetime.now(timezone.utc).timestamp()) - al.MESSAGE_RETENTION_SECONDS - 60,
-             None),
+             None, None),
         )
         await db._conn.commit()
     removed = await db.purge_messages()
@@ -579,14 +580,17 @@ async def check_panel(fails, db):
     if labels != {"Channels", "Events", "Ignore list", "Message log"}:
         fails.append(f"unexpected home buttons: {sorted(labels)}")
 
-    # Every channel slot must map to a real column or category.
+    # Every channel slot must map to a real column, event or category.
     for key, spec in al.CHANNEL_TARGETS.items():
         if "column" in spec:
             if spec["column"] not in al.ALLOWED_SETTING_KEYS:
                 fails.append(f"channel slot {key} writes a disallowed column")
+        elif "event" in spec:
+            if spec["event"] not in al.EVENTS:
+                fails.append(f"channel slot {key} points at an unknown event")
         elif spec.get("category") not in al.CATEGORIES:
             fails.append(f"channel slot {key} points at an unknown category")
-    print("   channel slots map to real columns / categories: yes")
+    print("   channel slots map to real columns / events / categories: yes")
 
 
 async def check_routing(fails, db):
@@ -599,6 +603,7 @@ async def check_routing(fails, db):
     await db.set_setting(gid, "mod_channel_id", 901)
     await db.set_setting(gid, "default_channel_id", 902)
     await db.set_category_channel(gid, "messages", 903)
+    await db.set_event_channel(gid, "username_change", 904)
 
     async def ids(event_key, data=None):
         dests = await cog._destinations(guild, event_key, data or {})
@@ -614,6 +619,9 @@ async def check_routing(fails, db):
         ("message_delete", {}, [903]),
         ("member_join", {}, [902]),
         ("role_update", {}, [902]),
+        # Username changes go to their own slot; nicknames ride along with them.
+        ("username_change", {}, [904]),
+        ("nickname_change", {}, [904]),
     ]
     for event_key, data, expected in cases:
         got = await ids(event_key, data)
@@ -824,7 +832,7 @@ async def check_flush(fails, db):
     sent = []
 
     class SendChannel(FakeChannel):
-        async def send(self, embed=None):
+        async def send(self, embed=None, files=None):
             sent.append((self.id, embed))
 
     class SendGuild(FakeGuild):
@@ -880,6 +888,59 @@ async def check_flush(fails, db):
     print("   unknown guild flushed without raising: yes")
 
 
+async def check_image_cache(fails, db):
+    """Deleted images survive as our own copy: persisted through the mirror,
+    re-uploaded on delete, and swept once past retention."""
+    print("\n-- deleted image cache --")
+    cog = bare_cog(db)
+    gid = 1
+    with tempfile.TemporaryDirectory() as tmp:
+        original_dir = al.IMAGE_CACHE_DIR
+        al.IMAGE_CACHE_DIR = tmp
+        try:
+            present = os.path.join(tmp, "1_0.png")
+            with open(present, "wb") as f:
+                f.write(b"\x89PNG\r\n")
+            missing = os.path.join(tmp, "gone.png")
+
+            # A batch of deletes re-uploads the images still on disk and quietly
+            # drops any that were purged between the delete and the flush.
+            events = [al.LogEvent("message_delete", gid, None, al.Actor(), {
+                "channel_id": 200, "author_id": 5, "content": "x", "attachments": [],
+                "cached_images": [{"filename": "pic.png", "path": present},
+                                  {"filename": "gone.png", "path": missing}]})]
+            files = cog._deleted_image_files(events)
+            print(f"   collected {len(files)} of 2 cached images")
+            if [name for _, name in files] != ["1_0.png"]:
+                fails.append("deleted-image collection did not drop the missing file")
+
+            # buffer_message must persist the cached-image list through the mirror.
+            msg = types.SimpleNamespace(
+                id=555, guild=types.SimpleNamespace(id=gid),
+                channel=types.SimpleNamespace(id=200),
+                author=types.SimpleNamespace(id=5),
+                content="hi", attachments=[],
+                created_at=datetime.now(timezone.utc))
+            db.buffer_message(msg, [{"filename": "pic.png", "path": present}])
+            stored = await db.get_message(555)
+            got = json.loads(stored["cached_images"])
+            print(f"   mirror stored cached_images: {got}")
+            if not got or got[0]["path"] != present:
+                fails.append("cached image list did not persist through the mirror")
+
+            # An expired file is purged; a fresh one is kept.
+            os.utime(present, (0, 0))  # epoch mtime: well past retention
+            fresh = os.path.join(tmp, "fresh.png")
+            with open(fresh, "wb") as f:
+                f.write(b"x")
+            removed = cog._purge_cached_images()
+            print(f"   purged {removed} expired image(s)")
+            if removed != 1 or not os.path.exists(fresh) or os.path.exists(present):
+                fails.append("image purge did not drop exactly the expired file")
+        finally:
+            al.IMAGE_CACHE_DIR = original_dir
+
+
 async def check_migration(fails):
     print("\n-- migration from welcome_config.json --")
     with tempfile.TemporaryDirectory() as tmp:
@@ -926,6 +987,7 @@ async def main():
             await check_delete_attribution(fails, db)
             await check_self_edits_and_deletes(fails, db)
             await check_flush(fails, db)
+            await check_image_cache(fails, db)
         finally:
             await db.close()
     await check_migration(fails)

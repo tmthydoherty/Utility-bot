@@ -69,6 +69,7 @@ class TriviaSettingsModal(discord.ui.Modal, title='Trivia Settings'):
             cfg = self.main_cog.get_guild_settings(interaction.guild.id)
             cfg["channel_id"], cfg["enabled"], cfg["anti_cheat_results_channel_id"] = channel_id, is_enabled, results_id
             self.main_cog.config_is_dirty = True
+        self.main_cog._settings_sync.mark_dirty()
         await interaction.followup.send(f"✅ Settings updated!", ephemeral=True)
         self.main_cog.trivia_loop.restart()
 
@@ -84,6 +85,7 @@ class RoleSettingsModal(discord.ui.Modal, title='Set Trivia Winner Role'):
             async with self.main_cog.config_lock:
                 # Get guild_settings
                 self.main_cog.get_guild_settings(interaction.guild.id)["winner_role_id"] = None; self.main_cog.config_is_dirty = True
+            self.main_cog._settings_sync.mark_dirty()
             return await interaction.followup.send("✅ Trivia winner role disabled.", ephemeral=True)
         try:
             role_id = int(role_id_str)
@@ -94,6 +96,7 @@ class RoleSettingsModal(discord.ui.Modal, title='Set Trivia Winner Role'):
         async with self.main_cog.config_lock:
             # Get guild_settings
             self.main_cog.get_guild_settings(interaction.guild.id)["winner_role_id"] = role_id; self.main_cog.config_is_dirty = True
+        self.main_cog._settings_sync.mark_dirty()
         await interaction.followup.send(f"✅ Trivia winner role set to {role.mention}!", ephemeral=True)
 
 class AdjustPointsModal(discord.ui.Modal, title="Adjust User Points"):

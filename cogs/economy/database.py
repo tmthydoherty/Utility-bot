@@ -132,11 +132,15 @@ CREATE TABLE IF NOT EXISTS approvals (
     created_ts INTEGER NOT NULL
 );
 
+-- `disabled` is set by a moderator from the Custom Commands dashboard to pull a
+-- purchased GIF command without deleting it (and refunding the owner's slot).
+-- The Custom Commands cog owns serving these now, and skips disabled ones.
 CREATE TABLE IF NOT EXISTS gif_commands (
     name TEXT PRIMARY KEY,
     user_id INTEGER NOT NULL,
     url TEXT NOT NULL,
-    approved_ts INTEGER NOT NULL
+    approved_ts INTEGER NOT NULL,
+    disabled INTEGER NOT NULL DEFAULT 0
 );
 
 -- status: pending | trial | permanent | removed
@@ -296,6 +300,9 @@ class EconomyDB:
             ],
             "perm_grants": [
                 ("prior_state", "TEXT"),
+            ],
+            "gif_commands": [
+                ("disabled", "INTEGER NOT NULL DEFAULT 0"),
             ],
         }
         for table, columns in additions.items():

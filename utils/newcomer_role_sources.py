@@ -15,8 +15,8 @@ logger = logging.getLogger('bot_main')
 
 
 async def _newcomer_cog_role(bot, guild):
-    """cogs/newcomer.py — grants on join, swaps away at the member level."""
-    cog = bot.get_cog("IntroCog")
+    """cogs/onboarding.py — grants on join, swaps away at the member level."""
+    cog = bot.get_cog("Onboarding")
     if not cog:
         return None
     newcomer_id, _ = await cog._role_setting_ids()
@@ -44,7 +44,7 @@ async def _inactivity_role(bot, guild):
 
 # (label, panel that sets it, resolver). Order is the order they render in.
 SOURCES = (
-    ("Newcomer cog", "/newcomer_panel → Newcomer Role", _newcomer_cog_role),
+    ("Onboarding", "Welcome & Onboarding module → Roles & graduation", _newcomer_cog_role),
     ("Economy", "/economy_panel → Roles", _economy_role),
     ("Inactivity", "inactivity panel", _inactivity_role),
 )

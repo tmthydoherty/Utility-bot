@@ -165,6 +165,18 @@ def build_scenarios():
         note="expect 2 'no OW role selection' warnings, still a valid 2-2-2",
     ))
 
+    # J. Role-stacking pressure -- two clearly-best players in EVERY role, with a
+    #    compensating elite pair on the other axis, so a balance-only split could
+    #    legally stack the two best tanks (or dps/support) on one team. The role
+    #    top-2 rules must break them apart on every axis they can.
+    sc.append(Scenario(
+        "J. role-stacking pressure",
+        [flat([T], 4000), flat([T], 3950), flat([T], 2000), flat([T], 1950),
+         flat([D], 4000), flat([D], 3950), flat([D], 2000), flat([D], 1950),
+         flat([S], 4000), flat([S], 3950), flat([S], 2000), flat([S], 1950)],
+        note="the two best of each role must not share a team",
+    ))
+
     # I. Narrow flex on top of a bare-minimum roster.
     sc.append(Scenario(
         "I. minimum viable coverage",
@@ -213,8 +225,13 @@ async def load_scenario(sc, game_id):
 # ---------------------------------------------------------------------------
 # Assertions
 # ---------------------------------------------------------------------------
-def check_split(red, blue, role_map, sel_map, weights, role_mmr):
-    """Returns (list_of_failures, weighted_diff or None)."""
+def check_split(red, blue, role_map, sel_map, weights, role_mmr, skipped_seps=()):
+    """Returns (list_of_failures, weighted_diff or None).
+
+    skipped_seps holds the separation labels the balancer logged as
+    over-constrained on this run; a pair it deliberately gave up on is not
+    counted against it here.
+    """
     fails = []
 
     if sorted(red + blue) != sorted(PLAYER_IDS):
@@ -254,6 +271,25 @@ def check_split(red, blue, role_map, sel_map, weights, role_mmr):
     top1, top2 = ranked[0], ranked[1]
     if (top1 in set(red)) == (top2 in set(red)):
         fails.append(f"top-2 players {top1} and {top2} landed on the same team")
+
+    # Per-role top-2 separation: the two best of each role (by that role's own
+    # MMR, among players who selected it) should sit on opposite teams. Tank is a
+    # hard rule; DPS/Support yield if over-constrained, so a run the balancer
+    # logged as skipped is exempt.
+    red_set = set(red)
+    for role in OW_ROLES:
+        eligible = sorted(
+            (p for p in PLAYER_IDS if role in (sel_map.get(p) or set(OW_ROLES))),
+            key=lambda p: role_mmr[(p, role)], reverse=True,
+        )
+        if len(eligible) < 2:
+            continue
+        label = f"top-2 {role}"
+        if label in skipped_seps:
+            continue
+        r1, r2 = eligible[0], eligible[1]
+        if (r1 in red_set) == (r2 in red_set):
+            fails.append(f"{label} players {r1} and {r2} landed on the same team")
 
     def strength(team):
         return sum(weights[role_map[p]] * role_mmr[(p, role_map[p])] for p in team)
@@ -310,7 +346,14 @@ async def run_scenario(sc, cog, game_id):
             red, blue, role_map = await cog.balance_teams_overwatch(
                 list(PLAYER_IDS), game_id)
             run_logs = CAPTURE.drain()
-            fails, diff = check_split(red, blue, role_map, sel_map, weights, role_mmr)
+            skipped_seps = {
+                lab for lab in ("top-2 MMR", "top-2 Tank", "bottom-2 MMR",
+                                "top-2 DPS", "top-2 Support")
+                if any(f"{lab} separation over-constrained" in line
+                       for line in run_logs)
+            }
+            fails, diff = check_split(red, blue, role_map, sel_map, weights,
+                                      role_mmr, skipped_seps)
             if fails:
                 result["fails"].extend(fails)
             if diff is not None:

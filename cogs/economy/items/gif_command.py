@@ -1,12 +1,12 @@
 """Add GIF Command — buy your own !command that posts a GIF.
 
-Commands are matched in on_message rather than registered on the bot's command
-tree, so they survive cog reloads and can never shadow a real command.
+This item sells and approves the command and writes its `gif_commands` row.
+Serving the live `!command` belongs to the Custom Commands cog, which owns the
+whole `!` namespace (see cogs/custom_commands); it reads the row this writes.
 """
 
 import logging
 import re
-import time
 
 import discord
 from discord import ui
@@ -18,20 +18,11 @@ logger = logging.getLogger('cogs.economy.items.gif_command')
 
 NAME_PATTERN = re.compile(r"^[a-z0-9_]{2,20}$")
 URL_PATTERN = re.compile(r"^https?://\S+$", re.IGNORECASE)
-INVOKE_PATTERN = re.compile(r"^!([a-zA-Z0-9_]{2,20})\s*$")
-
-# Seconds between GIF command posts in one channel. Without this, spamming
-# `!dance` floods the channel and burns the bot's own rate limit.
-GIF_COOLDOWN = 8.0
 
 
 class GifCommandItem(ShopItem):
     key = "gif_command"
     name = "Add GIF Command"
-
-    def __init__(self, cog):
-        super().__init__(cog)
-        self._cooldowns: dict = {}      # channel_id -> monotonic timestamp
 
     # ---------------------------------------------------------------- price
 
@@ -188,39 +179,13 @@ class GifCommandItem(ShopItem):
 
     # -------------------------------------------------------------- runtime
 
-    async def on_message(self, cog, message: discord.Message):
-        """Serve a live GIF command, subject to a per-channel cooldown."""
-        match = INVOKE_PATTERN.match((message.content or "").strip())
-        if not match:
-            return
-
-        # Cheap in-memory gate before touching the database, so ordinary
-        # messages that merely look like `!word` cost nothing.
-        name = match.group(1).lower()
-        now = time.monotonic()
-        last = self._cooldowns.get(message.channel.id, 0.0)
-        if now - last < GIF_COOLDOWN:
-            return
-
-        row = await cog.db.fetchone(
-            "SELECT url FROM gif_commands WHERE name = ?", (name,)
-        )
-        if row is None:
-            return
-
-        self._cooldowns[message.channel.id] = now
-        try:
-            await message.channel.send(
-                row["url"], allowed_mentions=discord.AllowedMentions.none()
-            )
-        except discord.HTTPException as e:
-            logger.warning(f"Could not serve !{name}: {e}")
-
-    def prune_memory(self):
-        cutoff = time.monotonic() - 3600
-        for key, stamp in list(self._cooldowns.items()):
-            if stamp < cutoff:
-                del self._cooldowns[key]
+    # Serving the live `!command` is deliberately *not* here any more. The
+    # Custom Commands cog (cogs/custom_commands) now owns the entire `!`
+    # namespace — its own admin commands and these purchased GIFs — so there is
+    # one matcher, one precedence order and no chance of two cogs both answering
+    # the same `!word`. This item still sells and approves GIF commands and
+    # writes the `gif_commands` row; Custom Commands reads that row and serves
+    # it, skipping any a moderator has flagged `disabled`.
 
 
 class GifSubmitModal(ui.Modal, title="Add a GIF Command"):

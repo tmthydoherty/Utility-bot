@@ -161,6 +161,28 @@
             "resolved_action": "ignore",
             "resolved_at": "2026-07-06T05:32:17.204170+00:00",
             "stored_role_ids": []
+        },
+        "403683278126841867_1787219274": {
+            "user_id": 403683278126841867,
+            "rule": "Discord Invite Links (3)",
+            "evidence": "discord.gg/QyKrtC2ke",
+            "timestamp": "2026-08-20T09:47:54.600626+00:00",
+            "resolved": true,
+            "resolved_by": 732384312200003605,
+            "resolved_action": "ban",
+            "resolved_at": "2026-08-20T09:49:00.990646+00:00",
+            "stored_role_ids": []
+        },
+        "403683278126841867_1787219283": {
+            "user_id": 403683278126841867,
+            "rule": "Discord Invite Links (3)",
+            "evidence": "discord.gg/QyKrtC2ke",
+            "timestamp": "2026-08-20T09:48:03.139025+00:00",
+            "resolved": true,
+            "resolved_by": 732384312200003605,
+            "resolved_action": "ban",
+            "resolved_at": "2026-08-20T09:49:09.590744+00:00",
+            "stored_role_ids": []
         }
     }
 }

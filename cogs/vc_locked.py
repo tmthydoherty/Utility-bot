@@ -1325,6 +1325,13 @@ class VC(commands.Cog):
                     if vc and hasattr(vc, 'guild'):
                         guild = vc.guild
 
+            # Signal for other cogs. Past the abort guards above, so this only
+            # fires for a teardown that is really happening, and before
+            # vc_data is popped below.
+            if vc_data:
+                self.bot.dispatch("vc_lobby_closed", vc_data.get('guild_id'),
+                                  vc_id, vc_data.get('owner_id'))
+
             # CRITICAL: Delete hub message first (with error handling)
             try:
                 await self.delete_hub_message(vc_id)
@@ -3444,6 +3451,11 @@ class VC(commands.Cog):
                 }
             # Issue #8 fix: Immediate save for critical VC creation
             await self.save_state_immediate()
+
+            # Signal for other cogs (the Utility automations engine listens for
+            # this). Dispatched once the lobby is durable, so a listener that
+            # looks it up always finds it.
+            self.bot.dispatch("vc_lobby_created", guild.id, vc.id, owner.id, is_basic)
 
             self.pending_knocks[vc.id] = []
             self.last_knock_ping[vc.id] = 0

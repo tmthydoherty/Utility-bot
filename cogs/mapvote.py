@@ -1441,23 +1441,34 @@ class MapVote(commands.Cog, name="mapvote"):
             now = datetime.now(timezone.utc)
             to_process = []
 
-            active_votes_copy = {}
+            # Collect only the (guild, message) ids that are actually due. This
+            # used to deepcopy the whole guild_data blob every 15s just to read
+            # one timestamp per vote — and guild_data carries user_stats, which
+            # grows forever, so the cost climbed with the server while the work
+            # stayed the same. Nothing below needs the vote body: the live state
+            # is re-read under the lock a few lines down anyway.
             try:
                 async with self.config_lock:
-                    active_votes_copy = copy.deepcopy(self.active_config.get("guild_data", {}))
+                    for gid, g_cfg in self.active_config.get("guild_data", {}).items():
+                        for mid, vote in g_cfg.get("active_votes", {}).items():
+                            end_iso = vote.get("end_time_iso")
+                            if not end_iso:
+                                continue
+                            try:
+                                if now >= datetime.fromisoformat(end_iso):
+                                    to_process.append((gid, mid))
+                            except Exception as e:
+                                # Per-vote, so one malformed entry cannot stop
+                                # the rest of the sweep from concluding.
+                                log_map.error(f"Error parsing timestamp for vote {mid} in guild {gid}: {e}")
             except Exception as e:
-                log_map.error(f"Error copying active config in vote_check_loop: {e}", exc_info=True)
-                return # Don't proceed if copy failed
+                log_map.error(f"Error scanning active config in vote_check_loop: {e}", exc_info=True)
+                return  # Don't proceed if the scan failed
 
-            for gid, g_cfg in active_votes_copy.items():
-                for mid, vote in g_cfg.get("active_votes", {}).items():
-                    try:
-                        if now >= datetime.fromisoformat(vote["end_time_iso"]):
-                            to_process.append((gid, mid, vote))
-                    except Exception as e:
-                        log_map.error(f"Error parsing timestamp for vote {mid} in guild {gid}: {e}")
+            if not to_process:
+                return
 
-            for gid, mid, _vote in to_process:
+            for gid, mid in to_process:
                 try:
                     # Re-read current state under lock to avoid stale-copy race
                     async with self.config_lock:

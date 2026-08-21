@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 from ..storage import _load_json, TOPICS_FILE
 from ..defaults import _ensure_topic_defaults
 from .pre_modal import PreModalCheckView, PreModalAnswerModal
+from utils.perms import is_admin_interaction
 
 logger = logging.getLogger("ticketing_cog")
 
@@ -60,7 +61,8 @@ class PanelAction(discord.ui.Button):
             return await interaction.response.send_message("You are not allowed to use this.", ephemeral=True)
 
         # --- Unified cooldown check (admins bypass) ---
-        is_admin = interaction.user.guild_permissions.administrator
+        # Shared helper, so the configured admin role bypasses too.
+        is_admin = is_admin_interaction(interaction)
         cooldown_minutes = topic.get('cooldown_minutes', 5)
         if not is_admin:
             last_time = cog.cooldowns.get(user_id)

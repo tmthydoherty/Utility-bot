@@ -1453,7 +1453,10 @@ class GamesPage(SettingsPage):
                 details.append(f"Secondary · **{game.secondary_queue_name or 'enabled'}**")
             if game.schedule_enabled:
                 details.append("Schedule · **on**")
-            embed.add_field(name=game.name, value="\n".join(details), inline=True)
+            if not game.enabled:
+                details.insert(0, "⛔ **Disabled**")
+            name = game.name if game.enabled else f"{game.name} (disabled)"
+            embed.add_field(name=name, value="\n".join(details), inline=True)
         return embed
 
     async def _open_game(self, interaction: discord.Interaction, game: GameConfig):
@@ -1490,9 +1493,15 @@ class GameSettingsPage(SettingsPage):
 
         game = await self._reload()
         embed = discord.Embed(
-            title=f"{game.name} · Settings",
-            color=COLOR_NEUTRAL,
+            title=f"{game.name} · Settings" + ("" if game.enabled else " · ⛔ disabled"),
+            color=COLOR_NEUTRAL if game.enabled else COLOR_WARNING,
         )
+        if not game.enabled:
+            embed.description = (
+                "⛔ **This game is disabled.** Its data is preserved, but it's "
+                "hidden from setup and stat menus and its queue is closed. "
+                "Re-enable it under **Toggles**."
+            )
         embed.add_field(
             name="Queue",
             value=(
@@ -3181,49 +3190,72 @@ class GameTogglesView(ExpiringView):
         self.update_buttons()
 
     def build_embed(self) -> discord.Embed:
+        state = (
+            "**Game is ENABLED.**"
+            if self.game.enabled else
+            "**Game is DISABLED** — its data is safe, but it's hidden from setup "
+            "and stat menus and its queue won't accept new players."
+        )
         return discord.Embed(
             title=f"{self.game.name} · Toggles",
             description=(
+                f"{state}\n\n"
                 "Each button shows its current state — click to flip it. "
                 "Changes take effect on open queues immediately."
             ),
-            color=COLOR_NEUTRAL,
+            color=COLOR_NEUTRAL if self.game.enabled else COLOR_WARNING,
         )
 
     def update_buttons(self):
         self.clear_items()
 
+        # Master on/off. Its own row so it reads as a state switch for the whole
+        # game rather than one rule among many. OFF keeps all data but takes the
+        # game off every operational surface and closes its queue.
+        enabled_btn = discord.ui.Button(
+            label=f"Game: {'ENABLED' if self.game.enabled else 'DISABLED'}",
+            style=discord.ButtonStyle.success if self.game.enabled else discord.ButtonStyle.danger,
+            row=0,
+        )
+        enabled_btn.callback = self.toggle_enabled
+        self.add_item(enabled_btn)
+
         vc_btn = discord.ui.Button(
             label=f"VC Creation: {'ON' if self.game.vc_creation_enabled else 'OFF'}",
-            style=discord.ButtonStyle.success if self.game.vc_creation_enabled else discord.ButtonStyle.secondary
+            style=discord.ButtonStyle.success if self.game.vc_creation_enabled else discord.ButtonStyle.secondary,
+            row=1,
         )
         vc_btn.callback = self.toggle_vc
         self.add_item(vc_btn)
 
         role_btn = discord.ui.Button(
             label=f"Role Required: {'ON' if self.game.queue_role_required else 'OFF'}",
-            style=discord.ButtonStyle.success if self.game.queue_role_required else discord.ButtonStyle.secondary
+            style=discord.ButtonStyle.success if self.game.queue_role_required else discord.ButtonStyle.secondary,
+            row=1,
         )
         role_btn.callback = self.toggle_role
         self.add_item(role_btn)
 
         dm_btn = discord.ui.Button(
             label=f"DM Ready: {'ON' if self.game.dm_ready_up else 'OFF'}",
-            style=discord.ButtonStyle.success if self.game.dm_ready_up else discord.ButtonStyle.secondary
+            style=discord.ButtonStyle.success if self.game.dm_ready_up else discord.ButtonStyle.secondary,
+            row=1,
         )
         dm_btn.callback = self.toggle_dm
         self.add_item(dm_btn)
 
         ign_btn = discord.ui.Button(
             label=f"IGN Required: {'ON' if self.game.ign_required else 'OFF'}",
-            style=discord.ButtonStyle.success if self.game.ign_required else discord.ButtonStyle.secondary
+            style=discord.ButtonStyle.success if self.game.ign_required else discord.ButtonStyle.secondary,
+            row=1,
         )
         ign_btn.callback = self.toggle_ign_required
         self.add_item(ign_btn)
 
         role_req_btn = discord.ui.Button(
             label=f"Role Prefs Required: {'ON' if self.game.role_required else 'OFF'}",
-            style=discord.ButtonStyle.success if self.game.role_required else discord.ButtonStyle.secondary
+            style=discord.ButtonStyle.success if self.game.role_required else discord.ButtonStyle.secondary,
+            row=1,
         )
         role_req_btn.callback = self.toggle_role_required
         self.add_item(role_req_btn)
@@ -3233,7 +3265,7 @@ class GameTogglesView(ExpiringView):
             pc_btn = discord.ui.Button(
                 label=f"PC Players: {'ON' if self.game.pc_enabled else 'OFF'}",
                 style=discord.ButtonStyle.success if self.game.pc_enabled else discord.ButtonStyle.secondary,
-                row=1
+                row=2
             )
             pc_btn.callback = self.toggle_pc_enabled
             self.add_item(pc_btn)
@@ -3242,7 +3274,7 @@ class GameTogglesView(ExpiringView):
                 offset_btn = discord.ui.Button(
                     label=f"PC Offset: +{self.game.pc_offset_tiers:g} tier",
                     style=discord.ButtonStyle.primary,
-                    row=1
+                    row=2
                 )
                 offset_btn.callback = self.set_pc_offset
                 self.add_item(offset_btn)
@@ -3251,7 +3283,7 @@ class GameTogglesView(ExpiringView):
         grace_btn = discord.ui.Button(
             label=f"Grace Period: {self.game.grace_period_minutes}min",
             style=discord.ButtonStyle.primary,
-            row=1
+            row=2
         )
         grace_btn.callback = self.set_grace_period
         self.add_item(grace_btn)
@@ -3260,7 +3292,7 @@ class GameTogglesView(ExpiringView):
         nr_cd_btn = discord.ui.Button(
             label=f"Not Ready CD: {self.game.not_ready_cooldown_minutes}min",
             style=discord.ButtonStyle.primary,
-            row=1
+            row=2
         )
         nr_cd_btn.callback = self.set_not_ready_cooldown
         self.add_item(nr_cd_btn)
@@ -3272,7 +3304,7 @@ class GameTogglesView(ExpiringView):
         topic_btn = discord.ui.Button(
             label=topic_label,
             style=discord.ButtonStyle.primary if self.game.verification_topic else discord.ButtonStyle.secondary,
-            row=1
+            row=2
         )
         topic_btn.callback = self.set_verification_topic
         self.add_item(topic_btn)
@@ -3303,6 +3335,21 @@ class GameTogglesView(ExpiringView):
     async def set_not_ready_cooldown(self, interaction: discord.Interaction):
         modal = NotReadyCooldownModal(self.cog, self.game, self)
         await interaction.response.send_modal(modal)
+
+    async def toggle_enabled(self, interaction: discord.Interaction):
+        new_val = not self.game.enabled
+        await DatabaseHelper.update_game(self.game.game_id, enabled=int(new_val))
+        self.game.enabled = new_val
+        self.update_buttons()
+        await interaction.response.edit_message(view=self)
+        # Reflect the state change on any live queue message immediately.
+        await self._refresh_queue_embeds(interaction.guild)
+        await self.cog.log_action(
+            interaction.guild,
+            f"Game **{self.game.name}** {'enabled' if new_val else 'disabled'} "
+            f"by {interaction.user.display_name}",
+            prefix="🎮",
+        )
 
     async def toggle_vc(self, interaction: discord.Interaction):
         new_val = not self.game.vc_creation_enabled

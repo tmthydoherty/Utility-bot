@@ -24,12 +24,20 @@ except ImportError:  # Economy bridge absent — game night carries on regardles
     def award_many(*args, **kwargs):
         pass
 
+from utils.perms import is_admin_interaction
+from utils.module_config_sync import ConfigSyncAgent
+from typing import Any, Dict
+
 EASTERN = ZoneInfo("America/New_York")
 
 logger = logging.getLogger('bot_main.game_poll')
 
 # --- CONSTANTS & CONFIG ---
-DB_PATH = "game_poll.db"
+# Anchored to the repo root (the cog's grandparent dir), not the process's
+# working directory. A relative path silently opened — and created — a fresh,
+# empty database whenever the bot was launched from anywhere but /home/tmthy/Vibey,
+# which is exactly how "no such table: settings" spammed every minute.
+DB_PATH = str(Path(__file__).parent.parent / "data" / "game_poll_config" / "game_poll.db")
 FONTS_PATH = Path(__file__).parent.parent / "fonts"
 RESULTS_TEMPLATE_PATH = Path(__file__).parent / "templates" / "results_card.html"
 EMBED_COLOR = 0x2b2d31  # Sleek dark grey/blurple standard
@@ -44,6 +52,9 @@ class DB:
     """Helper class for SQLite database operations."""
     @staticmethod
     async def setup():
+        # aiosqlite won't create parent directories; make sure they exist so the
+        # anchored DB_PATH always resolves to a real, writable file.
+        Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(DB_PATH) as db:
             # Enable Write-Ahead Logging for high concurrency / race condition prevention
             await db.execute("PRAGMA journal_mode=WAL;")
@@ -84,6 +95,18 @@ class DB:
             await db.execute("""CREATE TABLE IF NOT EXISTS poll_results (
                 poll_id INTEGER PRIMARY KEY, data_json TEXT
             )""")
+            # Stamp each stored result with when it closed and the weights in
+            # force at the time, so the dashboard can date every week and
+            # reproduce per-voter points even after the weights are retuned.
+            for _col, _decl in (("ended_at", "REAL"), ("weight_1", "INTEGER"),
+                                ("weight_2", "INTEGER"), ("weight_3", "INTEGER")):
+                try:
+                    await db.execute(f"ALTER TABLE poll_results ADD COLUMN {_col} {_decl}")
+                except Exception:
+                    pass  # Column already exists
+            await db.execute("""CREATE TABLE IF NOT EXISTS game_night_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, session_date REAL, user_id INTEGER, user_name TEXT, duration REAL
+            )""")
             await db.execute("""CREATE TABLE IF NOT EXISTS results_messages (
                 poll_id INTEGER, channel_id INTEGER, message_id INTEGER
             )""")
@@ -97,6 +120,7 @@ class DB:
             await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('secondary_poll_channel_ids', '[]')")
             await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('game_night_role_id', '')")
             await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('ping_role_enabled', '0')")
+            await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('enabled', '1')")
             await db.commit()
 
     @staticmethod
@@ -613,6 +637,9 @@ class AdminPanel:
         await self.edit(interaction, embed=embed, view=view)
 
     async def post_poll(self, interaction) -> tuple[bool, str]:
+        if not await self.cog.is_enabled():
+            return False, "Game Polls is switched off. Turn it on from the dashboard first."
+
         if await DB.get_setting('active_poll_id'):
             return False, "A poll is already active. End it first."
 
@@ -732,23 +759,11 @@ class HomeView(discord.ui.View):
         games_btn.callback = self.games_cb
         self.add_item(games_btn)
 
-        weights_btn = discord.ui.Button(label="Voting Weights", style=discord.ButtonStyle.secondary, row=1)
-        weights_btn.callback = self.weights_cb
-        self.add_item(weights_btn)
-
-        channels_btn = discord.ui.Button(label="Set Channels", style=discord.ButtonStyle.secondary, row=1)
-        channels_btn.callback = self.channels_cb
-        self.add_item(channels_btn)
-
-        returning_btn = discord.ui.Button(label="Returning Players", style=discord.ButtonStyle.secondary, row=2)
+        returning_btn = discord.ui.Button(label="Returning Players", style=discord.ButtonStyle.secondary, row=1)
         returning_btn.callback = self.returning_cb
         self.add_item(returning_btn)
 
-        role_btn = discord.ui.Button(label="Game Night Role", style=discord.ButtonStyle.secondary, row=2)
-        role_btn.callback = self.role_cb
-        self.add_item(role_btn)
-
-        banners_btn = discord.ui.Button(label="Banners", style=discord.ButtonStyle.secondary, row=2)
+        banners_btn = discord.ui.Button(label="Game Banners", style=discord.ButtonStyle.secondary, row=1)
         banners_btn.callback = self.banners_cb
         self.add_item(banners_btn)
 
@@ -772,23 +787,11 @@ class HomeView(discord.ui.View):
     async def games_cb(self, interaction: discord.Interaction):
         await self.panel.show_games(interaction)
 
-    async def weights_cb(self, interaction: discord.Interaction):
-        w1 = await DB.get_setting('weight_1', '3')
-        w2 = await DB.get_setting('weight_2', '2')
-        w3 = await DB.get_setting('weight_3', '1')
-        await interaction.response.send_modal(WeightsModal(self.panel, w1, w2, w3))
-
-    async def channels_cb(self, interaction: discord.Interaction):
-        await self.panel.show_channels(interaction)
-
     async def returning_cb(self, interaction: discord.Interaction):
         await self.panel.show_returning_players(interaction)
 
-    async def role_cb(self, interaction: discord.Interaction):
-        await self.panel.show_role_settings(interaction)
-
     async def banners_cb(self, interaction: discord.Interaction):
-        await self.panel.show_banners(interaction)
+        await self.panel.show_game_banners(interaction)
 
     async def create_vc_cb(self, interaction: discord.Interaction):
         await interaction.response.send_modal(VCModal(self.panel.cog, self.panel))
@@ -1463,9 +1466,61 @@ class GamePoll(commands.Cog):
         self.browser = None
         self._page_semaphore = asyncio.Semaphore(2)
         self._results_template = None
+        self._sync = ConfigSyncAgent("game-poll", self._sync_snapshot, self._sync_apply, bot=bot)
+
+    async def _sync_snapshot(self) -> Dict[str, Dict[str, Any]]:
+        """Publish the one global row so the website reads back what's live."""
+        settings = {}
+        keys = [
+            "enabled",
+            "weight_1", "weight_2", "weight_3",
+            "poll_channel_ids", "secondary_poll_channel_ids",
+            "vc_category_id", "game_night_role_id", "ping_role_enabled",
+            "game_night_banner_url"
+        ]
+        # 'enabled' defaults to on so a server that has never touched the switch
+        # reads back as enabled rather than blank.
+        settings["enabled"] = (await DB.get_setting("enabled", "1")) == "1"
+        for key in keys:
+            if key == "enabled":
+                continue
+            val = await DB.get_setting(key)
+            if val is not None:
+                if key in ["weight_1", "weight_2", "weight_3"]:
+                    try:
+                        settings[key] = float(val)
+                    except ValueError:
+                        pass
+                elif key in ["poll_channel_ids", "secondary_poll_channel_ids"]:
+                    try:
+                        settings[key] = [str(x) for x in json.loads(val)]
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                elif key == "ping_role_enabled":
+                    settings[key] = (val == "1")
+                else:
+                    settings[key] = val
+        return {"0": settings}
+
+    async def _sync_apply(self, guild_id: str, values: Dict[str, Any]):
+        """Adopt values saved on the dashboard and apply them at once."""
+        for key, value in values.items():
+            if key in ["weight_1", "weight_2", "weight_3"]:
+                await DB.set_setting(key, str(value))
+            elif key in ["poll_channel_ids", "secondary_poll_channel_ids"]:
+                if isinstance(value, list):
+                    await DB.set_setting(key, json.dumps([str(x) for x in value]))
+            elif key in ["ping_role_enabled", "enabled"]:
+                await DB.set_setting(key, "1" if value else "0")
+            elif key in ["vc_category_id", "game_night_role_id", "game_night_banner_url"]:
+                if value is not None:
+                    await DB.set_setting(key, str(value))
+                else:
+                    await DB.set_setting(key, "")
 
     async def cog_load(self):
         await DB.setup()
+        await self._sync.start()
         self.poll_monitor.start()
         self.vc_monitor.start()
         self.bot.add_view(PublicVoteView())
@@ -1485,6 +1540,7 @@ class GamePoll(commands.Cog):
                 logger.warning(f"GamePoll: Failed to initialize Playwright: {e}")
 
     async def cog_unload(self):
+        self._sync.stop()
         self.poll_monitor.cancel()
         self.vc_monitor.cancel()
         self._active_voters.clear()
@@ -1615,9 +1671,13 @@ class GamePoll(commands.Cog):
     # --- PERMISSIONS ---
     def is_admin(self, interaction: discord.Interaction) -> bool:
         """Uses the robust admin check defined in your main.py Vibey class."""
-        if hasattr(self.bot, 'is_bot_admin'):
-            return self.bot.is_bot_admin(interaction.user)
-        return interaction.user.guild_permissions.administrator
+        return is_admin_interaction(interaction)
+
+    @staticmethod
+    async def is_enabled() -> bool:
+        """The dashboard's on/off switch. Missing means on, so an untouched
+        server keeps working exactly as before."""
+        return (await DB.get_setting('enabled', '1')) == '1'
 
     # --- COMMANDS ---
     @app_commands.command(name="gamepoll_panel", description="Open the Game Night Admin Panel")
@@ -1635,6 +1695,9 @@ class GamePoll(commands.Cog):
     async def vc_monitor(self):
         """Auto-cleanup empty Game Night VCs."""
         try:
+            if not await self.is_enabled():
+                return
+
             vc_id = await DB.get_setting('active_vc_id')
             if not vc_id: return
 
@@ -1691,8 +1754,37 @@ class GamePoll(commands.Cog):
 
     @tasks.loop(minutes=1)
     async def poll_monitor(self):
-        """Check if active poll has expired."""
+        """Check if active poll has expired, or if dashboard requested a post."""
         try:
+            if not await self.is_enabled():
+                return
+
+            # Check for dashboard trigger
+            trigger = await DB.get_setting('dashboard_trigger_post')
+            if trigger == '1':
+                await DB.set_setting('dashboard_trigger_post', '0')
+                guild = self.bot.guilds[0] if self.bot.guilds else None
+                if guild:
+                    # We need a dummy object with a .guild property to act as interaction
+                    class DummyInteraction:
+                        def __init__(self, g):
+                            self.guild = g
+                    
+                    panel = AdminPanel(self)
+                    # Load draft settings
+                    draft_game_ids_str = await DB.get_setting('draft_game_ids', '')
+                    if draft_game_ids_str:
+                        panel.draft_game_ids = [int(x) for x in draft_game_ids_str.split(',')]
+                    draft_end_str = await DB.get_setting('draft_end_time', '')
+                    if draft_end_str:
+                        panel.draft_end_time = datetime.fromtimestamp(float(draft_end_str), tz=EASTERN)
+                    draft_gn_str = await DB.get_setting('draft_game_night_time', '')
+                    if draft_gn_str:
+                        panel.draft_game_night_time = datetime.fromtimestamp(float(draft_gn_str), tz=EASTERN)
+                    
+                    if panel.draft_game_ids and panel.draft_end_time:
+                        await panel.post_poll(DummyInteraction(guild))
+
             poll_id = await DB.get_setting('active_poll_id')
             if not poll_id: return
 
@@ -1792,9 +1884,12 @@ class GamePoll(commands.Cog):
                     gn_ts = int(float(gn_time))
                     embed.add_field(name="Game Night", value=f"<t:{gn_ts}:F>\n(<t:{gn_ts}:R>)", inline=False)
 
-                # Store vote breakdown for Details button
-                await db.execute("INSERT OR REPLACE INTO poll_results (poll_id, data_json) VALUES (?, ?)",
-                                 (int(poll_id), json.dumps(detail_data)))
+                # Store vote breakdown for Details button. ended_at + the
+                # weights in force are kept alongside so the dashboard's voting
+                # history can date the week and recompute per-voter points.
+                await db.execute(
+                    "INSERT OR REPLACE INTO poll_results (poll_id, data_json, ended_at, weight_1, weight_2, weight_3) VALUES (?, ?, ?, ?, ?, ?)",
+                    (int(poll_id), json.dumps(detail_data), time.time(), w1, w2, w3))
 
                 success = True
                 async with db.execute("SELECT channel_id, message_id FROM poll_messages WHERE poll_id = ?", (poll_id,)) as cur:
@@ -1846,6 +1941,16 @@ class GamePoll(commands.Cog):
                 INSERT OR IGNORE INTO returning_players (user_id)
                 SELECT user_id FROM vc_sessions WHERE total_seconds >= {MIN_VC_SECONDS}
             """)
+
+            async with db.execute("SELECT user_id, total_seconds FROM vc_sessions WHERE total_seconds > 0") as cur:
+                rows = await cur.fetchall()
+                for (uid, secs) in rows:
+                    user = self.bot.get_user(uid)
+                    name = user.display_name if user else "Unknown User"
+                    await db.execute(
+                        "INSERT INTO game_night_history (session_date, user_id, user_name, duration) VALUES (?, ?, ?, ?)",
+                        (now, uid, name, secs)
+                    )
 
             await db.execute("DELETE FROM vc_sessions")
             await db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('active_vc_id', '')")

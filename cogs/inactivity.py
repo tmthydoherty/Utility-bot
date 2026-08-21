@@ -6,6 +6,8 @@ from datetime import datetime, timedelta, timezone
 import logging
 import re
 
+from utils.newcomer_role_sources import summary as newcomer_role_summary
+
 logger = logging.getLogger('betting_bot.inactivity')
 if not logger.handlers:
     _h = logging.StreamHandler()
@@ -110,6 +112,12 @@ class InactivityPanelView(ui.View):
             desc += f"**Global (9mo):** 0 messages / {global_9mo} days (no exceptions)\n"
         else:
             desc += "System not configured."
+
+        others = await newcomer_role_summary(
+            self.cog.bot, self.guild, exclude="Inactivity"
+        )
+        if others:
+            desc += f"\n**Newcomer role elsewhere** *(set separately)*\n{others}"
         return discord.Embed(description=desc, color=discord.Color.dark_grey())
 
     class ConfigChannelSelect(ui.ChannelSelect):
@@ -474,12 +482,6 @@ class Inactivity(commands.Cog):
         status_rows = await self.db.fetch_all("SELECT user_id, status, snooze_until FROM user_inactivity_status WHERE guild_id = ?", (guild.id,))
         statuses = {r['user_id']: {'status': r['status'], 'snooze_until': r['snooze_until']} for r in status_rows}
 
-        # Alert log
-        alert_rows = await self.db.fetch_all("SELECT user_id, rule FROM inactivity_alert_log WHERE guild_id = ?", (guild.id,))
-        alerted = set()
-        for r in alert_rows:
-            alerted.add((r['user_id'], r['rule']))
-
         # Message counts for each period
         now = datetime.now(timezone.utc)
         primary_cutoff = int((now - timedelta(days=primary_period)).timestamp())
@@ -499,7 +501,7 @@ class Inactivity(commands.Cog):
         global_9mo_cutoff = int((now - timedelta(days=global_9mo_period)).timestamp())
 
         alerts_to_send = []
-        updates_to_clear = []
+        users_to_clear = set()
 
         logger.info(f"[Inactivity] Guild '{guild.name}': checking {len(guild.members)} members.")
 
@@ -511,82 +513,68 @@ class Inactivity(commands.Cog):
 
             join_ts = int(member.joined_at.timestamp())
             status_info = statuses.get(member.id)
+            status = status_info['status'] if status_info else None
 
-            # Kicked users won't be members; forgotten/snoozed block only rules they were alerted for
-            is_kicked = status_info and status_info['status'] == 'kicked'
-            if is_kicked:
+            # A kicked member is already gone — nothing left to decide.
+            if status == 'kicked':
                 continue
-            is_forgotten = status_info and status_info['status'] == 'forgotten'
-            is_snoozed = status_info and status_info['status'] == 'snoozed' and now.timestamp() < status_info['snooze_until']
+
+            is_forgotten = status == 'forgotten'
+            is_snoozed = status == 'snoozed' and now.timestamp() < status_info['snooze_until']
+            is_pending = status == 'alerted'
 
             has_newcomer_role = highlight_role and highlight_role in member.roles
+            user_last_ts = last_msg_ts.get(member.id, 0)
 
-            # --- PRIMARY RULE (newcomer role only) ---
-            if has_newcomer_role and not (is_forgotten or is_snoozed):
-                p_count = primary_counts.get(member.id, 0)
-                if p_count >= primary_threshold:
-                    if (member.id, 'primary') in alerted:
-                        updates_to_clear.append((member.id, 'primary'))
-                elif join_ts <= primary_cutoff and (member.id, 'primary') not in alerted:
-                    alerts_to_send.append((member, p_count, 'primary', primary_threshold, primary_period))
+            # Does the member trip each rule right now? Judged fresh each scan,
+            # independent of whatever alert may already be out for them.
+            q_primary = (has_newcomer_role and join_ts <= primary_cutoff
+                         and primary_counts.get(member.id, 0) < primary_threshold)
+            q_secondary = (has_newcomer_role and join_ts <= secondary_cutoff
+                           and secondary_counts.get(member.id, 0) <= secondary_threshold)
+            q_broad = (join_ts <= broad_cutoff and user_last_ts <= broad_cutoff
+                       and alltime_counts.get(member.id, 0) < broad_whitelist)
+            q_9mo = join_ts <= global_9mo_cutoff and user_last_ts <= global_9mo_cutoff
 
-            # --- SECONDARY RULE (newcomer role only) ---
-            if has_newcomer_role and (member.id, 'secondary') not in alerted:
-                if is_forgotten or is_snoozed:
-                    pass  # blocked
-                else:
-                    s_count = secondary_counts.get(member.id, 0)
-                    if s_count > secondary_threshold:
-                        pass  # active for this rule
-                    elif join_ts <= secondary_cutoff:
-                        alerts_to_send.append((member, s_count, 'secondary', secondary_threshold, secondary_period))
-            elif has_newcomer_role and (member.id, 'secondary') in alerted:
-                s_count = secondary_counts.get(member.id, 0)
-                if s_count > secondary_threshold:
-                    updates_to_clear.append((member.id, 'secondary'))
+            # Only ever one live alert per person. While one is still waiting on
+            # an admin, send nothing else. If they've since become active again,
+            # retire the pending alert so a later lapse can raise a fresh one.
+            if is_pending:
+                if not (q_primary or q_secondary or q_broad or q_9mo):
+                    users_to_clear.add(member.id)
+                continue
 
-            # --- GLOBAL 6MO RULE (all members, respects forgotten, whitelists users with 25+ all-time msgs) ---
-            if (member.id, 'broad') not in alerted:
-                if is_forgotten:
-                    pass  # admin said forget this user
-                elif alltime_counts.get(member.id, 0) >= broad_whitelist:
-                    pass  # whitelisted by all-time message count
-                else:
-                    user_last_ts = last_msg_ts.get(member.id, 0)
-                    if user_last_ts > broad_cutoff:
-                        pass  # sent a message within the period
-                    elif join_ts <= broad_cutoff:
-                        alerts_to_send.append((member, 0, 'broad', 0, broad_period))
+            # A snooze is "not now" — hold everything until it expires, then the
+            # next qualifying rule gets its turn.
+            if is_snoozed:
+                continue
+
+            # Pick a single rule, most serious first. The 9-month sweep is the
+            # one thing that still fires after an admin has said "forget them";
+            # forget silences the rest.
+            if q_9mo:
+                chosen = ('global_9mo', 0, 0, global_9mo_period)
+            elif is_forgotten:
+                chosen = None
+            elif q_broad:
+                chosen = ('broad', 0, 0, broad_period)
+            elif q_secondary:
+                chosen = ('secondary', secondary_counts.get(member.id, 0), secondary_threshold, secondary_period)
+            elif q_primary:
+                chosen = ('primary', primary_counts.get(member.id, 0), primary_threshold, primary_period)
             else:
-                user_last_ts = last_msg_ts.get(member.id, 0)
-                if user_last_ts > broad_cutoff:
-                    updates_to_clear.append((member.id, 'broad'))
+                chosen = None
 
-            # --- GLOBAL 9MO RULE (all members, NO exceptions — ignores forgotten/snoozed/whitelist) ---
-            if (member.id, 'global_9mo') not in alerted:
-                user_last_ts = last_msg_ts.get(member.id, 0)
-                if user_last_ts > global_9mo_cutoff:
-                    pass  # sent a message within the period
-                elif join_ts <= global_9mo_cutoff:
-                    alerts_to_send.append((member, 0, 'global_9mo', 0, global_9mo_period))
-            else:
-                user_last_ts = last_msg_ts.get(member.id, 0)
-                if user_last_ts > global_9mo_cutoff:
-                    updates_to_clear.append((member.id, 'global_9mo'))
+            if chosen:
+                rule, count, threshold, period = chosen
+                alerts_to_send.append((member, count, rule, threshold, period))
 
-        # Clear resolved alerts
-        if updates_to_clear:
-            for uid, rule in updates_to_clear:
-                await self.db.execute("DELETE FROM inactivity_alert_log WHERE guild_id = ? AND user_id = ? AND rule = ?", (guild.id, uid, rule))
-            cleared_users = set(uid for uid, _ in updates_to_clear)
-            for uid in cleared_users:
-                remaining = await self.db.fetch_one("SELECT 1 FROM inactivity_alert_log WHERE guild_id = ? AND user_id = ?", (guild.id, uid))
-                if not remaining:
-                    status_info = statuses.get(uid)
-                    if status_info and status_info['status'] in ('alerted', 'snoozed'):
-                        await self.db.execute("DELETE FROM user_inactivity_status WHERE guild_id = ? AND user_id = ?", (guild.id, uid))
+        # A flagged member who slipped back into activity gets a clean slate.
+        for uid in users_to_clear:
+            await self.db.execute("DELETE FROM inactivity_alert_log WHERE guild_id = ? AND user_id = ?", (guild.id, uid))
+            await self.db.execute("DELETE FROM user_inactivity_status WHERE guild_id = ? AND user_id = ?", (guild.id, uid))
 
-        logger.info(f"[Inactivity] Guild '{guild.name}': {len(alerts_to_send)} alerts to send, {len(updates_to_clear)} alert entries to clear.")
+        logger.info(f"[Inactivity] Guild '{guild.name}': {len(alerts_to_send)} alerts to send, {len(users_to_clear)} flagged member(s) cleared.")
 
         # Send alerts
         for member, count, rule, threshold, period in alerts_to_send:

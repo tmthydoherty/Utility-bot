@@ -28,6 +28,21 @@
             },
             "1521332022436560977": {
                 "thread_id": 1521331918245855383
+            },
+            "1531153072418586685": {
+                "thread_id": 1431913737283047526
+            },
+            "1531152846735802471": {
+                "thread_id": 1431904538402750496
+            },
+            "1531153259589533787": {
+                "thread_id": 1439836850322669731
+            },
+            "1455556375827451966": {
+                "thread_id": 1431906751766331462
+            },
+            "1531153479983300752": {
+                "thread_id": 1431906751766331462
             }
         },
         "onboarding_role_ids": [
@@ -36,5 +51,33 @@
             1431565435676921956
         ],
         "mod_channel_id": 1431565436713177200
+    },
+    "1145811316364292246": {
+        "welcome_channel_id": null,
+        "intro_channel_id": null,
+        "suggest_introduction": false,
+        "lfg_forum_id": null,
+        "game_mappings": {}
+    },
+    "1378533495286268078": {
+        "welcome_channel_id": null,
+        "intro_channel_id": null,
+        "suggest_introduction": false,
+        "lfg_forum_id": null,
+        "game_mappings": {}
+    },
+    "1444936379414089905": {
+        "welcome_channel_id": null,
+        "intro_channel_id": null,
+        "suggest_introduction": false,
+        "lfg_forum_id": null,
+        "game_mappings": {}
+    },
+    "1490565175202283673": {
+        "welcome_channel_id": null,
+        "intro_channel_id": null,
+        "suggest_introduction": false,
+        "lfg_forum_id": null,
+        "game_mappings": {}
     }
 }

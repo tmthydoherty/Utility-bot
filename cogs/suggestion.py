@@ -2,48 +2,34 @@ import discord
 from discord.ext import commands
 from discord import app_commands, ui, Interaction, ButtonStyle
 from typing import Literal, Optional, Dict, Any
-import json
 import asyncio
-import os
 import functools # For running blocking I/O in a thread
+
+from utils.config_store import get_store
+from utils.module_config_sync import ConfigSyncAgent
 
 # --- Constants ---
 SETTINGS_FILE = "guild_settings.json"
+# The settings the web dashboard mirrors for this module.
+SYNC_KEYS = ("suggestion_channel_id", "log_channel_id")
 DATA_FILE = "suggestion_data.json"
 MIN_SUGGESTION_LENGTH = 20
 
-# --- Helper Functions for JSON IO (Async via Executor) ---
+# --- Helper Functions for JSON IO (cached; see utils/config_store.py) ---
+# These used to hit the disk on every call, and on_message calls load_json for
+# every message in the server. The store keeps the parsed document in memory
+# and only writes on save; the signatures and copy-on-read semantics are
+# unchanged, so call sites did not have to move.
 
 async def load_json(filename: str) -> Dict[str, Any]:
-    """Asynchronously loads a JSON file in an executor thread."""
-    loop = asyncio.get_event_loop()
-    
-    def read_file():
-        if not os.path.exists(filename):
-            return {}
-        try:
-            with open(filename, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except json.JSONDecodeError:
-            return {}
-        except Exception as e:
-            print(f"Error loading JSON file {filename}: {e}")
-            return {}
-
-    return await loop.run_in_executor(None, read_file)
+    """Load a JSON file, served from the in-memory cache after first read."""
+    store = await get_store(filename)
+    return await store.read()
 
 async def save_json(filename: str, data: Dict[str, Any]) -> None:
-    """Asynchronously saves data to a JSON file in an executor thread."""
-    loop = asyncio.get_event_loop()
-    
-    def write_file():
-        try:
-            with open(filename, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=4)
-        except Exception as e:
-            print(f"Error saving JSON file {filename}: {e}")
-
-    await loop.run_in_executor(None, write_file)
+    """Persist a JSON file and refresh the cache."""
+    store = await get_store(filename)
+    await store.write(data)
 
 # --- Modals ---
 
@@ -279,9 +265,69 @@ class Suggestions(commands.Cog):
         self.bot = bot
         self.settings_lock = asyncio.Lock()
         self.data_lock = asyncio.Lock()
+        self._sync = ConfigSyncAgent("suggestions", self._sync_snapshot, self._sync_apply, bot=bot)
         self.bot.add_view(PersistentSuggestionView(self))
         self.bot.add_view(AdminActionView(self))
         self.bot.add_view(ManageView(self))
+
+    async def cog_load(self):
+        await self._sync.start()
+
+    def cog_unload(self):
+        self._sync.stop()
+
+    # --- Dashboard sync (see utils/module_config_sync.py) ---
+
+    async def _sync_snapshot(self) -> Dict[str, Any]:
+        """The two channel settings per guild, IDs as strings for the web."""
+        settings = await load_json(SETTINGS_FILE)
+        out: Dict[str, Any] = {}
+        for gid, gs in settings.items():
+            out[str(gid)] = {
+                key: (str(gs[key]) if gs.get(key) else None) for key in SYNC_KEYS
+            }
+        return out
+
+    async def _sync_apply(self, guild_id: str, values: Dict[str, Any]):
+        """Apply channel settings saved on the dashboard for one guild.
+
+        Setting the suggestion channel re-posts the submit button there (and
+        clears the old one), so a change made on the website leaves exactly the
+        same working state the `/suggestionpanel setupchannel` command does —
+        not a channel id pointing at a channel with no button in it.
+        """
+        async with self.settings_lock:
+            settings = await load_json(SETTINGS_FILE)
+            gs = settings.setdefault(guild_id, {})
+
+            if "log_channel_id" in values:
+                raw = values["log_channel_id"]
+                gs["log_channel_id"] = int(raw) if raw else None
+
+            if "suggestion_channel_id" in values:
+                raw = values["suggestion_channel_id"]
+                new_id = int(raw) if raw else None
+                if new_id != gs.get("suggestion_channel_id"):
+                    old_msg_id = gs.get("suggestion_button_message_id")
+                    old_ch = self.bot.get_channel(gs.get("suggestion_channel_id") or 0)
+                    if old_msg_id and old_ch:
+                        try:
+                            old_msg = await old_ch.fetch_message(old_msg_id)
+                            await old_msg.delete()
+                        except (discord.NotFound, discord.Forbidden):
+                            pass
+                    gs["suggestion_channel_id"] = new_id
+                    gs.pop("suggestion_button_message_id", None)
+                    if new_id:
+                        channel = self.bot.get_channel(new_id)
+                        if channel:
+                            try:
+                                msg = await channel.send(view=PersistentSuggestionView(self))
+                                gs["suggestion_button_message_id"] = msg.id
+                            except discord.Forbidden:
+                                pass
+
+            await save_json(SETTINGS_FILE, settings)
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -329,6 +375,7 @@ class Suggestions(commands.Cog):
                 msg = await channel.send(view=view)
                 guild_settings["suggestion_button_message_id"] = msg.id
                 await save_json(SETTINGS_FILE, settings)
+                self._sync.mark_dirty()
                 await interaction.followup.send(f"✅ Suggestion channel set to {channel.mention}.")
             
             except discord.Forbidden:
@@ -345,7 +392,8 @@ class Suggestions(commands.Cog):
             guild_settings = settings.setdefault(str(interaction.guild.id), {})
             guild_settings["log_channel_id"] = channel.id
             await save_json(SETTINGS_FILE, settings)
-        
+            self._sync.mark_dirty()
+
         # --- THIS IS THE FIXED LINE ---
         await interaction.followup.send(f"✅ Suggestion log channel set to {channel.mention}.")
 
@@ -355,15 +403,15 @@ class Suggestions(commands.Cog):
         if message.author.bot or not message.guild:
             return
 
-        suggestion_channel_id = None
-        async with self.settings_lock:
-            settings = await load_json(SETTINGS_FILE)
-            guild_settings = settings.get(str(message.guild.id))
+        # Read-only, and this runs for every message in the server, so read the
+        # live document rather than taking a copy of it.
+        store = await get_store(SETTINGS_FILE)
+        guild_settings = (await store.peek()).get(str(message.guild.id))
+        if not guild_settings:
+            return
+        suggestion_channel_id = guild_settings.get("suggestion_channel_id")
 
-            if not guild_settings:
-                return
-            suggestion_channel_id = guild_settings.get("suggestion_channel_id")
-        
+
         if message.channel.id == suggestion_channel_id:
             try:
                 await message.delete()

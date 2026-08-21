@@ -12,13 +12,54 @@ if TYPE_CHECKING:
 
 from .storage import _load_json, _save_json, TOPICS_FILE, PANELS_FILE, SURVEY_DATA_FILE, SURVEY_SESSIONS_FILE
 from .defaults import _ensure_topic_defaults, _ensure_panel_defaults, DEFAULT_COOLDOWN_MINUTES, format_channel_name
+from .config_sync import TicketingConfigSync
 from .views.runtime import (
     PanelAction, CategoryAction, CloseTicketView, ApprovalView, ClaimAlertView, ClaimedTicketView, ResponseModal
 )
 from .views.survey import StartSurveyView, ResumeOrRestartView
 from .views.admin_dashboard import AdminDashboardView
+from utils.perms import is_admin_interaction
 
 logger = logging.getLogger("ticketing_cog")
+
+
+# The dashboard stores Discord ids as strings (a JavaScript number can't hold a
+# snowflake without rounding), but discord.py's get_channel/get_role look up an
+# int-keyed dict, so a string id silently matches nothing. Coerce the known id
+# fields back to ints when a dashboard-authored topic/panel lands.
+_TOPIC_SCALAR_IDS = (
+    "parent_id", "log_channel_id", "claim_alerts_channel_id", "claim_role_id",
+    "pre_modal_redirect_channel_id", "pre_modal_2_redirect_channel_id",
+)
+_TOPIC_LIST_IDS = ("staff_role_ids", "blacklisted_user_ids")
+_PANEL_SCALAR_IDS = ("channel_id", "message_id")
+
+
+def _coerce_int_or_none(value: Any) -> Optional[int]:
+    if value in (None, "", 0, "0"):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_topic_ids(topic: Dict[str, Any]) -> Dict[str, Any]:
+    for key in _TOPIC_SCALAR_IDS:
+        if key in topic:
+            topic[key] = _coerce_int_or_none(topic[key])
+    for key in _TOPIC_LIST_IDS:
+        raw = topic.get(key)
+        if isinstance(raw, list):
+            topic[key] = [int(x) for x in raw if str(x).lstrip("-").isdigit()]
+    return topic
+
+
+def _coerce_panel_ids(panel: Dict[str, Any]) -> Dict[str, Any]:
+    for key in _PANEL_SCALAR_IDS:
+        if key in panel:
+            panel[key] = _coerce_int_or_none(panel[key])
+    return panel
 
 
 @app_commands.default_permissions(administrator=True)
@@ -35,16 +76,32 @@ class TicketSystem(commands.Cog):
         self.survey_cooldowns: Dict[int, Dict[str, datetime]] = {}
         self.active_survey_sessions: Dict[int, Dict[str, Any]] = {}
         self._cooldown_cleanup_task: Optional[asyncio.Task] = None
+        # Dashboard bridge: the website edits topics/panels in a SQLite file this
+        # loop watches, and the loop republishes the current state back so the
+        # website always reads reality. See config_sync.py.
+        self.config_sync = TicketingConfigSync()
+        self._config_sync_task: Optional[asyncio.Task] = None
 
     async def cog_load(self):
         self._cooldown_cleanup_task = asyncio.create_task(self._cleanup_cooldowns_loop())
         await self._restore_survey_sessions()
+        try:
+            await self.config_sync.ensure()
+            self._config_sync_task = asyncio.create_task(self._config_sync_loop())
+        except Exception as e:
+            logger.error(f"Could not start the ticketing dashboard bridge: {e}", exc_info=True)
 
     async def cog_unload(self):
         if self._cooldown_cleanup_task:
             self._cooldown_cleanup_task.cancel()
             try:
                 await self._cooldown_cleanup_task
+            except asyncio.CancelledError:
+                pass
+        if self._config_sync_task:
+            self._config_sync_task.cancel()
+            try:
+                await self._config_sync_task
             except asyncio.CancelledError:
                 pass
         await self._save_survey_sessions()
@@ -199,6 +256,11 @@ class TicketSystem(commands.Cog):
                 except Exception as e:
                     logger.error(f"Error sending welcome content to channel {new_channel.id}: {e}")
 
+                # Signal for other cogs (the Utility automations engine listens
+                # for this). Scalar ids, guild first, matching the convention in
+                # cogs/economy/leveling.py.
+                self.bot.dispatch("ticket_opened", guild.id, new_channel.id,
+                                  member.id, topic_name)
                 return new_channel
 
             else:  # Thread mode
@@ -247,6 +309,8 @@ class TicketSystem(commands.Cog):
                 except Exception as e:
                     logger.error(f"Error sending welcome content to thread {ch.id}: {e}")
 
+                self.bot.dispatch("ticket_opened", guild.id, ch.id,
+                                  member.id, topic_name)
                 return ch
         except Exception as e:
             logger.error(f"Error in _create_discussion_channel: {e}")
@@ -654,6 +718,12 @@ class TicketSystem(commands.Cog):
             except (discord.Forbidden, discord.NotFound, discord.HTTPException, KeyError):
                 pass
 
+            # Captured before the close: deleting the channel makes these
+            # unreadable, and the dispatch has to carry plain ids anyway.
+            closed_guild_id = itx.guild.id
+            closed_channel_id = itx.channel.id
+            closer_id = itx.user.id
+
             try:
                 if delete_on_close:
                     await itx.channel.delete(reason=f"Ticket closed by {itx.user} ({itx.user.id})")
@@ -670,8 +740,13 @@ class TicketSystem(commands.Cog):
                         await itx.followup.send("Ticket has been closed.", ephemeral=True)
             except discord.Forbidden:
                 await itx.followup.send("I don't have permission to close this channel.", ephemeral=True)
+                return
             except discord.HTTPException as e:
                 await itx.followup.send(f"Failed to close channel: {e}", ephemeral=True)
+                return
+
+            self.bot.dispatch("ticket_closed", closed_guild_id, closed_channel_id,
+                              opener_id, closer_id, topic_name)
 
         async def cancel_callback(itx: discord.Interaction):
             await itx.response.edit_message(content="Ticket closure cancelled.", view=None)
@@ -694,8 +769,10 @@ class TicketSystem(commands.Cog):
         survey_name = topic.get('name', 'unknown')
         topic_type = topic.get('type', 'survey')
 
-        # Rate limit check (admins bypass)
-        is_admin = hasattr(user, 'guild_permissions') and user.guild_permissions.administrator
+        # Rate limit check (admins bypass). Goes through the shared helper so
+        # the configured admin role counts here too, not just the raw
+        # Discord permission.
+        is_admin = is_admin_interaction(interaction)
         cooldown_minutes = topic.get('cooldown_minutes', DEFAULT_COOLDOWN_MINUTES)
         if not is_admin:
             user_survey_cooldowns = self.survey_cooldowns.get(user.id, {})
@@ -1079,6 +1156,291 @@ class TicketSystem(commands.Cog):
                     await interaction.message.edit(view=view)
                 except (discord.HTTPException, AttributeError):
                     pass
+
+    # --- Dashboard bridge ---
+
+    async def _config_sync_loop(self):
+        """Pick up dashboard edits and republish the current state, every 10s.
+
+        The website writes to ticketing_config.db from another process, so
+        nothing here is notified. Reading a couple of integers out of a WAL-mode
+        SQLite file every ten seconds costs nothing measurable, and it means a
+        topic edited or a panel published in a browser is live seconds later.
+        """
+        await self.bot.wait_until_ready()
+        while True:
+            try:
+                await asyncio.sleep(10)
+                await self._sync_config_once()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Ticketing config sync tick failed: {e}", exc_info=True)
+
+    async def _sync_config_once(self):
+        revision, desired, commands = await self.config_sync.read_pending()
+        if desired or commands:
+            await self._apply_dashboard_changes(desired, commands)
+            await self.config_sync.mark_applied(revision)
+        await self._publish_ticketing_snapshot()
+
+    async def _publish_ticketing_snapshot(self):
+        topics = await _load_json(self.bot, TOPICS_FILE, self.topics_lock)
+        panels = await _load_json(self.bot, PANELS_FILE, self.panels_lock)
+        responses = await _load_json(self.bot, SURVEY_DATA_FILE, self.survey_data_lock)
+        await self.config_sync.publish_snapshot(topics, panels, responses)
+
+    def _guild_from_payload(self, payload: Dict[str, Any]) -> Optional[discord.Guild]:
+        gid = payload.get("guild_id")
+        if gid:
+            try:
+                guild = self.bot.get_guild(int(gid))
+                if guild:
+                    return guild
+            except (TypeError, ValueError):
+                pass
+        # Ticketing is single-guild (topics.json is global), so the one guild the
+        # bot is in is the right fallback when a command carries no id.
+        return self.bot.guilds[0] if self.bot.guilds else None
+
+    async def _apply_dashboard_changes(self, desired: List[Dict[str, Any]],
+                                       commands: List[Dict[str, Any]]):
+        """Merge desired topic/panel objects into the JSON files, then run any
+        imperative commands. Everything here is idempotent so a re-applied tick
+        is harmless."""
+        topics_changed = panels_changed = False
+
+        if desired:
+            topics = await _load_json(self.bot, TOPICS_FILE, self.topics_lock)
+            panels = await _load_json(self.bot, PANELS_FILE, self.panels_lock)
+
+            for row in desired:
+                kind, name, data, deleted = row["kind"], row["name"], row["data"], row["deleted"]
+                if kind == "topic":
+                    if deleted:
+                        topics.pop(name, None)
+                        # Detach it from every panel so a dropdown/button never
+                        # points at a topic that no longer exists.
+                        for p in panels.values():
+                            if name in p.get("topic_names", []):
+                                p["topic_names"] = [n for n in p["topic_names"] if n != name]
+                                p["topic_order"] = [n for n in p.get("topic_order", []) if n != name]
+                                p.get("topic_display_map", {}).pop(name, None)
+                                for cat in p.get("categories", {}).values():
+                                    if name in cat.get("topic_names", []):
+                                        cat["topic_names"] = [n for n in cat["topic_names"] if n != name]
+                                panels_changed = True
+                    elif data is not None:
+                        data["name"] = name
+                        topics[name] = _ensure_topic_defaults(_coerce_topic_ids(data))
+                    topics_changed = True
+                elif kind == "panel":
+                    if deleted:
+                        panels.pop(name, None)
+                    elif data is not None:
+                        data["name"] = name
+                        # Preserve the live message id if the dashboard didn't
+                        # send one — publishing is a separate, explicit command.
+                        if not data.get("message_id") and name in panels:
+                            data["message_id"] = panels[name].get("message_id")
+                            data.setdefault("channel_id", panels[name].get("channel_id"))
+                        panels[name] = _ensure_panel_defaults(_coerce_panel_ids(data))
+                    panels_changed = True
+
+            if topics_changed:
+                await _save_json(self.bot, TOPICS_FILE, topics, self.topics_lock)
+            if panels_changed:
+                await _save_json(self.bot, PANELS_FILE, panels, self.panels_lock)
+
+        for command in commands:
+            try:
+                await self._run_dashboard_command(command)
+            except Exception as e:
+                logger.error(f"Ticketing command {command.get('type')} failed: {e}", exc_info=True)
+            finally:
+                # Deleted whether it succeeded or not — a command that keeps
+                # failing must not re-fire forever. A failed publish simply
+                # leaves the panel a draft, which the dashboard shows.
+                await self.config_sync.mark_command_done(command["id"])
+
+        # Re-register persistent views so edited topics/panels keep working
+        # without a restart. Same operation on_ready does once.
+        if topics_changed or panels_changed:
+            self.persistent_views_added = False
+            await self.load_persistent_views()
+
+    async def _run_dashboard_command(self, command: Dict[str, Any]):
+        ctype = command["type"]
+        payload = command.get("payload", {})
+
+        if ctype == "publish_panel":
+            await self._publish_panel(payload)
+        elif ctype == "unpublish_panel":
+            await self._unpublish_panel(payload)
+        elif ctype == "send_survey":
+            await self._send_survey_command(payload)
+        elif ctype == "delete_responses":
+            await self._delete_responses(payload)
+        elif ctype == "delete_response":
+            await self._delete_single_response(payload)
+        else:
+            logger.warning(f"Unknown ticketing dashboard command: {ctype}")
+
+    async def _publish_panel(self, payload: Dict[str, Any]):
+        name = payload.get("name")
+        guild = self._guild_from_payload(payload)
+        if not name or not guild:
+            return
+        panels = await _load_json(self.bot, PANELS_FILE, self.panels_lock)
+        topics = await _load_json(self.bot, TOPICS_FILE, self.topics_lock)
+        panel_data = panels.get(name)
+        if not panel_data:
+            return
+        # Capture where the current message lives before any channel override, so
+        # a panel that moved channels has its old copy removed from the old one.
+        old_channel_id = panel_data.get("channel_id")
+        old_msg_id = panel_data.get("message_id")
+        if payload.get("channel_id"):
+            try:
+                panel_data["channel_id"] = int(payload["channel_id"])
+            except (TypeError, ValueError):
+                pass
+        channel_id = panel_data.get("channel_id")
+        channel = guild.get_channel(channel_id) if channel_id else None
+        if not isinstance(channel, discord.TextChannel):
+            logger.warning(f"Cannot publish panel '{name}': post channel missing.")
+            return
+
+        view = self.create_panel_view(panel_data, topics)
+        if not view:
+            logger.warning(f"Cannot publish panel '{name}': no valid topics attached.")
+            return
+
+        embed = discord.Embed(
+            title=panel_data.get("title") or None,
+            description=panel_data.get("description") or None,
+            color=discord.Color.purple(),
+        )
+        image_url = panel_data.get("image_url")
+        if image_url:
+            if panel_data.get("image_type") == "thumbnail":
+                embed.set_thumbnail(url=image_url)
+            else:
+                embed.set_image(url=image_url)
+
+        # Replace the old message rather than editing it, matching the Discord
+        # admin dashboard, so a panel that switched channels doesn't leave a
+        # stale copy behind.
+        if old_msg_id:
+            try:
+                old_channel = guild.get_channel(old_channel_id) or channel
+                old_msg = await old_channel.fetch_message(old_msg_id)
+                await old_msg.delete()
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+
+        msg = await channel.send(embed=embed, view=view)
+        panel_data["message_id"] = msg.id
+        panel_data["channel_id"] = channel.id
+        panels[name] = panel_data
+        await _save_json(self.bot, PANELS_FILE, panels, self.panels_lock)
+        self.bot.add_view(view, message_id=msg.id)
+        logger.info(f"Published ticket panel '{name}' to #{channel.name}.")
+
+    async def _unpublish_panel(self, payload: Dict[str, Any]):
+        name = payload.get("name")
+        guild = self._guild_from_payload(payload)
+        if not name or not guild:
+            return
+        panels = await _load_json(self.bot, PANELS_FILE, self.panels_lock)
+        panel_data = panels.get(name)
+        if not panel_data:
+            return
+        msg_id = panel_data.get("message_id")
+        channel = guild.get_channel(panel_data.get("channel_id")) if panel_data.get("channel_id") else None
+        if msg_id and isinstance(channel, discord.TextChannel):
+            try:
+                msg = await channel.fetch_message(msg_id)
+                await msg.delete()
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+        panel_data["message_id"] = None
+        panels[name] = panel_data
+        await _save_json(self.bot, PANELS_FILE, panels, self.panels_lock)
+        logger.info(f"Unpublished ticket panel '{name}'.")
+
+    async def _send_survey_command(self, payload: Dict[str, Any]):
+        name = payload.get("name")
+        guild = self._guild_from_payload(payload)
+        if not name or not guild:
+            return
+        topics = await _load_json(self.bot, TOPICS_FILE, self.topics_lock)
+        topic = topics.get(name)
+        if not topic:
+            return
+        topic = _ensure_topic_defaults(dict(topic))
+        topic["name"] = name
+        # Surveys create their discussion channel in this guild, and the flow
+        # reads the id off the topic, matching runtime.py.
+        topic["_guild_id"] = guild.id
+
+        targets = set()
+        for rid in payload.get("role_ids", []):
+            role = guild.get_role(int(rid))
+            if role:
+                targets.update(role.members)
+        for uid in payload.get("user_ids", []):
+            member = guild.get_member(int(uid))
+            if member:
+                targets.add(member)
+        if not targets:
+            return
+
+        from .views.survey import StartSurveyView
+        embed = discord.Embed(
+            title=f"Survey Invitation: {topic.get('label')}",
+            description=(f"You have been invited to take part in a survey from "
+                        f"**{guild.name}**. Click the button below to begin."),
+            color=discord.Color.blue(),
+        )
+        sent = failed = 0
+        for target in targets:
+            if target.bot:
+                continue
+            try:
+                await target.send(embed=embed, view=StartSurveyView(topic, self.bot))
+                sent += 1
+                await asyncio.sleep(0.1)
+            except (discord.Forbidden, discord.HTTPException):
+                failed += 1
+        logger.info(f"Survey '{name}' DM'd from dashboard: {sent} sent, {failed} failed.")
+
+    async def _delete_responses(self, payload: Dict[str, Any]):
+        name = payload.get("name")
+        if not name:
+            return
+        data = await _load_json(self.bot, SURVEY_DATA_FILE, self.survey_data_lock)
+        if name in data:
+            data.pop(name, None)
+            await _save_json(self.bot, SURVEY_DATA_FILE, data, self.survey_data_lock)
+
+    async def _delete_single_response(self, payload: Dict[str, Any]):
+        name = payload.get("name")
+        user_id = payload.get("user_id")
+        timestamp = payload.get("timestamp")
+        if not name:
+            return
+        data = await _load_json(self.bot, SURVEY_DATA_FILE, self.survey_data_lock)
+        entries = data.get(name)
+        if not entries:
+            return
+        kept = [
+            r for r in entries
+            if not (str(r.get("user_id")) == str(user_id)
+                    and (timestamp is None or r.get("timestamp") == timestamp))
+        ]
+        data[name] = kept
+        await _save_json(self.bot, SURVEY_DATA_FILE, data, self.survey_data_lock)
 
     # --- Commands ---
 

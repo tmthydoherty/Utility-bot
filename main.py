@@ -96,8 +96,9 @@ class Vibey(commands.Bot):
             return
 
         for filename in os.listdir(cogs_folder):
-            # Load .py cog files (skip __init__, _shared modules, etc.)
-            if filename.endswith(".py") and not filename.startswith("__") and not filename.endswith("_shared.py") and not filename.endswith("_fetcher.py"):
+            # Load .py cog files (skip __init__, _shared/_fetcher/_sync helper
+            # modules that a cog imports but that have no setup() of their own).
+            if filename.endswith(".py") and not filename.startswith("__") and not filename.endswith("_shared.py") and not filename.endswith("_fetcher.py") and not filename.endswith("_sync.py"):
                 cog_name = f"{cogs_folder}.{filename[:-3]}"
                 try:
                     await self.load_extension(cog_name)

@@ -12,8 +12,18 @@ from collections import defaultdict
 # --- Basic Setup ---
 log = logging.getLogger(__name__)
 
+from utils.module_config_sync import ConfigSyncAgent
+
 CONFIG_FILE = "security_config.json"
 INFRACTIONS_FILE = "security_infractions.json"
+
+# The settings the web dashboard mirrors. The trip thresholds are module-level
+# constants, not per-guild config, so they're deliberately not synced.
+SYNC_SINGLE_IDS = ("alert_channel_id", "quarantine_role_id")
+SYNC_MULTI_IDS = ("admin_roles", "mod_roles", "whitelisted_users",
+                  "mention_exempt_roles", "exempt_channels")
+SYNC_MODULES = ("invite_links", "message_flood", "duplicate_spam", "mass_mentions",
+                "nuke_channel_delete", "nuke_role_delete", "nuke_mass_ban")
 EMBED_COLOR = 0xE74C3C  # Red for security alerts
 EMBED_COLOR_INFO = 0x3498DB  # Blue for info/panel
 EMBED_COLOR_SUCCESS = 0x2ECC71  # Green for success
@@ -580,10 +590,57 @@ class Security(commands.Cog):
         # Cooldown: users recently ignored (guild_id -> set of user_ids)
         self._ignore_cooldown: dict[int, dict[int, float]] = defaultdict(dict)
 
+        self._sync = ConfigSyncAgent("security", self._sync_snapshot, self._sync_apply, bot=bot)
         self.cleanup_loop.start()
+
+    async def cog_load(self):
+        # Start the dashboard sync agent, then re-register persistent views for
+        # any still-open infraction alerts so their buttons keep working after a
+        # restart. Both used to live in separate cog_load methods — Python keeps
+        # only the last one defined, so the sync never started. Kept together here.
+        await self._sync.start()
+        infractions = load_infractions()
+        for guild_key, guild_infs in infractions.items():
+            for inf_id, inf_data in guild_infs.items():
+                if not inf_data.get("resolved"):
+                    self.bot.add_view(InfractionActionView(self, inf_id))
 
     def cog_unload(self):
         self.cleanup_loop.cancel()
+        self._sync.stop()
+
+    # --- Dashboard sync (see utils/module_config_sync.py) ---
+
+    def _sync_snapshot(self) -> dict:
+        """Current settings per guild, flattened to the dashboard's field keys."""
+        out: dict = {}
+        for gid, cfg in self.config.items():
+            row: dict = {}
+            for key in SYNC_SINGLE_IDS:
+                row[key] = str(cfg[key]) if cfg.get(key) else None
+            for key in SYNC_MULTI_IDS:
+                row[key] = [str(x) for x in (cfg.get(key) or [])]
+            enabled = cfg.get("enabled_modules", {})
+            for name in SYNC_MODULES:
+                row[f"enabled_modules.{name}"] = bool(enabled.get(name, True))
+            out[str(gid)] = row
+        return out
+
+    def _sync_apply(self, guild_id: str, values: dict):
+        """Apply settings saved on the dashboard for one guild."""
+        cfg = self.get_guild_config(int(guild_id))
+        for key in SYNC_SINGLE_IDS:
+            if key in values:
+                cfg[key] = int(values[key]) if values[key] else None
+        for key in SYNC_MULTI_IDS:
+            if key in values:
+                cfg[key] = [int(x) for x in (values[key] or [])]
+        enabled = cfg.setdefault("enabled_modules", {})
+        for name in SYNC_MODULES:
+            dotted = f"enabled_modules.{name}"
+            if dotted in values:
+                enabled[name] = bool(values[dotted])
+        self.save()
 
     def get_footer_text(self):
         return f"{self.bot.user.name} \u2022 Security"
@@ -615,6 +672,10 @@ class Security(commands.Cog):
 
     def save(self):
         save_config(self.config)
+        # Reflect any panel edit on the dashboard.
+        sync = getattr(self, "_sync", None)
+        if sync is not None:
+            sync.mark_dirty()
 
     def is_module_enabled(self, guild_id: int, module: str) -> bool:
         cfg = self.get_guild_config(guild_id)
@@ -1170,19 +1231,6 @@ class Security(commands.Cog):
     @cleanup_loop.before_loop
     async def before_cleanup(self):
         await self.bot.wait_until_ready()
-
-    # ============================================================
-    #  Persistent View Registration
-    # ============================================================
-
-    async def cog_load(self):
-        """Re-register persistent views for existing infraction alerts on bot restart."""
-        infractions = load_infractions()
-        for guild_key, guild_infs in infractions.items():
-            for inf_id, inf_data in guild_infs.items():
-                if not inf_data.get("resolved"):
-                    self.bot.add_view(InfractionActionView(self, inf_id))
-
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Security(bot))

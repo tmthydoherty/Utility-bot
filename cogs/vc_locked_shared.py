@@ -121,26 +121,66 @@ async def init_db():
         logger.error(f"Database initialization failed: {e}")
         raise
 
+# The config table is a couple of dozen rows that change only when an admin
+# edits a panel, but get_config() was opening a fresh connection on every call
+# — including from on_message, for every message in the server. The whole
+# table is cached in memory on first use; set_config() is the only writer, so
+# it keeps the cache in step rather than invalidating it.
+_config_cache: dict | None = None
+_config_cache_lock = asyncio.Lock()
+
+
+async def _load_config_cache():
+    """Read the whole config table into memory. Caller holds the cache lock."""
+    global _config_cache
+    if _config_cache is not None:
+        return _config_cache
+    cache = {}
+    async with DB_SEMAPHORE:
+        async with aiosqlite.connect(DB_FILE) as db:
+            async with db.execute("SELECT key, value FROM config") as cursor:
+                async for row in cursor:
+                    cache[row[0]] = row[1]
+    _config_cache = cache
+    return _config_cache
+
+
 async def get_config(key, default=None):
     try:
-        async with DB_SEMAPHORE:
-            async with aiosqlite.connect(DB_FILE) as db:
-                async with db.execute("SELECT value FROM config WHERE key = ?", (key,)) as cursor:
-                    row = await cursor.fetchone()
-                    return row[0] if row else default
+        async with _config_cache_lock:
+            cache = await _load_config_cache()
+            # A key present with a NULL value is not the same as a missing key,
+            # so test membership rather than truthiness.
+            return cache[key] if key in cache else default
     except Exception as e:
         logger.error(f"Failed to get config {key}: {e}")
         return default
 
 async def set_config(key, value):
-    try:
-        async with DB_SEMAPHORE:
-            async with aiosqlite.connect(DB_FILE) as db:
-                await db.execute("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)", (key, str(value) if value is not None else None))
-                await db.commit()
-    except Exception as e:
-        logger.error(f"Failed to set config {key}: {e}")
-        raise
+    stored = str(value) if value is not None else None
+    # The cache lock is taken before DB_SEMAPHORE here and in get_config, so
+    # the ordering is consistent in both directions and cannot deadlock.
+    # Holding it across the write closes the window in which a reader could
+    # still be served the old value after the new one had committed.
+    async with _config_cache_lock:
+        try:
+            async with DB_SEMAPHORE:
+                async with aiosqlite.connect(DB_FILE) as db:
+                    await db.execute("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)", (key, stored))
+                    await db.commit()
+        except Exception as e:
+            logger.error(f"Failed to set config {key}: {e}")
+            raise
+        # Only mirror into the cache once the write has actually committed.
+        if _config_cache is not None:
+            _config_cache[key] = stored
+
+
+async def invalidate_config_cache():
+    """Force the next get_config() to re-read from disk."""
+    global _config_cache
+    async with _config_cache_lock:
+        _config_cache = None
 
 async def get_trigger_channel_ids(guild_id):
     """

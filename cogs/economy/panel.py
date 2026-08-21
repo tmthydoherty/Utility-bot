@@ -10,6 +10,7 @@ from discord import ui
 
 from .config import BOX_OUTCOMES, EARNING_SOURCES, SHOP_ITEMS
 from .render import commas
+from utils.newcomer_role_sources import summary as newcomer_role_summary
 
 logger = logging.getLogger('cogs.economy.panel')
 
@@ -139,7 +140,7 @@ class PanelView(AdminView):
 
     @ui.button(label="Roles", style=discord.ButtonStyle.secondary, row=1)
     async def roles(self, interaction: discord.Interaction, button: ui.Button):
-        view = RolesView(self.cog)
+        view = RolesView(self.cog, guild=interaction.guild)
         await self._open(interaction, view, await view.embed())
 
     @ui.button(label="Channels", style=discord.ButtonStyle.secondary, row=1)
@@ -703,6 +704,11 @@ class CurseSettingsModal(ui.Modal, title="Curse Settings"):
 # --------------------------------------------------------------------------
 
 class RolesView(AdminView):
+    def __init__(self, cog, *, guild=None, **kwargs):
+        super().__init__(cog, **kwargs)
+        # Only needed to show what the other cogs' newcomer roles point at.
+        self.guild = guild
+
     async def embed(self) -> discord.Embed:
         embed = discord.Embed(title="Roles", color=discord.Color.blurple())
         embed.add_field(
@@ -715,6 +721,12 @@ class RolesView(AdminView):
                   f"*Replies to members with this role earn Points.*",
             inline=False,
         )
+        others = (
+            await newcomer_role_summary(self.cog.bot, self.guild, exclude="Economy")
+            if self.guild else ""
+        )
+        if others:
+            embed.add_field(name="Newcomer role elsewhere", value=others, inline=False)
         embed.set_footer(
             text="The bot's own role must sit above the Throne and Vibes roles "
                  "to assign them."

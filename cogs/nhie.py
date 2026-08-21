@@ -1,13 +1,16 @@
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
-import json
 import os
 import random
 import asyncio
 import uuid # For Fix #2 & #7
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
+
+from utils.config_store import get_store
+from utils.module_config_sync import ConfigSyncAgent
+from cogs.nhie_config_sync import NhieConfigSync
 
 # --- ( HELPER FUNCTIONS FOR DATA ) ---
 # These functions manage the JSON files for settings and questions.
@@ -33,29 +36,20 @@ history_lock = asyncio.Lock()
 votes_lock = asyncio.Lock()
 pending_suggestions_lock = asyncio.Lock() # For Fix #2
 
+# These are served from an in-memory cache (utils/config_store.py) rather than
+# re-read from disk on every call — on_member_update reads the settings file on
+# every role change in the server. The `lock` argument is kept so the ~40 call
+# sites did not have to change; the store does its own locking per file.
+
 async def load_json(file_path: str, lock: asyncio.Lock) -> Dict[str, Any]:
-    """Safely loads a JSON file."""
-    async with lock:
-        if not os.path.exists(file_path):
-            return {}
-        try:
-            # --- (FIXED SYNTAX ERROR) ---
-            with open(file_path, 'r', encoding='utf-8') as f:
-                # --- (END OF FIX) ---
-                return json.load(f)
-        except (json.JSONDecodeError, IOError):
-            return {}
+    """Safely loads a JSON file, served from cache after the first read."""
+    store = await get_store(file_path)
+    return await store.read()
 
 async def save_json(file_path: str, data: Dict[str, Any], lock: asyncio.Lock):
-    """Safely saves data to a JSON file."""
-    async with lock:
-        try:
-            # --- (FIXED SYNTAX ERROR) ---
-            with open(file_path, 'w', encoding='utf-8') as f:
-                # --- (END OF FIX) ---
-                json.dump(data, f, indent=4)
-        except IOError as e:
-            print(f"Error saving JSON to {file_path}: {e}")
+    """Safely saves data to a JSON file and refreshes the cache."""
+    store = await get_store(file_path)
+    await store.write(data)
 
 # --- ( DATA STRUCTURES ) ---
 
@@ -1075,6 +1069,12 @@ class NeverHaveIEver(commands.Cog):
         self.delay_tasks_pending: Dict[str, bool] = {}
         # --- (END OF FIX) ---
         
+        # --- Dashboard sync setup ---
+        self._settings_sync = ConfigSyncAgent(
+            "nhie", self._settings_snapshot, self._settings_apply, bot=bot
+        )
+        self._qbridge = NhieConfigSync()
+        
     async def cog_load(self):
         """Called when the cog is loaded."""
         # Register persistent views here, not in __init__
@@ -1088,12 +1088,18 @@ class NeverHaveIEver(commands.Cog):
         await load_json(VOTES_FILE, votes_lock)
         await load_json(PENDING_SUGGESTIONS_FILE, pending_suggestions_lock)
         
+        await self._qbridge.ensure()
+        
         # (Fix #5): Start the task loop here
         self.cleanup_task.start()
+        await self._settings_sync.start()
+        self.nhie_sync_task.start()
 
     async def cog_unload(self):
         """Called when the cog is unloaded."""
         self.cleanup_task.cancel()
+        self._settings_sync.stop()
+        self.nhie_sync_task.cancel()
 
     # --- (Fix #5 & #6: Cleanup Task) ---
     @tasks.loop(hours=24)
@@ -1153,6 +1159,99 @@ class NeverHaveIEver(commands.Cog):
         # (Fix #5): Wait until bot is ready
         await self.bot.wait_until_ready()
     # --- (End of Fix #5 & #6) ---
+
+    # --- Dashboard sync methods ---
+    async def _settings_snapshot(self) -> Dict[str, Dict[str, Any]]:
+        settings_data = await load_json(SETTINGS_FILE, settings_lock)
+        out: Dict[str, Dict[str, Any]] = {}
+        for guild_id_str, gs in settings_data.items():
+            post_channels = gs.get("post_channels", [])
+            out[guild_id_str] = {
+                "post_channels": [str(c) for c in post_channels],
+                "log_channel": str(gs["log_channel"]) if gs.get("log_channel") else None,
+                "trigger_role": str(gs["trigger_role"]) if gs.get("trigger_role") else None,
+                "cooldown_hours": float(gs.get("cooldown_hours", 1.0))
+            }
+        return out
+
+    async def _settings_apply(self, guild_id: str, values: Dict[str, Any]):
+        settings_data = await load_json(SETTINGS_FILE, settings_lock)
+        if guild_id not in settings_data:
+            settings_data[guild_id] = get_default_settings()
+
+        if "post_channels" in values:
+            raw = values["post_channels"] or []
+            ids = [int(c) for c in raw if str(c).isdigit()]
+            settings_data[guild_id]["post_channels"] = ids
+        if "log_channel" in values:
+            raw = values["log_channel"]
+            settings_data[guild_id]["log_channel"] = int(raw) if raw else None
+        if "trigger_role" in values:
+            raw = values["trigger_role"]
+            settings_data[guild_id]["trigger_role"] = int(raw) if raw else None
+        if "cooldown_hours" in values:
+            settings_data[guild_id]["cooldown_hours"] = float(values["cooldown_hours"])
+
+        await save_json(SETTINGS_FILE, settings_data, settings_lock)
+
+    async def _apply_question_command(self, cmd: Dict[str, Any]):
+        ctype = cmd["type"]
+        payload = cmd.get("payload") or {}
+        guild_id = str(payload.get("guild_id"))
+
+        questions_data = await load_json(QUESTIONS_FILE, questions_lock)
+        if guild_id not in questions_data:
+            questions_data[guild_id] = get_default_questions()
+        pool = questions_data[guild_id]["pool"]
+
+        if ctype == "add_questions":
+            actor = payload.get("actor_id")
+            actor_id = int(actor) if actor and str(actor).isdigit() else None
+            q_type = payload.get("q_type", "nhie")
+            added = 0
+            for text in payload.get("texts", []):
+                t = (text or "").strip()
+                if t and not any(q["question"].lower() == t.lower() for q in pool):
+                    pool.append({"question": t, "type": q_type, "suggester_id": actor_id})
+                    added += 1
+            if added:
+                await save_json(QUESTIONS_FILE, questions_data, questions_lock)
+
+        elif ctype == "delete_question":
+            idx = payload.get("index")
+            if idx is not None and 0 <= int(idx) < len(pool):
+                pool.pop(int(idx))
+                await save_json(QUESTIONS_FILE, questions_data, questions_lock)
+
+        elif ctype == "reset_pool":
+            pool.clear()
+            await save_json(QUESTIONS_FILE, questions_data, questions_lock)
+            
+    @tasks.loop(seconds=10)
+    async def nhie_sync_task(self):
+        try:
+            revision, commands = await self._qbridge.read_commands()
+            if commands:
+                for cmd in commands:
+                    try:
+                        await self._apply_question_command(cmd)
+                    except Exception as e:
+                        print(f"NHIE: failed to apply command {cmd.get('type')}: {e}")
+                    await self._qbridge.mark_command_done(cmd['id'])
+                await self._qbridge.mark_applied(revision)
+                
+            questions_data = await load_json(QUESTIONS_FILE, questions_lock)
+            await self._qbridge.publish_snapshot(questions_data)
+            self._settings_sync.mark_dirty()
+        except Exception as e:
+            try:
+                await self.bot.error_reporter.report("NHIE", f"nhie_sync_task: {e}")
+            except Exception:
+                pass
+                
+    @nhie_sync_task.before_loop
+    async def before_nhie_sync_task(self):
+        await self.bot.wait_until_ready()
 
     # --- ( SLASH COMMANDS ) ---
     
@@ -1302,16 +1401,24 @@ class NeverHaveIEver(commands.Cog):
     @commands.Cog.listener()
     async def on_member_update(self, before: discord.Member, after: discord.Member):
         """Listens for role changes to trigger a question."""
+        # This event also fires for nickname, avatar and timeout changes, none
+        # of which can add the trigger role. Bail before touching config.
+        if before.roles == after.roles:
+            return
+
         guild_id = str(after.guild.id)
-        settings = (await load_json(SETTINGS_FILE, settings_lock)).get(guild_id)
-        
+        # Read-only below, so use the live document instead of a copy.
+        store = await get_store(SETTINGS_FILE)
+        settings = (await store.peek()).get(guild_id)
+
         if not settings:
             return # Not configured for this guild
-            
+
         trigger_role_id = settings.get('trigger_role')
         if not trigger_role_id:
             return # No trigger role set
-            
+
+
         role_added = trigger_role_id not in [r.id for r in before.roles] and \
                      trigger_role_id in [r.id for r in after.roles]
                      

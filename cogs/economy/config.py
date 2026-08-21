@@ -184,9 +184,13 @@ DEFAULTS = _build_defaults()
 class Config:
     """Cached settings accessor. Reads never hit the database after load."""
 
-    def __init__(self, db):
+    def __init__(self, db, on_change=None):
         self.db = db
         self._cache: dict = {}
+        # Called with the key after any successful set(), so the cog can notice
+        # a change — from the panel or the dashboard bridge — and republish the
+        # snapshot the dashboard reads. Optional so Config stays usable alone.
+        self._on_change = on_change
 
     async def load(self):
         self._cache = await self.db.all_settings()
@@ -236,6 +240,23 @@ class Config:
             value = int(value)
         await self.db.set_setting(key, value)
         self._cache[key] = str(value)
+        if self._on_change is not None:
+            self._on_change(key)
+
+    def snapshot(self) -> dict:
+        """Every setting as the string the dashboard bridge stores.
+
+        Defaults overlaid by stored overrides, with lists serialised as JSON so
+        an ID-list field reads back identically whether or not it was ever
+        changed. Cache values are already stringified by set().
+        """
+        merged = {
+            key: json.dumps(value) if isinstance(value, list) else str(value)
+            for key, value in DEFAULTS.items()
+        }
+        for key, value in self._cache.items():
+            merged[key] = str(value)
+        return merged
 
     # ------------------------------------------------------------ shortcuts
 

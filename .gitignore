@@ -68,3 +68,11 @@ tests/**/test_custommatch.db*
 
 # Database backups
 data/*.db.bak-*
+
+# Next.js build output (stray builds outside dashboard/, e.g. cogs/.next)
+.next/
+
+# Editor/tool backups and migration leftovers
+*.bak
+*.bak-*
+*.migrated

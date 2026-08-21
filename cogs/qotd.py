@@ -6,11 +6,14 @@ import datetime
 import pytz
 import os
 import random
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict, Any
 import io
 import math
 import json
 import asyncio
+
+from utils.module_config_sync import ConfigSyncAgent
+from cogs.qotd_config_sync import QotdConfigSync
 
 # --- Configuration ---
 DB_FILE = "qotd_database.db"
@@ -19,7 +22,16 @@ DB_FILE = "qotd_database.db"
 ALLOWED_SETTINGS_KEYS = [
     'enabled', 'source_channel_id', 'source_bot_id', 'post_channel_ids',
     'ping_role_id', 'suggestion_log_channel_id', 'post_time', 'timezone',
-    'auto_thread', 'last_post_timestamp', 'premium_role_ids'
+    'auto_thread', 'last_post_timestamp', 'premium_role_ids', 'next_question_id'
+]
+
+# The settings the web dashboard mirrors through the shared per-guild module
+# config bridge (utils/module_config_sync.py) — the same mechanism welcome,
+# security and suggestions use. The question pool travels separately, through
+# cogs/qotd_config_sync.py, because a list of records isn't a flat setting.
+QOTD_SYNC_KEYS = [
+    'enabled', 'auto_thread', 'post_time', 'timezone',
+    'ping_role_id', 'suggestion_log_channel_id', 'post_channel_ids',
 ]
 
 # --- Database Setup and Helpers ---
@@ -38,6 +50,13 @@ async def db_init():
 
         try:
             await db.execute("ALTER TABLE guild_settings ADD COLUMN premium_role_ids TEXT DEFAULT '[]'")
+        except Exception:
+            pass
+
+        # The question queued to post next, so the dashboard can show "tomorrow's
+        # question" and so a manual/scheduled post is exactly what was previewed.
+        try:
+            await db.execute("ALTER TABLE guild_settings ADD COLUMN next_question_id INTEGER")
         except Exception:
             pass
 
@@ -909,9 +928,16 @@ class AdminPanelView(discord.ui.View):
 class QOTDCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        # Per-guild settings ride the shared module_config bridge; the question
+        # pool has its own bridge (a list of records, not flat settings).
+        self._settings_sync = ConfigSyncAgent(
+            "qotd", self._settings_snapshot, self._settings_apply, bot=bot
+        )
+        self._qbridge = QotdConfigSync()
 
     async def cog_load(self):
         await db_init()
+        await self._qbridge.ensure()
         self.bot.add_view(PersistentSuggestView())
         async with aiosqlite.connect(DB_FILE) as db:
             async with db.execute("SELECT id FROM suggestions WHERE status = 'pending'") as cursor:
@@ -919,8 +945,254 @@ class QOTDCog(commands.Cog):
         for (suggestion_id,) in pending_suggestions: self.bot.add_view(SuggestionReviewView(suggestion_id))
         print(f"Registered {len(pending_suggestions)} pending suggestion views.")
         self.qotd_task.start()
-    
-    def cog_unload(self): self.qotd_task.cancel()
+        self.qotd_sync_task.start()
+        await self._settings_sync.start()
+
+    def cog_unload(self):
+        self.qotd_task.cancel()
+        self.qotd_sync_task.cancel()
+        self._settings_sync.stop()
+
+    # --- Dashboard sync: settings (see utils/module_config_sync.py) ---
+
+    async def _settings_snapshot(self) -> Dict[str, Dict[str, Any]]:
+        """Every guild's QOTD settings, flattened to the dashboard's field keys.
+
+        IDs go out as strings so a snowflake past 2^53 survives the JSON round
+        trip; the post-channel list is the JSON column decoded into a list.
+        """
+        async with aiosqlite.connect(DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM guild_settings") as cursor:
+                rows = await cursor.fetchall()
+
+        out: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            gs = dict(row)
+            try:
+                post_channels = json.loads(gs.get('post_channel_ids') or '[]')
+            except (TypeError, ValueError):
+                post_channels = []
+            out[str(gs['guild_id'])] = {
+                'enabled': bool(gs.get('enabled')),
+                'auto_thread': bool(gs.get('auto_thread')),
+                'post_time': gs.get('post_time') or '10:00',
+                'timezone': gs.get('timezone') or 'UTC',
+                'ping_role_id': str(gs['ping_role_id']) if gs.get('ping_role_id') else None,
+                'suggestion_log_channel_id':
+                    str(gs['suggestion_log_channel_id']) if gs.get('suggestion_log_channel_id') else None,
+                'post_channel_ids': [str(c) for c in post_channels],
+            }
+        return out
+
+    async def _settings_apply(self, guild_id: str, values: Dict[str, Any]):
+        """Apply settings saved on the dashboard for one guild."""
+        gid = int(guild_id)
+        await get_guild_settings(gid)  # make sure the row exists first
+
+        if 'enabled' in values:
+            await update_guild_setting(gid, 'enabled', bool(values['enabled']))
+        if 'auto_thread' in values:
+            await update_guild_setting(gid, 'auto_thread', bool(values['auto_thread']))
+        if 'post_time' in values:
+            pt = str(values['post_time'] or '10:00')
+            try:
+                datetime.datetime.strptime(pt, '%H:%M')
+            except ValueError:
+                pt = '10:00'
+            await update_guild_setting(gid, 'post_time', pt)
+        if 'timezone' in values:
+            tz = str(values['timezone'] or 'UTC')
+            if tz not in pytz.all_timezones:
+                tz = 'UTC'
+            await update_guild_setting(gid, 'timezone', tz)
+        if 'ping_role_id' in values:
+            raw = values['ping_role_id']
+            await update_guild_setting(gid, 'ping_role_id', int(raw) if raw else None)
+        if 'suggestion_log_channel_id' in values:
+            raw = values['suggestion_log_channel_id']
+            await update_guild_setting(gid, 'suggestion_log_channel_id', int(raw) if raw else None)
+        if 'post_channel_ids' in values:
+            raw = values['post_channel_ids'] or []
+            ids = [int(c) for c in raw if str(c).isdigit()]
+            await update_guild_setting(gid, 'post_channel_ids', json.dumps(ids))
+
+        # A guild that was just switched on should immediately have a question
+        # queued, so the dashboard's "tomorrow" preview isn't blank until the
+        # sync loop's next tick.
+        await self._ensure_next_question(gid)
+
+    # --- Dashboard sync: question pool (see cogs/qotd_config_sync.py) ---
+
+    async def _ensure_next_question(self, guild_id: int):
+        """Queue a valid unseen question for an enabled guild to post next.
+
+        No-op for a disabled guild, or when the queued question is still unseen.
+        Otherwise it picks a fresh one at random — the same choice the scheduler
+        would have made, made early so it can be previewed and re-rolled.
+        """
+        async with aiosqlite.connect(DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT enabled, next_question_id FROM guild_settings WHERE guild_id = ?",
+                (guild_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+            if not row or not row['enabled']:
+                return
+
+            nid = row['next_question_id']
+            if nid:
+                async with db.execute(
+                    "SELECT 1 FROM questions WHERE id = ? AND last_used_timestamp = 0", (nid,)
+                ) as c2:
+                    if await c2.fetchone():
+                        return  # still a valid, unseen pick
+
+            async with db.execute(
+                "SELECT id FROM questions WHERE last_used_timestamp = 0 ORDER BY RANDOM() LIMIT 1"
+            ) as c3:
+                pick = await c3.fetchone()
+            new_id = pick['id'] if pick else None
+            await db.execute(
+                "UPDATE guild_settings SET next_question_id = ? WHERE guild_id = ?",
+                (new_id, guild_id),
+            )
+            await db.commit()
+
+    async def _questions_snapshot(self):
+        """The whole pool, each guild's queued question, and the pool counts."""
+        async with aiosqlite.connect(DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT id, question_text, added_by_id, last_used_timestamp, times_used "
+                "FROM questions ORDER BY id"
+            ) as cursor:
+                qrows = await cursor.fetchall()
+            async with db.execute("SELECT guild_id, next_question_id FROM guild_settings") as cursor:
+                grows = await cursor.fetchall()
+
+        questions = [{
+            'id': r['id'],
+            'text': r['question_text'],
+            'addedById': str(r['added_by_id']) if r['added_by_id'] else None,
+            'timesUsed': r['times_used'] or 0,
+            'seen': bool(r['last_used_timestamp']),
+        } for r in qrows]
+        text_by_id = {r['id']: r['question_text'] for r in qrows}
+
+        tomorrow: Dict[str, Any] = {}
+        for g in grows:
+            nid = g['next_question_id']
+            tomorrow[str(g['guild_id'])] = (
+                {'id': nid, 'text': text_by_id[nid]} if nid in text_by_id else None
+            )
+
+        counts = {
+            'total': len(questions),
+            'unseen': sum(1 for q in questions if not q['seen']),
+        }
+        return questions, tomorrow, counts
+
+    async def _apply_question_command(self, cmd: Dict[str, Any]):
+        ctype = cmd['type']
+        payload = cmd.get('payload') or {}
+
+        if ctype == 'add_questions':
+            actor = payload.get('actor_id')
+            actor_id = int(actor) if actor and str(actor).isdigit() else None
+            async with aiosqlite.connect(DB_FILE) as db:
+                for raw in payload.get('texts') or []:
+                    text = (raw or '').strip()
+                    if not text:
+                        continue
+                    try:
+                        await db.execute(
+                            "INSERT INTO questions (question_text, added_by_id) VALUES (?, ?)",
+                            (text[:256], actor_id),
+                        )
+                    except Exception:
+                        pass  # duplicate — the text column is UNIQUE
+                await db.commit()
+
+        elif ctype == 'edit_question':
+            qid, text = payload.get('id'), (payload.get('text') or '').strip()
+            if qid and text:
+                async with aiosqlite.connect(DB_FILE) as db:
+                    try:
+                        await db.execute(
+                            "UPDATE questions SET question_text = ? WHERE id = ?",
+                            (text[:256], int(qid)),
+                        )
+                        await db.commit()
+                    except Exception:
+                        pass  # would collide with an existing question
+
+        elif ctype == 'delete_question':
+            qid = payload.get('id')
+            if qid:
+                async with aiosqlite.connect(DB_FILE) as db:
+                    await db.execute("DELETE FROM questions WHERE id = ?", (int(qid),))
+                    await db.commit()
+
+        elif ctype == 'reset_pool':
+            async with aiosqlite.connect(DB_FILE) as db:
+                await db.execute("UPDATE questions SET last_used_timestamp = 0")
+                await db.commit()
+
+        elif ctype == 'clear_seen':
+            async with aiosqlite.connect(DB_FILE) as db:
+                await db.execute("DELETE FROM questions WHERE last_used_timestamp > 0")
+                await db.commit()
+
+        elif ctype == 'reroll_tomorrow':
+            gid = payload.get('guild_id')
+            if gid and str(gid).isdigit():
+                async with aiosqlite.connect(DB_FILE) as db:
+                    await db.execute(
+                        "UPDATE guild_settings SET next_question_id = NULL WHERE guild_id = ?",
+                        (int(gid),),
+                    )
+                    await db.commit()
+                await self._ensure_next_question(int(gid))
+
+    @tasks.loop(seconds=10)
+    async def qotd_sync_task(self):
+        try:
+            revision, commands = await self._qbridge.read_commands()
+            if commands:
+                for cmd in commands:
+                    try:
+                        await self._apply_question_command(cmd)
+                    except Exception as e:
+                        print(f"QOTD: failed to apply command {cmd.get('type')}: {e}")
+                    await self._qbridge.mark_command_done(cmd['id'])
+                await self._qbridge.mark_applied(revision)
+
+            # Keep every enabled guild's queued question valid (a delete, edit,
+            # reset or clear-seen may have invalidated it).
+            async with aiosqlite.connect(DB_FILE) as db:
+                async with db.execute("SELECT guild_id FROM guild_settings WHERE enabled = TRUE") as cursor:
+                    enabled = [row[0] for row in await cursor.fetchall()]
+            for gid in enabled:
+                await self._ensure_next_question(gid)
+
+            questions, tomorrow, counts = await self._questions_snapshot()
+            await self._qbridge.publish_snapshot(questions, tomorrow, counts)
+
+            # A settings change made from a Discord panel should also show on the
+            # website within a tick; nudging the settings bridge here republishes
+            # its snapshot without threading a mark_dirty through every modal.
+            self._settings_sync.mark_dirty()
+        except Exception as e:
+            try:
+                await self.bot.error_reporter.report("QOTD", f"qotd_sync_task: {e}")
+            except Exception:
+                pass
+
+    @qotd_sync_task.before_loop
+    async def before_qotd_sync_task(self):
+        await self.bot.wait_until_ready()
 
     def create_setup_embed(self):
          return discord.Embed(
@@ -1002,9 +1274,27 @@ class QOTDCog(commands.Cog):
             return
         
         async with aiosqlite.connect(DB_FILE) as db:
-            # Select an unseen question
-            async with db.execute("SELECT id, question_text, added_by_id FROM questions WHERE last_used_timestamp = 0 ORDER BY RANDOM() LIMIT 1") as cursor:
-                question_data = await cursor.fetchone()
+            db.row_factory = aiosqlite.Row
+            question_data = None
+
+            # Prefer the pre-selected "next" question so a real post is exactly
+            # the one the dashboard previewed as tomorrow's. Test posts never
+            # consume it — they just sample a random unseen question below.
+            if not is_test:
+                next_id = settings.get('next_question_id')
+                if next_id:
+                    async with db.execute(
+                        "SELECT id, question_text, added_by_id FROM questions "
+                        "WHERE id = ? AND last_used_timestamp = 0", (next_id,)
+                    ) as cursor:
+                        question_data = await cursor.fetchone()
+
+            if not question_data:
+                async with db.execute(
+                    "SELECT id, question_text, added_by_id FROM questions "
+                    "WHERE last_used_timestamp = 0 ORDER BY RANDOM() LIMIT 1"
+                ) as cursor:
+                    question_data = await cursor.fetchone()
 
             if not question_data:
                 if interaction: await interaction.followup.send(f"❌ Error: I've run out of unseen questions! Use 'Reset Pool' in the admin panel.", ephemeral=True)
@@ -1017,7 +1307,9 @@ class QOTDCog(commands.Cog):
                          pass
                 return
 
-            question_id, question_text, added_by_id = question_data
+            question_id = question_data['id']
+            question_text = question_data['question_text']
+            added_by_id = question_data['added_by_id']
 
             embed = discord.Embed(title="❓ Question of the Day ❓", description=f"## {question_text}", color=discord.Color.blue())
             total_questions, unseen_count = await get_question_counts()
@@ -1060,9 +1352,23 @@ class QOTDCog(commands.Cog):
                     if interaction: await interaction.followup.send(f"❌ An unknown error occurred: {e}", ephemeral=True)
 
             if posted_successfully and not is_test:
-                await db.execute("DELETE FROM questions WHERE id = ?", (question_id,))
-                await db.execute("UPDATE guild_settings SET last_post_timestamp = ? WHERE guild_id = ?", (int(datetime.datetime.now().timestamp()), guild_id))
+                # Mark the question seen rather than deleting it — that's what
+                # "Reset Pool" (make everything unseen again) and "Clear Seen"
+                # both assume, and it keeps a record of what's already been asked.
+                now_ts = int(datetime.datetime.now().timestamp())
+                await db.execute(
+                    "UPDATE questions SET last_used_timestamp = ?, times_used = times_used + 1 WHERE id = ?",
+                    (now_ts, question_id),
+                )
+                await db.execute(
+                    "UPDATE guild_settings SET last_post_timestamp = ?, next_question_id = NULL WHERE guild_id = ?",
+                    (now_ts, guild_id),
+                )
                 await db.commit()
+
+                # Queue the following day's question straight away so the
+                # dashboard's preview is never empty between posts.
+                await self._ensure_next_question(guild_id)
 
                 if interaction and interaction.message:
                     await interaction.followup.send("✅ Manually posted the Question of the Day.", ephemeral=True)

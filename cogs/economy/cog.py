@@ -18,7 +18,8 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from .cards import EconomyCardGenerator
-from .config import Config
+from .config import Config, DEFAULTS
+from .config_sync import EconomyConfigSync
 from .database import EconomyDB
 from .earning import EarningEngine, today_key
 from .effects import EffectsManager
@@ -26,6 +27,7 @@ from .leveling import LevelingEngine
 from .render import build_level_card_data
 from .stats import ActivityStats
 from .views_level import LeaderboardView, LevelCardView
+from utils.perms import is_bot_admin
 
 logger = logging.getLogger('cogs.economy')
 
@@ -42,7 +44,11 @@ class Economy(commands.Cog):
         self.bot = bot
 
         self.db = EconomyDB()
-        self.config = Config(self.db)
+        self.config = Config(self.db, on_change=self._on_config_change)
+        self.config_sync = EconomyConfigSync()
+        # Set whenever a setting moves; cleared once the snapshot the dashboard
+        # reads has been republished. Starts True so the first tick publishes.
+        self._config_dirty = True
         self.leveling = LevelingEngine(self)
         self.earning = EarningEngine(self)
         self.effects = EffectsManager(self)
@@ -71,9 +77,18 @@ class Economy(commands.Cog):
         from .items import register_all
         self.items = register_all(self)
 
+        # Bring up the dashboard bridge before serving events. A failure here
+        # must not stop the cog loading — leveling and Points do not depend on
+        # the website — so it is logged and the sync loop simply retries.
+        try:
+            await self.config_sync.ensure()
+        except Exception as e:
+            logger.error(f"config_sync.ensure failed: {e}", exc_info=True)
+
         self.voice_tick.start()
         self.maintenance_tick.start()
         self.retention_tick.start()
+        self.config_sync_tick.start()
         self._ready.set()
         logger.info("Economy cog loaded.")
 
@@ -81,6 +96,7 @@ class Economy(commands.Cog):
         self.voice_tick.cancel()
         self.maintenance_tick.cancel()
         self.retention_tick.cancel()
+        self.config_sync_tick.cancel()
         await self.cards.close()
         await self.stats.close()
         await self.db.close()
@@ -136,11 +152,11 @@ class Economy(commands.Cog):
             return 0
 
     def is_admin(self, user) -> bool:
-        checker = getattr(self.bot, "is_bot_admin", None)
-        if checker:
-            return checker(user)
-        return getattr(user, "guild_permissions", None) is not None \
-            and user.guild_permissions.administrator
+        return is_bot_admin(user, self.bot)
+
+    def _on_config_change(self, key: str):
+        """Config.set hook — a setting moved, so the snapshot is now stale."""
+        self._config_dirty = True
 
     # ----------------------------------------------------------- listeners
 
@@ -382,6 +398,40 @@ class Economy(commands.Cog):
 
     @retention_tick.before_loop
     async def before_retention_tick(self):
+        await self.bot.wait_until_ready()
+
+    @tasks.loop(seconds=10)
+    async def config_sync_tick(self):
+        """Apply settings changes made on the web dashboard, then republish.
+
+        The dashboard writes desired values and bumps a revision; this reads any
+        past the last one applied and pushes each through Config.set, which both
+        persists to economy.db and refreshes the cache — so a change saved on the
+        website is live within one tick. Only keys the bot actually knows are
+        accepted; a value for anything else is ignored rather than trusted.
+        """
+        try:
+            revision, overrides = await self.config_sync.read_pending()
+            if overrides:
+                applied = 0
+                for key, value in overrides.items():
+                    if key not in DEFAULTS:
+                        logger.warning("Ignoring unknown dashboard setting %r", key)
+                        continue
+                    await self.config.set(key, value)  # marks dirty via hook
+                    applied += 1
+                await self.config_sync.mark_applied(revision)
+                if applied:
+                    logger.info(f"Applied {applied} setting(s) from the dashboard.")
+
+            if self._config_dirty:
+                await self.config_sync.publish_snapshot(self.config.snapshot())
+                self._config_dirty = False
+        except Exception as e:
+            await self._report("config_sync_tick", e)
+
+    @config_sync_tick.before_loop
+    async def before_config_sync_tick(self):
         await self.bot.wait_until_ready()
 
     @maintenance_tick.before_loop

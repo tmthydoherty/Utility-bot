@@ -55,15 +55,35 @@ AUDIT_SETTLE_SECONDS = 2
 # ID. Two days covers effectively every delete anyone asks about.
 MESSAGE_RETENTION_SECONDS = 48 * 60 * 60
 
+# Deleted images can only be re-shown if we kept our own copy: the CDN link dies
+# with the message. Bytes are saved to disk when the message arrives and re-
+# uploaded on delete. Bounded to images under the size cap, kept for the same
+# window as the text mirror — anything larger or longer would wear the Pi's card
+# for little payoff.
+IMAGE_CACHE_DIR = os.path.join("data", "audit_images")
+MAX_CACHED_IMAGE_BYTES = 8 * 1024 * 1024
+CACHED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+# One message can't carry more than this many attachments, and a delete embed
+# can't re-upload more, so there is no point collecting past it.
+MAX_IMAGES_PER_SEND = 10
+
 # A member's onboarding picks and any role a cog hands them on arrival belong in
 # their join embed, not in a separate role-change entry moments later. Role
 # changes are held back until the join embed has taken its snapshot, then
 # reported normally — the handoff is on the snapshot itself, not a second timer,
 # so no change can fall between the two and go unlogged.
 JOIN_SETTLE_SECONDS = 30
+# A member clicking through Discord onboarding easily takes longer than the
+# settle above, and their picks would then land in a second entry. So a member
+# who is mid-onboarding is held instead until Discord reports it complete, up to
+# this cap, and only then snapshotted — the whole point being one join entry.
+JOIN_ONBOARDING_MAX_HOLD_SECONDS = 10 * 60
+# How often _log_join re-checks a held member's onboarding flag and role set.
+JOIN_POLL_SECONDS = 5
 # Safety net only: drops a tracked join whose snapshot never ran, so a failed
-# _log_join can't suppress that member's role changes forever.
-JOIN_TRACK_TTL_SECONDS = 90
+# _log_join can't suppress that member's role changes forever. Must outlast the
+# longest a join can legitimately be held above.
+JOIN_TRACK_TTL_SECONDS = JOIN_ONBOARDING_MAX_HOLD_SECONDS + 60
 
 # Kicks issued by cogs/inactivity.py, which get their own muted colour so they
 # don't read as moderator action.
@@ -128,7 +148,7 @@ NO_TIMESTAMP_EVENTS = {"member_join"} | EXIT_EVENTS
 # column name into SQL without opening an injection hole.
 ALLOWED_SETTING_KEYS = {
     "default_channel_id", "exit_channel_id", "mod_channel_id",
-    "batch_seconds", "log_bot_messages",
+    "batch_seconds", "log_bot_messages", "cache_deleted_images",
 }
 
 # Channel slots the panel can assign, in display order. A slot names either a
@@ -147,7 +167,7 @@ CHANNEL_TARGETS: Dict[str, Dict[str, Any]] = {
     "server":   {"label": "Server", "category": "server",
                  "help": "Channel renames and permission changes."},
     "usernames": {"label": "Usernames", "event": "username_change",
-                  "help": "Username changes only. Falls back to Members."},
+                  "help": "Username and nickname changes. Falls back to Members."},
     "avatars":  {"label": "Avatars", "event": "avatar_change",
                  "help": "Avatar changes only. Falls back to Members."},
     "exit":     {"label": "Exit", "column": "exit_channel_id",
@@ -288,6 +308,7 @@ class AuditDB:
         await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.execute("PRAGMA synchronous=NORMAL")
         await self._create_tables()
+        await self._migrate_schema()
         await self._conn.commit()
 
     async def close(self):
@@ -305,7 +326,8 @@ class AuditDB:
                 exit_channel_id    INTEGER,
                 mod_channel_id     INTEGER,
                 batch_seconds      INTEGER DEFAULT 15,
-                log_bot_messages   INTEGER DEFAULT 0
+                log_bot_messages   INTEGER DEFAULT 0,
+                cache_deleted_images INTEGER DEFAULT 1
             );
             CREATE TABLE IF NOT EXISTS category_channels (
                 guild_id   INTEGER NOT NULL,
@@ -343,12 +365,29 @@ class AuditDB:
                 content     TEXT,
                 attachments TEXT,
                 created_at  INTEGER NOT NULL,
-                edited_at   INTEGER
+                edited_at   INTEGER,
+                cached_images TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_message_created
                 ON message_cache (created_at);
             """
         )
+
+    async def _migrate_schema(self):
+        """Add columns introduced after a table first shipped.
+
+        SQLite has no ``ADD COLUMN IF NOT EXISTS``, so each statement is run and
+        its duplicate-column error swallowed. CREATE TABLE above already carries
+        these for fresh databases; this is only for existing ones on disk.
+        """
+        for ddl in (
+            "ALTER TABLE guild_settings ADD COLUMN cache_deleted_images INTEGER DEFAULT 1",
+            "ALTER TABLE message_cache ADD COLUMN cached_images TEXT",
+        ):
+            try:
+                await self._conn.execute(ddl)
+            except aiosqlite.OperationalError:
+                pass
 
     # -- settings ------------------------------------------------------
 
@@ -523,12 +562,14 @@ class AuditDB:
 
     # -- message mirror ------------------------------------------------
 
-    def buffer_message(self, message: discord.Message):
+    def buffer_message(self, message: discord.Message,
+                       cached_images: Optional[List[Dict[str, str]]] = None):
         attachments = json.dumps([a.filename for a in message.attachments])
+        images = json.dumps(cached_images or [])
         self._message_buffer.append((
             message.id, message.guild.id, message.channel.id, message.author.id,
             message.content or "", attachments,
-            int(message.created_at.timestamp()), None,
+            int(message.created_at.timestamp()), None, images,
         ))
 
     async def flush_messages(self):
@@ -539,8 +580,8 @@ class AuditDB:
             await self._conn.executemany(
                 "INSERT OR REPLACE INTO message_cache "
                 "(message_id, guild_id, channel_id, author_id, content, "
-                " attachments, created_at, edited_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                " attachments, created_at, edited_at, cached_images) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 rows,
             )
             await self._conn.commit()
@@ -712,6 +753,7 @@ class AuditLog(commands.Cog):
         try:
             await self.db.connect()
             await self.db.migrate_from_legacy()
+            os.makedirs(IMAGE_CACHE_DIR, exist_ok=True)
         except Exception as e:
             logger.error("Audit log startup failed: %s", e, exc_info=True)
             await self._report(f"startup: {e}")
@@ -790,7 +832,10 @@ class AuditLog(commands.Cog):
         category = EVENTS[event_key][0]
         event_channels = await self.db.get_event_channels(guild.id)
         cat_channels = await self.db.get_category_channels(guild.id)
-        channel_id = (event_channels.get(event_key)
+        # Nickname changes ride along with username changes: same "Usernames"
+        # channel slot, falling back to Members the same way.
+        routing_key = "username_change" if event_key == "nickname_change" else event_key
+        channel_id = (event_channels.get(routing_key)
                       or cat_channels.get(category)
                       or settings["default_channel_id"])
         channel = await self._resolve_channel(guild, channel_id)
@@ -846,7 +891,8 @@ class AuditLog(commands.Cog):
         The bucket key deliberately includes the actor but not the target: a
         moderator stripping roles from one member and Vibey assigning a team
         role to a whole lobby are both single actions from the server's point of
-        view, and both should come out as one embed.
+        view, and both should come out as one embed. Member exits are the
+        exception — see below — since each leaver is their own headline.
         """
         if not self._ready.is_set():
             return
@@ -854,6 +900,12 @@ class AuditLog(commands.Cog):
             return
 
         key = (event.guild_id, event.event_key, event.actor.id)
+        # A departure is about the person who left, not who removed them. Keeping
+        # each exit in its own bucket gives every member their own embed — with
+        # their own avatar — instead of a mass inactivity kick (one admin, so one
+        # actor) collapsing fifty leavers into a single faceless summary.
+        if event.event_key in EXIT_EVENTS and event.target is not None:
+            key = key + (event.target.id,)
         async with self._buckets_lock:
             bucket = self._buckets.get(key)
             if bucket is None:
@@ -884,7 +936,8 @@ class AuditLog(commands.Cog):
         async with self._buckets_lock:
             snapshot = list(self._buckets.items())
         windows: Dict[int, int] = {}
-        for (guild_id, _, _), _bucket in snapshot:
+        for key, _bucket in snapshot:
+            guild_id = key[0]
             if guild_id not in windows:
                 settings = await self.db.get_settings(guild_id)
                 windows[guild_id] = settings["batch_seconds"] or DEFAULT_BATCH_SECONDS
@@ -918,18 +971,45 @@ class AuditLog(commands.Cog):
             embed = self._render(guild, event_key, bucket.events)
             if embed is None:
                 return
+            # Re-attach any cached copies of deleted images. A single image is
+            # shown inline; several ride along as attachments beneath the embed.
+            image_files = (self._deleted_image_files(bucket.events)
+                           if event_key == "message_delete" else [])
+            if len(image_files) == 1:
+                embed.set_image(url=f"attachment://{image_files[0][1]}")
             destinations = await self._destinations(
                 guild, event_key, bucket.events[0].data
             )
             for channel in destinations:
+                # File handles are consumed on send, so rebuild them per channel.
+                files = [discord.File(path, filename=name)
+                         for path, name in image_files]
                 try:
-                    await channel.send(embed=embed)
+                    await channel.send(embed=embed, files=files)
                 except discord.HTTPException as e:
                     logger.warning("Could not post %s to #%s: %s",
                                    event_key, getattr(channel, "name", "?"), e)
         except Exception as e:
             logger.error("Rendering %s failed: %s", event_key, e, exc_info=True)
             await self._report(f"render {event_key}: {e}")
+
+    def _deleted_image_files(self, events: List[LogEvent]) -> List[Tuple[str, str]]:
+        """(path, upload name) for every cached image still on disk in this batch.
+
+        The on-disk basename is used as the upload name so the ``attachment://``
+        reference stays valid; the file may have been purged since the delete
+        fired, so each is checked before it's included.
+        """
+        collected: List[Tuple[str, str]] = []
+        for event in events:
+            for image in event.data.get("cached_images", []):
+                path = image.get("path")
+                if not path or not os.path.exists(path):
+                    continue
+                collected.append((path, os.path.basename(path)))
+                if len(collected) >= MAX_IMAGES_PER_SEND:
+                    return collected
+        return collected
 
     # ------------------------------------------------------------------
     # Attribution
@@ -1502,6 +1582,39 @@ class AuditLog(commands.Cog):
     # Listeners — messages
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _is_cacheable_image(attachment: discord.Attachment) -> bool:
+        """An image small enough to be worth keeping a copy of for delete logs."""
+        if attachment.size > MAX_CACHED_IMAGE_BYTES:
+            return False
+        content_type = (attachment.content_type or "").lower()
+        if content_type.startswith("image/"):
+            return True
+        ext = os.path.splitext(attachment.filename)[1].lower()
+        return ext in CACHED_IMAGE_EXTENSIONS
+
+    async def _cache_images(self, message: discord.Message) -> List[Dict[str, str]]:
+        """Save a copy of each image attachment so a later delete can re-show it.
+
+        Discord swaps the CDN URL out the moment a message is deleted, so the
+        bytes have to be captured now or not at all. Filenames are our own
+        ``<message>_<index>`` rather than the uploader's, which keeps the on-disk
+        name safe and unique regardless of what the file was called.
+        """
+        cached: List[Dict[str, str]] = []
+        for index, attachment in enumerate(message.attachments):
+            if not self._is_cacheable_image(attachment):
+                continue
+            ext = os.path.splitext(attachment.filename)[1].lower() or ".img"
+            path = os.path.join(IMAGE_CACHE_DIR, f"{message.id}_{index}{ext}")
+            try:
+                await attachment.save(path, use_cached=False)
+            except (discord.HTTPException, discord.NotFound, OSError) as e:
+                logger.warning("Could not cache image %s: %s", attachment.filename, e)
+                continue
+            cached.append({"filename": attachment.filename, "path": path})
+        return cached
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         """Mirror messages so deletes and edits can show real content later."""
@@ -1510,11 +1623,18 @@ class AuditLog(commands.Cog):
         if await self._is_ignored(message.guild.id, channel=message.channel,
                                   user_id=message.author.id):
             return
+        settings = None
         if message.author.bot:
             settings = await self.db.get_settings(message.guild.id)
             if not settings["log_bot_messages"]:
                 return
-        self.db.buffer_message(message)
+        cached_images: List[Dict[str, str]] = []
+        if message.attachments:
+            if settings is None:
+                settings = await self.db.get_settings(message.guild.id)
+            if settings["cache_deleted_images"]:
+                cached_images = await self._cache_images(message)
+        self.db.buffer_message(message, cached_images)
 
     @commands.Cog.listener()
     async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent):
@@ -1612,9 +1732,12 @@ class AuditLog(commands.Cog):
             # No moderator entry, so the author took it down themselves.
             actor = Actor(user=target)
 
+        cached_images: List[Dict[str, str]] = []
         if stored is not None:
             content = stored["content"]
             attachments = json.loads(stored["attachments"]) if stored["attachments"] else []
+            if stored["cached_images"]:
+                cached_images = json.loads(stored["cached_images"])
         else:
             content = cached.content
             attachments = [a.filename for a in cached.attachments]
@@ -1629,6 +1752,7 @@ class AuditLog(commands.Cog):
                 "author_id": author_id,
                 "content": content,
                 "attachments": attachments,
+                "cached_images": cached_images,
             },
         ))
 
@@ -1674,16 +1798,51 @@ class AuditLog(commands.Cog):
         asyncio.create_task(self._log_join(member))
 
     async def _log_join(self, member: discord.Member):
-        """Wait for onboarding and any on-join cog grants to settle so every role
-        the member ends up with lands in the join embed."""
-        await asyncio.sleep(JOIN_SETTLE_SECONDS)
+        """Hold the join embed until every on-arrival role has settled, so a
+        member's onboarding picks and any on-join grant — the newcomer role, an
+        invite role — all land in this one entry instead of a follow-up.
+
+        A member going through Discord onboarding is held until Discord reports
+        it finished (``completed_onboarding``), bounded by a hard cap; everyone
+        else just gets the short settle. Role changes stay suppressed the whole
+        time the member is tracked, so nothing escapes into its own embed.
+        """
+        guild = member.guild
+        fresh = member
+        roles: List[str] = []
+        started_at = time.monotonic()
+        saw_onboarding = False
         try:
+            while True:
+                await asyncio.sleep(JOIN_POLL_SECONDS)
+                # on_member_remove clears the tracking entry the moment they
+                # leave, so a member who quits mid-onboarding stops the hold
+                # instead of pinning it to the full cap.
+                if member.id not in self._recent_joins:
+                    break
+                fresh = guild.get_member(member.id) or fresh
+                flags = getattr(fresh, "flags", None)
+                started = bool(flags and flags.started_onboarding)
+                completed = bool(flags and flags.completed_onboarding)
+                if started and not completed:
+                    saw_onboarding = True
+                elapsed = time.monotonic() - started_at
+                if saw_onboarding:
+                    # Wait out the onboarding screen; its role grants arrive with
+                    # the completion flag, so the next poll after it flips picks
+                    # them up.
+                    if completed or elapsed >= JOIN_ONBOARDING_MAX_HOLD_SECONDS:
+                        break
+                elif elapsed >= JOIN_SETTLE_SECONDS:
+                    break
+
             try:
-                fresh = member.guild.get_member(member.id)
-                if fresh is None:
-                    fresh = await member.guild.fetch_member(member.id)
+                latest = guild.get_member(member.id)
+                if latest is None:
+                    latest = await guild.fetch_member(member.id)
+                fresh = latest
             except discord.HTTPException:
-                fresh = member  # left again already, or unfetchable
+                pass  # left again already, or unfetchable; use what we have
 
             roles = [r.name for r in getattr(fresh, "roles", []) if not r.is_default()]
         finally:
@@ -1889,6 +2048,11 @@ class AuditLog(commands.Cog):
                                       after: discord.abc.GuildChannel):
         if not self._ready.is_set():
             return
+        # Voice and stage channels churn their names and permission overwrites
+        # constantly — temp channels, region and user-limit tweaks — and log as
+        # pure noise. Renames and permission changes to them are skipped.
+        if isinstance(after, (discord.VoiceChannel, discord.StageChannel)):
+            return
         if await self._is_ignored(after.guild.id, channel=after):
             return
 
@@ -1940,6 +2104,13 @@ class AuditLog(commands.Cog):
         except Exception as e:
             logger.error("Message purge failed: %s", e, exc_info=True)
 
+        try:
+            removed = self._purge_cached_images()
+            if removed:
+                logger.info("Purged %s expired cached images", removed)
+        except Exception as e:
+            logger.error("Image cache purge failed: %s", e, exc_info=True)
+
         cutoff = time.monotonic() - JOIN_TRACK_TTL_SECONDS
         for uid, ts in list(self._recent_joins.items()):
             if ts < cutoff:
@@ -1948,6 +2119,27 @@ class AuditLog(commands.Cog):
         # Coalescing only groups deletions made close together, so hourly is far
         # longer than any run this needs to span.
         self._delete_counts.clear()
+
+    def _purge_cached_images(self) -> int:
+        """Delete cached image files past the retention window.
+
+        Swept by file mtime rather than by joining the message table, so an image
+        whose row was already purged — or one left behind by a crash mid-write —
+        is still cleaned up.
+        """
+        if not os.path.isdir(IMAGE_CACHE_DIR):
+            return 0
+        cutoff = time.time() - MESSAGE_RETENTION_SECONDS
+        removed = 0
+        for name in os.listdir(IMAGE_CACHE_DIR):
+            path = os.path.join(IMAGE_CACHE_DIR, name)
+            try:
+                if os.path.getmtime(path) < cutoff:
+                    os.remove(path)
+                    removed += 1
+            except OSError:
+                continue
+        return removed
 
     @purge_loop.before_loop
     async def _before_purge(self):
@@ -2489,8 +2681,18 @@ class MessageLogPage(AuditPage):
         bot_button.callback = self._toggle_bots
         self.add_item(bot_button)
 
+        images_on = bool(settings["cache_deleted_images"])
+        images_button = discord.ui.Button(
+            label=f"Cache deleted images: {'ON' if images_on else 'OFF'}",
+            style=(discord.ButtonStyle.success if images_on
+                   else discord.ButtonStyle.secondary),
+            row=0,
+        )
+        images_button.callback = self._toggle_images
+        self.add_item(images_button)
+
         window_button = discord.ui.Button(
-            label="Set bundling window", style=discord.ButtonStyle.primary, row=0
+            label="Set bundling window", style=discord.ButtonStyle.primary, row=1
         )
         window_button.callback = self._set_window
         self.add_item(window_button)
@@ -2514,26 +2716,45 @@ class MessageLogPage(AuditPage):
             flash=f"Bot messages {'will' if new_value else 'will not'} be recorded.",
         )
 
+    async def _toggle_images(self, interaction: discord.Interaction):
+        settings = await self.cog.db.get_settings(interaction.guild.id)
+        new_value = 0 if settings["cache_deleted_images"] else 1
+        await self.cog.db.set_setting(
+            interaction.guild.id, "cache_deleted_images", new_value
+        )
+        await self.render(
+            interaction,
+            flash=(f"Deleted images {'will' if new_value else 'will no longer'} "
+                   f"be saved so they can be shown when deleted."),
+        )
+
     async def _set_window(self, interaction: discord.Interaction):
         await interaction.response.send_modal(BatchWindowModal(self))
 
     async def _purge(self, interaction: discord.Interaction):
         removed = await self.cog.db.purge_messages()
-        await self.render(interaction, flash=f"Purged {removed} expired messages.")
+        images = self.cog._purge_cached_images()
+        await self.render(
+            interaction,
+            flash=f"Purged {removed} expired messages and {images} cached images.",
+        )
 
     async def build_embed(self, guild: discord.Guild) -> discord.Embed:
         settings = await self.cog.db.get_settings(guild.id)
         count = await self.cog.db.message_count()
         hours = MESSAGE_RETENTION_SECONDS // 3600
+        image_cap = MAX_CACHED_IMAGE_BYTES // (1024 * 1024)
         return discord.Embed(
             title="Message log",
             description=(
                 f"Discord sends no content when a message is deleted, only an ID, "
                 f"so messages are mirrored locally for **{hours}h** to make "
-                f"before/after possible.\n\n"
+                f"before/after possible. Image attachments up to **{image_cap}MB** "
+                f"are saved the same way, so a deleted image can still be shown.\n\n"
                 f"Cached messages: **{count}**\n"
                 f"Bundling window: **{settings['batch_seconds'] or DEFAULT_BATCH_SECONDS}s**\n"
-                f"Bot messages: **{'recorded' if settings['log_bot_messages'] else 'skipped'}**"
+                f"Bot messages: **{'recorded' if settings['log_bot_messages'] else 'skipped'}**\n"
+                f"Deleted images: **{'saved' if settings['cache_deleted_images'] else 'not saved'}**"
             ),
             color=COLOR_NEUTRAL,
         )

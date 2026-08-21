@@ -2,99 +2,167 @@
     "global_data": {
         "scores": {
             "676148847147483137": {
-                "score": 3,
-                "timestamp": "2026-08-03T04:11:56.185299+00:00"
+                "score": 14,
+                "timestamp": "2026-08-19T12:03:12.895020+00:00"
             },
             "562801560640552980": {
                 "score": 0,
                 "timestamp": null
             },
             "439633684136460291": {
-                "score": 0,
-                "timestamp": null
+                "score": 2,
+                "timestamp": "2026-08-19T15:39:32.587476+00:00"
             },
             "356774449032331264": {
-                "score": 1,
-                "timestamp": "2026-08-04T04:15:39.853870+00:00"
+                "score": 7,
+                "timestamp": "2026-08-19T07:19:38.598390+00:00"
             },
             "343220200432467970": {
-                "score": 2,
-                "timestamp": "2026-08-03T16:16:42.628163+00:00"
+                "score": 14,
+                "timestamp": "2026-08-20T20:07:20.021430+00:00"
             },
             "739592205265535007": {
-                "score": 1,
-                "timestamp": "2026-08-01T04:59:22.529512+00:00"
+                "score": 12,
+                "timestamp": "2026-08-21T04:32:39.285941+00:00"
             },
             "560914996549386242": {
-                "score": 4,
-                "timestamp": "2026-08-03T04:19:27.707373+00:00"
+                "score": 14,
+                "timestamp": "2026-08-19T14:17:47.552384+00:00"
             },
             "462681318577405952": {
-                "score": 1,
-                "timestamp": "2026-08-02T23:07:34.064104+00:00"
+                "score": 4,
+                "timestamp": "2026-08-19T07:24:26.509766+00:00"
             },
             "848050994553028608": {
-                "score": 0,
-                "timestamp": "2026-08-03T06:07:10.191740+00:00"
+                "score": 6,
+                "timestamp": "2026-08-19T05:09:09.416495+00:00"
             },
             "1482599581681455156": {
                 "score": 0,
                 "timestamp": null
             },
             "350399886950268941": {
-                "score": 2,
-                "timestamp": "2026-08-02T05:04:55.696888+00:00"
+                "score": 7,
+                "timestamp": "2026-08-19T13:37:53.137775+00:00"
             },
             "756992075353948243": {
-                "score": 2,
-                "timestamp": "2026-08-03T10:15:54.065773+00:00"
+                "score": 9,
+                "timestamp": "2026-08-19T10:03:07.443005+00:00"
             },
             "790607080976285696": {
-                "score": 0,
-                "timestamp": "2026-08-01T16:09:42.447523+00:00"
+                "score": 6,
+                "timestamp": "2026-08-19T16:39:06.633217+00:00"
             },
             "314563456768409610": {
-                "score": 1,
-                "timestamp": "2026-08-02T10:27:14.304099+00:00"
+                "score": 2,
+                "timestamp": "2026-08-19T04:21:51.898747+00:00"
             },
             "552348740544102413": {
                 "score": 0,
                 "timestamp": "2026-08-02T23:38:49.158700+00:00"
             },
             "500243292890333184": {
-                "score": 0,
-                "timestamp": "2026-08-03T11:20:27.179707+00:00"
+                "score": 6,
+                "timestamp": "2026-08-21T08:57:11.668684+00:00"
             },
             "395034720607666177": {
-                "score": 2,
-                "timestamp": "2026-08-03T23:44:55.908904+00:00"
+                "score": 13,
+                "timestamp": "2026-08-21T08:55:04.867845+00:00"
             },
             "403683278126841867": {
                 "score": 0,
                 "timestamp": null
             },
             "316282752515440640": {
-                "score": 0,
-                "timestamp": null
+                "score": 4,
+                "timestamp": "2026-08-20T11:58:20.528968+00:00"
             },
             "767189722723909642": {
-                "score": 0,
-                "timestamp": null
+                "score": 4,
+                "timestamp": "2026-08-20T04:09:08.124512+00:00"
             },
             "1093366641825419345": {
                 "score": 0,
                 "timestamp": null
             },
             "732384312200003605": {
+                "score": 4,
+                "timestamp": "2026-08-20T00:26:38.500093+00:00"
+            },
+            "889334500977426453": {
+                "score": 2,
+                "timestamp": "2026-08-20T23:09:19.150454+00:00"
+            },
+            "1474968469694058518": {
+                "score": 0,
+                "timestamp": null
+            },
+            "1219056290274214008": {
+                "score": 0,
+                "timestamp": null
+            },
+            "398789704239153152": {
+                "score": 0,
+                "timestamp": null
+            },
+            "1019307136402075730": {
+                "score": 0,
+                "timestamp": null
+            },
+            "485105048930615307": {
+                "score": 10,
+                "timestamp": "2026-08-21T04:57:28.259721+00:00"
+            },
+            "987288561348915260": {
                 "score": 1,
-                "timestamp": "2026-08-04T06:28:29.582937+00:00"
+                "timestamp": "2026-08-12T01:15:42.804832+00:00"
+            },
+            "728536500198703135": {
+                "score": 0,
+                "timestamp": null
+            },
+            "975661536376946698": {
+                "score": 2,
+                "timestamp": "2026-08-15T03:55:29.905687+00:00"
+            },
+            "441547685020041236": {
+                "score": 0,
+                "timestamp": "2026-08-17T12:34:39.984411+00:00"
+            },
+            "576807190866952193": {
+                "score": 0,
+                "timestamp": null
+            },
+            "691031987112116236": {
+                "score": 2,
+                "timestamp": "2026-08-20T03:39:56.749529+00:00"
+            },
+            "1053227743040503878": {
+                "score": 0,
+                "timestamp": "2026-08-19T04:14:57.757879+00:00"
+            },
+            "1098345785109774397": {
+                "score": 1,
+                "timestamp": "2026-08-19T14:20:49.230873+00:00"
+            },
+            "883169665961041981": {
+                "score": 0,
+                "timestamp": null
+            },
+            "1160314554014765228": {
+                "score": 0,
+                "timestamp": "2026-08-20T01:55:04.139369+00:00"
+            },
+            "1536360650924630076": {
+                "score": 0,
+                "timestamp": null
             }
         },
         "user_stats": {
             "356774449032331264": {
-                "correct": 108,
-                "incorrect": 188,
-                "current_streak": 1,
+                "correct": 114,
+                "incorrect": 197,
+                "current_streak": 0,
                 "longest_streak": 7,
                 "don_offered": 0,
                 "don_accepted": 18,
@@ -109,15 +177,15 @@
                         "incorrect": 3
                     },
                     "Entertainment: Comics": {
-                        "correct": 2,
+                        "correct": 3,
                         "incorrect": 4
                     },
                     "Entertainment: Japanese Anime & Manga": {
-                        "correct": 3,
+                        "correct": 4,
                         "incorrect": 8
                     },
                     "Celebrities": {
-                        "correct": 1,
+                        "correct": 2,
                         "incorrect": 3
                     },
                     "Geography": {
@@ -133,8 +201,8 @@
                         "incorrect": 19
                     },
                     "History": {
-                        "correct": 7,
-                        "incorrect": 12
+                        "correct": 9,
+                        "incorrect": 15
                     },
                     "Science & Nature": {
                         "correct": 16,
@@ -149,12 +217,12 @@
                         "incorrect": 4
                     },
                     "Entertainment: Video Games": {
-                        "correct": 22,
-                        "incorrect": 41
+                        "correct": 23,
+                        "incorrect": 45
                     },
                     "Entertainment: Television": {
                         "correct": 3,
-                        "incorrect": 6
+                        "incorrect": 7
                     },
                     "Science: Gadgets": {
                         "correct": 2,
@@ -166,7 +234,7 @@
                     },
                     "Entertainment: Film": {
                         "correct": 11,
-                        "incorrect": 21
+                        "incorrect": 22
                     },
                     "Entertainment: Books": {
                         "correct": 4,
@@ -193,13 +261,13 @@
                         "incorrect": 0
                     }
                 },
-                "all_time_score": 111,
-                "don_declined": 88,
-                "current_incorrect_streak": 0,
-                "all_time_timestamp": "2026-08-04T04:15:39.853870+00:00",
-                "participation_streak": 1,
+                "all_time_score": 117,
+                "don_declined": 94,
+                "current_incorrect_streak": 2,
+                "all_time_timestamp": "2026-08-19T07:19:38.598390+00:00",
+                "participation_streak": 11,
                 "longest_participation_streak": 20,
-                "last_participation_date": "2026-08-04"
+                "last_participation_date": "2026-08-21"
             },
             "752675036858417173": {
                 "correct": 54,
@@ -308,7 +376,7 @@
             },
             "1019307136402075730": {
                 "correct": 16,
-                "incorrect": 29,
+                "incorrect": 30,
                 "current_streak": 0,
                 "longest_streak": 4,
                 "don_declined": 0,
@@ -345,7 +413,7 @@
                     },
                     "Entertainment: Video Games": {
                         "correct": 6,
-                        "incorrect": 6
+                        "incorrect": 7
                     },
                     "Vehicles": {
                         "correct": 1,
@@ -381,19 +449,19 @@
                     }
                 },
                 "all_time_score": 12,
-                "current_incorrect_streak": 1,
+                "current_incorrect_streak": 2,
                 "all_time_timestamp": "2026-07-18T04:01:13.280303+00:00",
                 "participation_streak": 1,
                 "longest_participation_streak": 2,
-                "last_participation_date": "2026-07-31"
+                "last_participation_date": "2026-08-09"
             },
             "1053227743040503878": {
-                "correct": 53,
+                "correct": 54,
                 "incorrect": 113,
-                "current_streak": 0,
+                "current_streak": 1,
                 "longest_streak": 4,
                 "don_declined": 5,
-                "don_accepted": 47,
+                "don_accepted": 48,
                 "don_successes": 14,
                 "categories": {
                     "Science: Computers": {
@@ -469,7 +537,7 @@
                         "incorrect": 2
                     },
                     "Entertainment: Japanese Anime & Manga": {
-                        "correct": 2,
+                        "correct": 3,
                         "incorrect": 2
                     },
                     "Science: Mathematics": {
@@ -494,18 +562,18 @@
                     }
                 },
                 "all_time_score": 34,
-                "current_incorrect_streak": 7,
-                "all_time_timestamp": "2026-04-23T16:22:08.967679+00:00",
+                "current_incorrect_streak": 0,
+                "all_time_timestamp": "2026-08-19T04:14:57.757879+00:00",
                 "participation_streak": 1,
                 "longest_participation_streak": 8,
-                "last_participation_date": "2026-06-24"
+                "last_participation_date": "2026-08-19"
             },
             "987288561348915260": {
-                "correct": 33,
+                "correct": 34,
                 "incorrect": 59,
-                "current_streak": 1,
+                "current_streak": 2,
                 "longest_streak": 8,
-                "don_declined": 1,
+                "don_declined": 2,
                 "don_accepted": 29,
                 "don_successes": 26,
                 "categories": {
@@ -526,7 +594,7 @@
                         "incorrect": 7
                     },
                     "History": {
-                        "correct": 3,
+                        "correct": 4,
                         "incorrect": 3
                     },
                     "Science & Nature": {
@@ -590,21 +658,21 @@
                         "incorrect": 0
                     }
                 },
-                "all_time_score": 57,
+                "all_time_score": 58,
                 "current_incorrect_streak": 0,
-                "all_time_timestamp": "2026-07-27T14:47:32.840302+00:00",
+                "all_time_timestamp": "2026-08-12T01:15:42.804832+00:00",
                 "participation_streak": 1,
                 "longest_participation_streak": 1,
-                "last_participation_date": "2026-07-27"
+                "last_participation_date": "2026-08-12"
             },
             "739592205265535007": {
-                "correct": 123,
-                "incorrect": 185,
-                "current_streak": 0,
+                "correct": 133,
+                "incorrect": 191,
+                "current_streak": 2,
                 "longest_streak": 5,
-                "don_declined": 33,
-                "don_accepted": 90,
-                "don_successes": 33,
+                "don_declined": 40,
+                "don_accepted": 93,
+                "don_successes": 35,
                 "categories": {
                     "Science: Computers": {
                         "correct": 3,
@@ -620,11 +688,11 @@
                     },
                     "Entertainment: Music": {
                         "correct": 12,
-                        "incorrect": 20
+                        "incorrect": 21
                     },
                     "History": {
-                        "correct": 6,
-                        "incorrect": 12
+                        "correct": 10,
+                        "incorrect": 13
                     },
                     "Science & Nature": {
                         "correct": 20,
@@ -639,8 +707,8 @@
                         "incorrect": 2
                     },
                     "Entertainment: Video Games": {
-                        "correct": 25,
-                        "incorrect": 46
+                        "correct": 29,
+                        "incorrect": 48
                     },
                     "Vehicles": {
                         "correct": 0,
@@ -648,7 +716,7 @@
                     },
                     "Entertainment: Television": {
                         "correct": 2,
-                        "incorrect": 8
+                        "incorrect": 9
                     },
                     "Science: Gadgets": {
                         "correct": 3,
@@ -659,7 +727,7 @@
                         "incorrect": 1
                     },
                     "Entertainment: Film": {
-                        "correct": 13,
+                        "correct": 14,
                         "incorrect": 19
                     },
                     "Geography": {
@@ -680,14 +748,14 @@
                     },
                     "Entertainment: Japanese Anime & Manga": {
                         "correct": 2,
-                        "incorrect": 9
+                        "incorrect": 10
                     },
                     "Science: Mathematics": {
                         "correct": 0,
                         "incorrect": 1
                     },
                     "Celebrities": {
-                        "correct": 1,
+                        "correct": 2,
                         "incorrect": 2
                     },
                     "Mythology": {
@@ -703,12 +771,12 @@
                         "incorrect": 0
                     }
                 },
-                "all_time_score": 101,
-                "current_incorrect_streak": 3,
-                "all_time_timestamp": "2026-08-01T04:59:22.529512+00:00",
-                "participation_streak": 21,
+                "all_time_score": 112,
+                "current_incorrect_streak": 0,
+                "all_time_timestamp": "2026-08-21T04:32:39.285941+00:00",
+                "participation_streak": 8,
                 "longest_participation_streak": 66,
-                "last_participation_date": "2026-08-04"
+                "last_participation_date": "2026-08-21"
             },
             "495858386936791040": {
                 "correct": 78,
@@ -824,11 +892,11 @@
                 "last_participation_date": "2026-07-27"
             },
             "1098345785109774397": {
-                "correct": 35,
+                "correct": 36,
                 "incorrect": 55,
-                "current_streak": 0,
+                "current_streak": 1,
                 "longest_streak": 4,
-                "don_declined": 3,
+                "don_declined": 4,
                 "don_accepted": 27,
                 "don_successes": 8,
                 "categories": {
@@ -889,7 +957,7 @@
                         "incorrect": 1
                     },
                     "Entertainment: Japanese Anime & Manga": {
-                        "correct": 0,
+                        "correct": 1,
                         "incorrect": 2
                     },
                     "Mythology": {
@@ -913,28 +981,28 @@
                         "incorrect": 3
                     }
                 },
-                "all_time_score": 25,
-                "current_incorrect_streak": 2,
-                "all_time_timestamp": "2026-07-17T13:30:14.576738+00:00",
+                "all_time_score": 26,
+                "current_incorrect_streak": 0,
+                "all_time_timestamp": "2026-08-19T14:20:49.230873+00:00",
                 "participation_streak": 1,
                 "longest_participation_streak": 4,
-                "last_participation_date": "2026-07-29"
+                "last_participation_date": "2026-08-19"
             },
             "500243292890333184": {
-                "correct": 118,
-                "incorrect": 176,
-                "current_streak": 3,
+                "correct": 128,
+                "incorrect": 180,
+                "current_streak": 2,
                 "longest_streak": 6,
                 "don_declined": 0,
-                "don_accepted": 118,
-                "don_successes": 48,
+                "don_accepted": 128,
+                "don_successes": 51,
                 "categories": {
                     "Science: Computers": {
                         "correct": 2,
                         "incorrect": 14
                     },
                     "Entertainment: Comics": {
-                        "correct": 1,
+                        "correct": 2,
                         "incorrect": 2
                     },
                     "General Knowledge": {
@@ -946,7 +1014,7 @@
                         "incorrect": 21
                     },
                     "History": {
-                        "correct": 6,
+                        "correct": 10,
                         "incorrect": 13
                     },
                     "Science & Nature": {
@@ -962,8 +1030,8 @@
                         "incorrect": 5
                     },
                     "Entertainment: Video Games": {
-                        "correct": 32,
-                        "incorrect": 35
+                        "correct": 36,
+                        "incorrect": 37
                     },
                     "Vehicles": {
                         "correct": 1,
@@ -971,7 +1039,7 @@
                     },
                     "Entertainment: Television": {
                         "correct": 4,
-                        "incorrect": 7
+                        "incorrect": 8
                     },
                     "Science: Gadgets": {
                         "correct": 4,
@@ -1002,7 +1070,7 @@
                         "incorrect": 2
                     },
                     "Entertainment: Japanese Anime & Manga": {
-                        "correct": 6,
+                        "correct": 7,
                         "incorrect": 3
                     },
                     "Science: Mathematics": {
@@ -1011,7 +1079,7 @@
                     },
                     "Celebrities": {
                         "correct": 2,
-                        "incorrect": 1
+                        "incorrect": 2
                     },
                     "Mythology": {
                         "correct": 1,
@@ -1026,12 +1094,12 @@
                         "incorrect": 1
                     }
                 },
-                "all_time_score": 97,
+                "all_time_score": 103,
                 "current_incorrect_streak": 0,
-                "all_time_timestamp": "2026-08-03T11:20:27.179707+00:00",
+                "all_time_timestamp": "2026-08-21T08:57:11.668684+00:00",
                 "participation_streak": 1,
                 "longest_participation_streak": 32,
-                "last_participation_date": "2026-08-03"
+                "last_participation_date": "2026-08-21"
             },
             "455376288086097920": {
                 "correct": 104,
@@ -1143,13 +1211,13 @@
                 "last_participation_date": "2026-07-09"
             },
             "790607080976285696": {
-                "correct": 115,
-                "incorrect": 161,
-                "current_streak": 0,
+                "correct": 122,
+                "incorrect": 164,
+                "current_streak": 2,
                 "longest_streak": 5,
-                "don_declined": 66,
-                "don_accepted": 48,
-                "don_successes": 25,
+                "don_declined": 70,
+                "don_accepted": 51,
+                "don_successes": 26,
                 "categories": {
                     "Science: Computers": {
                         "correct": 6,
@@ -1157,18 +1225,18 @@
                     },
                     "Entertainment: Comics": {
                         "correct": 0,
-                        "incorrect": 5
+                        "incorrect": 6
                     },
                     "General Knowledge": {
                         "correct": 9,
                         "incorrect": 7
                     },
                     "Entertainment: Music": {
-                        "correct": 8,
+                        "correct": 9,
                         "incorrect": 19
                     },
                     "History": {
-                        "correct": 10,
+                        "correct": 12,
                         "incorrect": 8
                     },
                     "Science & Nature": {
@@ -1184,8 +1252,8 @@
                         "incorrect": 0
                     },
                     "Entertainment: Video Games": {
-                        "correct": 14,
-                        "incorrect": 41
+                        "correct": 16,
+                        "incorrect": 42
                     },
                     "Vehicles": {
                         "correct": 0,
@@ -1193,7 +1261,7 @@
                     },
                     "Entertainment: Television": {
                         "correct": 4,
-                        "incorrect": 3
+                        "incorrect": 4
                     },
                     "Science: Gadgets": {
                         "correct": 2,
@@ -1224,7 +1292,7 @@
                         "incorrect": 1
                     },
                     "Entertainment: Japanese Anime & Manga": {
-                        "correct": 0,
+                        "correct": 1,
                         "incorrect": 7
                     },
                     "Science: Mathematics": {
@@ -1232,7 +1300,7 @@
                         "incorrect": 0
                     },
                     "Celebrities": {
-                        "correct": 2,
+                        "correct": 3,
                         "incorrect": 1
                     },
                     "Mythology": {
@@ -1248,12 +1316,12 @@
                         "incorrect": 0
                     }
                 },
-                "all_time_score": 118,
-                "current_incorrect_streak": 1,
-                "all_time_timestamp": "2026-08-01T16:09:42.447523+00:00",
-                "participation_streak": 1,
+                "all_time_score": 124,
+                "current_incorrect_streak": 0,
+                "all_time_timestamp": "2026-08-19T16:39:06.633217+00:00",
+                "participation_streak": 2,
                 "longest_participation_streak": 29,
-                "last_participation_date": "2026-08-04"
+                "last_participation_date": "2026-08-19"
             },
             "701303520682311730": {
                 "correct": 18,
@@ -1435,13 +1503,13 @@
                 "last_participation_date": "2026-07-23"
             },
             "756992075353948243": {
-                "correct": 126,
-                "incorrect": 191,
-                "current_streak": 1,
+                "correct": 133,
+                "incorrect": 202,
+                "current_streak": 0,
                 "longest_streak": 6,
-                "don_declined": 54,
-                "don_accepted": 72,
-                "don_successes": 35,
+                "don_declined": 57,
+                "don_accepted": 76,
+                "don_successes": 37,
                 "categories": {
                     "Science: Computers": {
                         "correct": 3,
@@ -1449,7 +1517,7 @@
                     },
                     "Entertainment: Comics": {
                         "correct": 1,
-                        "incorrect": 4
+                        "incorrect": 5
                     },
                     "General Knowledge": {
                         "correct": 2,
@@ -1457,11 +1525,11 @@
                     },
                     "Entertainment: Music": {
                         "correct": 14,
-                        "incorrect": 18
+                        "incorrect": 20
                     },
                     "History": {
-                        "correct": 7,
-                        "incorrect": 12
+                        "correct": 9,
+                        "incorrect": 15
                     },
                     "Science & Nature": {
                         "correct": 15,
@@ -1476,8 +1544,8 @@
                         "incorrect": 4
                     },
                     "Entertainment: Video Games": {
-                        "correct": 35,
-                        "incorrect": 37
+                        "correct": 38,
+                        "incorrect": 40
                     },
                     "Vehicles": {
                         "correct": 1,
@@ -1485,7 +1553,7 @@
                     },
                     "Entertainment: Television": {
                         "correct": 4,
-                        "incorrect": 7
+                        "incorrect": 8
                     },
                     "Science: Gadgets": {
                         "correct": 3,
@@ -1497,7 +1565,7 @@
                     },
                     "Entertainment: Film": {
                         "correct": 16,
-                        "incorrect": 17
+                        "incorrect": 18
                     },
                     "Geography": {
                         "correct": 2,
@@ -1516,7 +1584,7 @@
                         "incorrect": 2
                     },
                     "Entertainment: Japanese Anime & Manga": {
-                        "correct": 4,
+                        "correct": 5,
                         "incorrect": 7
                     },
                     "Science: Mathematics": {
@@ -1524,7 +1592,7 @@
                         "incorrect": 0
                     },
                     "Celebrities": {
-                        "correct": 1,
+                        "correct": 2,
                         "incorrect": 3
                     },
                     "Mythology": {
@@ -1540,12 +1608,12 @@
                         "incorrect": 1
                     }
                 },
-                "all_time_score": 124,
-                "current_incorrect_streak": 0,
-                "all_time_timestamp": "2026-08-03T10:15:54.065773+00:00",
-                "participation_streak": 153,
-                "longest_participation_streak": 153,
-                "last_participation_date": "2026-08-03"
+                "all_time_score": 131,
+                "current_incorrect_streak": 2,
+                "all_time_timestamp": "2026-08-19T10:03:07.443005+00:00",
+                "participation_streak": 171,
+                "longest_participation_streak": 171,
+                "last_participation_date": "2026-08-21"
             },
             "629824074268278795": {
                 "correct": 89,
@@ -1661,13 +1729,13 @@
                 "last_participation_date": "2026-07-21"
             },
             "343220200432467970": {
-                "correct": 148,
-                "incorrect": 166,
-                "current_streak": 1,
+                "correct": 158,
+                "incorrect": 173,
+                "current_streak": 0,
                 "longest_streak": 8,
                 "don_declined": 0,
-                "don_accepted": 141,
-                "don_successes": 77,
+                "don_accepted": 151,
+                "don_successes": 83,
                 "categories": {
                     "Science: Computers": {
                         "correct": 5,
@@ -1675,18 +1743,18 @@
                     },
                     "Entertainment: Comics": {
                         "correct": 1,
-                        "incorrect": 4
+                        "incorrect": 5
                     },
                     "General Knowledge": {
                         "correct": 8,
                         "incorrect": 8
                     },
                     "Entertainment: Music": {
-                        "correct": 15,
-                        "incorrect": 18
+                        "correct": 16,
+                        "incorrect": 19
                     },
                     "History": {
-                        "correct": 11,
+                        "correct": 16,
                         "incorrect": 8
                     },
                     "Science & Nature": {
@@ -1702,8 +1770,8 @@
                         "incorrect": 3
                     },
                     "Entertainment: Video Games": {
-                        "correct": 39,
-                        "incorrect": 34
+                        "correct": 41,
+                        "incorrect": 37
                     },
                     "Vehicles": {
                         "correct": 2,
@@ -1711,7 +1779,7 @@
                     },
                     "Entertainment: Television": {
                         "correct": 1,
-                        "incorrect": 9
+                        "incorrect": 10
                     },
                     "Science: Gadgets": {
                         "correct": 3,
@@ -1722,7 +1790,7 @@
                         "incorrect": 1
                     },
                     "Entertainment: Film": {
-                        "correct": 16,
+                        "correct": 17,
                         "incorrect": 17
                     },
                     "Geography": {
@@ -1742,7 +1810,7 @@
                         "incorrect": 2
                     },
                     "Entertainment: Japanese Anime & Manga": {
-                        "correct": 5,
+                        "correct": 6,
                         "incorrect": 6
                     },
                     "Science: Mathematics": {
@@ -1751,7 +1819,7 @@
                     },
                     "Celebrities": {
                         "correct": 2,
-                        "incorrect": 2
+                        "incorrect": 3
                     },
                     "Mythology": {
                         "correct": 2,
@@ -1766,16 +1834,16 @@
                         "incorrect": 1
                     }
                 },
-                "all_time_score": 163,
-                "current_incorrect_streak": 0,
-                "all_time_timestamp": "2026-08-03T16:16:42.628163+00:00",
-                "participation_streak": 40,
-                "longest_participation_streak": 40,
-                "last_participation_date": "2026-08-03"
+                "all_time_score": 175,
+                "current_incorrect_streak": 1,
+                "all_time_timestamp": "2026-08-20T20:07:20.021430+00:00",
+                "participation_streak": 12,
+                "longest_participation_streak": 42,
+                "last_participation_date": "2026-08-21"
             },
             "398789704239153152": {
                 "correct": 20,
-                "incorrect": 33,
+                "incorrect": 34,
                 "current_streak": 0,
                 "longest_streak": 4,
                 "don_declined": 6,
@@ -1800,7 +1868,7 @@
                     },
                     "History": {
                         "correct": 3,
-                        "incorrect": 0
+                        "incorrect": 1
                     },
                     "Entertainment: Japanese Anime & Manga": {
                         "correct": 3,
@@ -1844,11 +1912,11 @@
                     }
                 },
                 "all_time_score": 18,
-                "current_incorrect_streak": 5,
+                "current_incorrect_streak": 6,
                 "all_time_timestamp": "2026-05-14T16:22:37.339967+00:00",
                 "participation_streak": 1,
                 "longest_participation_streak": 9,
-                "last_participation_date": "2026-06-28"
+                "last_participation_date": "2026-08-08"
             },
             "1249162247675056239": {
                 "correct": 8,
@@ -1932,13 +2000,13 @@
                 "last_participation_date": "2026-04-23"
             },
             "439633684136460291": {
-                "correct": 72,
-                "incorrect": 109,
-                "current_streak": 0,
+                "correct": 74,
+                "incorrect": 111,
+                "current_streak": 2,
                 "longest_streak": 6,
                 "don_declined": 5,
-                "don_accepted": 67,
-                "don_successes": 23,
+                "don_accepted": 69,
+                "don_successes": 24,
                 "categories": {
                     "Science: Computers": {
                         "correct": 2,
@@ -1953,7 +2021,7 @@
                         "incorrect": 8
                     },
                     "Entertainment: Music": {
-                        "correct": 8,
+                        "correct": 9,
                         "incorrect": 12
                     },
                     "History": {
@@ -1974,7 +2042,7 @@
                     },
                     "Entertainment: Video Games": {
                         "correct": 17,
-                        "incorrect": 24
+                        "incorrect": 25
                     },
                     "Vehicles": {
                         "correct": 1,
@@ -1982,7 +2050,7 @@
                     },
                     "Entertainment: Television": {
                         "correct": 4,
-                        "incorrect": 2
+                        "incorrect": 3
                     },
                     "Science: Gadgets": {
                         "correct": 1,
@@ -2013,7 +2081,7 @@
                         "incorrect": 0
                     },
                     "Entertainment: Japanese Anime & Manga": {
-                        "correct": 0,
+                        "correct": 1,
                         "incorrect": 6
                     },
                     "Science: Mathematics": {
@@ -2037,12 +2105,12 @@
                         "incorrect": 1
                     }
                 },
-                "all_time_score": 51,
-                "current_incorrect_streak": 3,
-                "all_time_timestamp": "2026-07-27T05:49:05.571907+00:00",
-                "participation_streak": 2,
+                "all_time_score": 53,
+                "current_incorrect_streak": 0,
+                "all_time_timestamp": "2026-08-19T15:39:32.587476+00:00",
+                "participation_streak": 1,
                 "longest_participation_streak": 7,
-                "last_participation_date": "2026-08-01"
+                "last_participation_date": "2026-08-19"
             },
             "405132686852751380": {
                 "correct": 56,
@@ -2259,13 +2327,13 @@
                 "last_participation_date": "2026-06-23"
             },
             "560914996549386242": {
-                "correct": 153,
-                "incorrect": 162,
-                "current_streak": 1,
+                "correct": 162,
+                "incorrect": 170,
+                "current_streak": 0,
                 "longest_streak": 7,
-                "don_declined": 36,
-                "don_accepted": 117,
-                "don_successes": 65,
+                "don_declined": 38,
+                "don_accepted": 124,
+                "don_successes": 69,
                 "categories": {
                     "Science: Computers": {
                         "correct": 8,
@@ -2273,19 +2341,19 @@
                     },
                     "Entertainment: Comics": {
                         "correct": 1,
-                        "incorrect": 4
+                        "incorrect": 5
                     },
                     "General Knowledge": {
                         "correct": 5,
                         "incorrect": 10
                     },
                     "Entertainment: Music": {
-                        "correct": 16,
-                        "incorrect": 15
+                        "correct": 17,
+                        "incorrect": 16
                     },
                     "History": {
-                        "correct": 12,
-                        "incorrect": 7
+                        "correct": 16,
+                        "incorrect": 8
                     },
                     "Science & Nature": {
                         "correct": 19,
@@ -2300,8 +2368,8 @@
                         "incorrect": 1
                     },
                     "Entertainment: Video Games": {
-                        "correct": 33,
-                        "incorrect": 40
+                        "correct": 34,
+                        "incorrect": 44
                     },
                     "Vehicles": {
                         "correct": 2,
@@ -2309,7 +2377,7 @@
                     },
                     "Entertainment: Television": {
                         "correct": 5,
-                        "incorrect": 6
+                        "incorrect": 7
                     },
                     "Science: Gadgets": {
                         "correct": 3,
@@ -2320,7 +2388,7 @@
                         "incorrect": 2
                     },
                     "Entertainment: Film": {
-                        "correct": 13,
+                        "correct": 14,
                         "incorrect": 20
                     },
                     "Geography": {
@@ -2340,7 +2408,7 @@
                         "incorrect": 2
                     },
                     "Entertainment: Japanese Anime & Manga": {
-                        "correct": 0,
+                        "correct": 1,
                         "incorrect": 11
                     },
                     "Science: Mathematics": {
@@ -2348,7 +2416,7 @@
                         "incorrect": 0
                     },
                     "Celebrities": {
-                        "correct": 3,
+                        "correct": 4,
                         "incorrect": 1
                     },
                     "Mythology": {
@@ -2364,20 +2432,20 @@
                         "incorrect": 1
                     }
                 },
-                "all_time_score": 167,
-                "current_incorrect_streak": 0,
-                "all_time_timestamp": "2026-08-03T04:19:27.707373+00:00",
-                "participation_streak": 124,
-                "longest_participation_streak": 124,
-                "last_participation_date": "2026-08-03"
+                "all_time_score": 177,
+                "current_incorrect_streak": 1,
+                "all_time_timestamp": "2026-08-19T14:17:47.552384+00:00",
+                "participation_streak": 141,
+                "longest_participation_streak": 141,
+                "last_participation_date": "2026-08-20"
             },
             "314563456768409610": {
-                "correct": 68,
-                "incorrect": 94,
-                "current_streak": 1,
+                "correct": 70,
+                "incorrect": 98,
+                "current_streak": 2,
                 "longest_streak": 7,
-                "don_declined": 50,
-                "don_accepted": 17,
+                "don_declined": 51,
+                "don_accepted": 18,
                 "don_successes": 7,
                 "categories": {
                     "Science: Computers": {
@@ -2390,7 +2458,7 @@
                     },
                     "Entertainment: Music": {
                         "correct": 9,
-                        "incorrect": 10
+                        "incorrect": 11
                     },
                     "History": {
                         "correct": 4,
@@ -2405,8 +2473,8 @@
                         "incorrect": 1
                     },
                     "Entertainment: Video Games": {
-                        "correct": 10,
-                        "incorrect": 18
+                        "correct": 11,
+                        "incorrect": 19
                     },
                     "Entertainment: Film": {
                         "correct": 6,
@@ -2418,14 +2486,14 @@
                     },
                     "Entertainment: Comics": {
                         "correct": 1,
-                        "incorrect": 2
+                        "incorrect": 3
                     },
                     "Animals": {
                         "correct": 1,
                         "incorrect": 1
                     },
                     "Entertainment: Japanese Anime & Manga": {
-                        "correct": 1,
+                        "correct": 2,
                         "incorrect": 6
                     },
                     "Geography": {
@@ -2462,15 +2530,15 @@
                     },
                     "Celebrities": {
                         "correct": 1,
-                        "incorrect": 0
+                        "incorrect": 1
                     }
                 },
-                "all_time_score": 66,
+                "all_time_score": 67,
                 "current_incorrect_streak": 0,
-                "all_time_timestamp": "2026-08-02T10:27:14.304099+00:00",
-                "participation_streak": 1,
+                "all_time_timestamp": "2026-08-19T04:21:51.898747+00:00",
+                "participation_streak": 2,
                 "longest_participation_streak": 18,
-                "last_participation_date": "2026-08-02"
+                "last_participation_date": "2026-08-19"
             },
             "453901510968082432": {
                 "correct": 111,
@@ -2733,11 +2801,11 @@
                 "all_time_timestamp": "2026-01-26T13:40:08.629747+00:00"
             },
             "732384312200003605": {
-                "correct": 35,
-                "incorrect": 53,
-                "current_streak": 1,
+                "correct": 38,
+                "incorrect": 55,
+                "current_streak": 0,
                 "longest_streak": 3,
-                "don_declined": 26,
+                "don_declined": 29,
                 "don_accepted": 9,
                 "don_successes": 5,
                 "categories": {
@@ -2751,7 +2819,7 @@
                     },
                     "Entertainment: Music": {
                         "correct": 7,
-                        "incorrect": 7
+                        "incorrect": 8
                     },
                     "Science & Nature": {
                         "correct": 6,
@@ -2766,7 +2834,7 @@
                         "incorrect": 0
                     },
                     "Entertainment: Video Games": {
-                        "correct": 5,
+                        "correct": 7,
                         "incorrect": 11
                     },
                     "Vehicles": {
@@ -2786,7 +2854,7 @@
                         "incorrect": 2
                     },
                     "Entertainment: Japanese Anime & Manga": {
-                        "correct": 1,
+                        "correct": 2,
                         "incorrect": 0
                     },
                     "Entertainment: Cartoon & Animations": {
@@ -2807,7 +2875,7 @@
                     },
                     "History": {
                         "correct": 1,
-                        "incorrect": 0
+                        "incorrect": 1
                     },
                     "Art": {
                         "correct": 1,
@@ -2830,12 +2898,12 @@
                         "incorrect": 1
                     }
                 },
-                "all_time_score": 36,
-                "current_incorrect_streak": 0,
-                "all_time_timestamp": "2026-08-04T06:28:29.582937+00:00",
-                "participation_streak": 1,
+                "all_time_score": 39,
+                "current_incorrect_streak": 1,
+                "all_time_timestamp": "2026-08-20T00:26:38.500093+00:00",
+                "participation_streak": 2,
                 "longest_participation_streak": 4,
-                "last_participation_date": "2026-08-04"
+                "last_participation_date": "2026-08-21"
             },
             "881687925425864724": {
                 "correct": 19,
@@ -3255,21 +3323,21 @@
                 "last_participation_date": "2026-03-23"
             },
             "676148847147483137": {
-                "correct": 118,
-                "incorrect": 174,
+                "correct": 127,
+                "incorrect": 182,
                 "current_streak": 0,
                 "longest_streak": 6,
-                "don_declined": 25,
-                "don_accepted": 93,
-                "don_successes": 43,
+                "don_declined": 26,
+                "don_accepted": 101,
+                "don_successes": 48,
                 "categories": {
                     "General Knowledge": {
                         "correct": 5,
                         "incorrect": 10
                     },
                     "Entertainment: Video Games": {
-                        "correct": 22,
-                        "incorrect": 45
+                        "correct": 26,
+                        "incorrect": 47
                     },
                     "Vehicles": {
                         "correct": 0,
@@ -3277,15 +3345,15 @@
                     },
                     "Entertainment: Music": {
                         "correct": 16,
-                        "incorrect": 12
+                        "incorrect": 13
                     },
                     "Science: Gadgets": {
                         "correct": 3,
                         "incorrect": 3
                     },
                     "History": {
-                        "correct": 7,
-                        "incorrect": 10
+                        "correct": 10,
+                        "incorrect": 12
                     },
                     "Geography": {
                         "correct": 4,
@@ -3293,7 +3361,7 @@
                     },
                     "Entertainment: Film": {
                         "correct": 19,
-                        "incorrect": 12
+                        "incorrect": 13
                     },
                     "Science & Nature": {
                         "correct": 10,
@@ -3309,14 +3377,14 @@
                     },
                     "Entertainment: Comics": {
                         "correct": 1,
-                        "incorrect": 3
+                        "incorrect": 4
                     },
                     "Animals": {
                         "correct": 1,
                         "incorrect": 2
                     },
                     "Entertainment: Japanese Anime & Manga": {
-                        "correct": 4,
+                        "correct": 5,
                         "incorrect": 7
                     },
                     "Science: Mathematics": {
@@ -3328,7 +3396,7 @@
                         "incorrect": 3
                     },
                     "Celebrities": {
-                        "correct": 2,
+                        "correct": 3,
                         "incorrect": 2
                     },
                     "Mythology": {
@@ -3341,7 +3409,7 @@
                     },
                     "Entertainment: Television": {
                         "correct": 3,
-                        "incorrect": 7
+                        "incorrect": 8
                     },
                     "Art": {
                         "correct": 1,
@@ -3360,33 +3428,33 @@
                         "incorrect": 1
                     }
                 },
-                "all_time_score": 111,
-                "current_incorrect_streak": 1,
-                "all_time_timestamp": "2026-08-03T04:11:56.185299+00:00",
-                "participation_streak": 28,
+                "all_time_score": 122,
+                "current_incorrect_streak": 2,
+                "all_time_timestamp": "2026-08-19T12:03:12.895020+00:00",
+                "participation_streak": 45,
                 "longest_participation_streak": 98,
-                "last_participation_date": "2026-08-04"
+                "last_participation_date": "2026-08-21"
             },
             "848050994553028608": {
-                "correct": 131,
-                "incorrect": 165,
-                "current_streak": 2,
+                "correct": 138,
+                "incorrect": 172,
+                "current_streak": 1,
                 "longest_streak": 9,
                 "don_declined": 15,
-                "don_accepted": 114,
-                "don_successes": 51,
+                "don_accepted": 121,
+                "don_successes": 54,
                 "categories": {
                     "General Knowledge": {
                         "correct": 9,
                         "incorrect": 7
                     },
                     "Entertainment: Music": {
-                        "correct": 12,
+                        "correct": 13,
                         "incorrect": 19
                     },
                     "History": {
-                        "correct": 7,
-                        "incorrect": 11
+                        "correct": 8,
+                        "incorrect": 14
                     },
                     "Science & Nature": {
                         "correct": 21,
@@ -3401,15 +3469,15 @@
                         "incorrect": 2
                     },
                     "Entertainment: Video Games": {
-                        "correct": 30,
-                        "incorrect": 37
+                        "correct": 32,
+                        "incorrect": 40
                     },
                     "Vehicles": {
                         "correct": 1,
                         "incorrect": 2
                     },
                     "Entertainment: Television": {
-                        "correct": 2,
+                        "correct": 3,
                         "incorrect": 7
                     },
                     "Science: Gadgets": {
@@ -3442,14 +3510,14 @@
                     },
                     "Entertainment: Comics": {
                         "correct": 3,
-                        "incorrect": 1
+                        "incorrect": 2
                     },
                     "Animals": {
                         "correct": 2,
                         "incorrect": 1
                     },
                     "Entertainment: Japanese Anime & Manga": {
-                        "correct": 2,
+                        "correct": 3,
                         "incorrect": 7
                     },
                     "Science: Mathematics": {
@@ -3457,7 +3525,7 @@
                         "incorrect": 0
                     },
                     "Celebrities": {
-                        "correct": 0,
+                        "correct": 1,
                         "incorrect": 3
                     },
                     "Mythology": {
@@ -3473,16 +3541,16 @@
                         "incorrect": 1
                     }
                 },
-                "all_time_score": 121,
+                "all_time_score": 127,
                 "current_incorrect_streak": 0,
-                "all_time_timestamp": "2026-08-03T06:07:10.191740+00:00",
-                "participation_streak": 1,
+                "all_time_timestamp": "2026-08-19T05:09:09.416495+00:00",
+                "participation_streak": 3,
                 "longest_participation_streak": 59,
-                "last_participation_date": "2026-08-03"
+                "last_participation_date": "2026-08-19"
             },
             "728536500198703135": {
                 "correct": 14,
-                "incorrect": 9,
+                "incorrect": 10,
                 "current_streak": 0,
                 "longest_streak": 5,
                 "don_declined": 6,
@@ -3544,14 +3612,18 @@
                     "Art": {
                         "correct": 1,
                         "incorrect": 0
+                    },
+                    "Entertainment: Comics": {
+                        "correct": 0,
+                        "incorrect": 1
                     }
                 },
                 "all_time_score": 14,
-                "current_incorrect_streak": 1,
+                "current_incorrect_streak": 2,
                 "all_time_timestamp": "2026-02-26T22:55:29.932136+00:00",
                 "participation_streak": 1,
                 "longest_participation_streak": 1,
-                "last_participation_date": "2026-04-25"
+                "last_participation_date": "2026-08-14"
             },
             "298607678073208832": {
                 "correct": 91,
@@ -3744,13 +3816,13 @@
                 "current_incorrect_streak": 0
             },
             "975661536376946698": {
-                "correct": 2,
+                "correct": 3,
                 "incorrect": 2,
-                "current_streak": 1,
-                "longest_streak": 1,
+                "current_streak": 2,
+                "longest_streak": 2,
                 "don_declined": 0,
-                "don_accepted": 2,
-                "don_successes": 0,
+                "don_accepted": 3,
+                "don_successes": 1,
                 "categories": {
                     "Entertainment: Music": {
                         "correct": 0,
@@ -3767,14 +3839,18 @@
                     "Science & Nature": {
                         "correct": 1,
                         "incorrect": 0
+                    },
+                    "History": {
+                        "correct": 1,
+                        "incorrect": 0
                     }
                 },
-                "all_time_score": 0,
+                "all_time_score": 2,
                 "current_incorrect_streak": 0,
-                "all_time_timestamp": "2026-05-19T18:24:06.453342+00:00",
+                "all_time_timestamp": "2026-08-15T03:55:29.905687+00:00",
                 "participation_streak": 1,
                 "longest_participation_streak": 1,
-                "last_participation_date": "2026-05-19"
+                "last_participation_date": "2026-08-15"
             },
             "325614501254791168": {
                 "correct": 58,
@@ -4215,11 +4291,11 @@
                 "all_time_timestamp": null
             },
             "767189722723909642": {
-                "correct": 62,
-                "incorrect": 117,
-                "current_streak": 0,
+                "correct": 66,
+                "incorrect": 123,
+                "current_streak": 2,
                 "longest_streak": 4,
-                "don_declined": 44,
+                "don_declined": 48,
                 "don_accepted": 15,
                 "don_successes": 5,
                 "categories": {
@@ -4229,7 +4305,7 @@
                     },
                     "Entertainment: Video Games": {
                         "correct": 11,
-                        "incorrect": 31
+                        "incorrect": 34
                     },
                     "Vehicles": {
                         "correct": 1,
@@ -4256,12 +4332,12 @@
                         "incorrect": 6
                     },
                     "Entertainment: Music": {
-                        "correct": 5,
+                        "correct": 6,
                         "incorrect": 17
                     },
                     "History": {
-                        "correct": 1,
-                        "incorrect": 5
+                        "correct": 3,
+                        "incorrect": 6
                     },
                     "Geography": {
                         "correct": 1,
@@ -4273,7 +4349,7 @@
                     },
                     "Entertainment: Comics": {
                         "correct": 1,
-                        "incorrect": 1
+                        "incorrect": 2
                     },
                     "Animals": {
                         "correct": 0,
@@ -4285,10 +4361,10 @@
                     },
                     "Entertainment: Film": {
                         "correct": 8,
-                        "incorrect": 8
+                        "incorrect": 9
                     },
                     "Entertainment: Japanese Anime & Manga": {
-                        "correct": 0,
+                        "correct": 1,
                         "incorrect": 4
                     },
                     "Politics": {
@@ -4304,12 +4380,12 @@
                         "incorrect": 4
                     }
                 },
-                "all_time_score": 57,
-                "current_incorrect_streak": 3,
-                "all_time_timestamp": "2026-07-28T23:37:19.860402+00:00",
-                "participation_streak": 1,
+                "all_time_score": 61,
+                "current_incorrect_streak": 0,
+                "all_time_timestamp": "2026-08-20T04:09:08.124512+00:00",
+                "participation_streak": 3,
                 "longest_participation_streak": 29,
-                "last_participation_date": "2026-08-04"
+                "last_participation_date": "2026-08-20"
             },
             "555375585774534677": {
                 "correct": 2,
@@ -4466,17 +4542,17 @@
                 "all_time_score": 1
             },
             "350399886950268941": {
-                "correct": 122,
-                "incorrect": 169,
+                "correct": 128,
+                "incorrect": 179,
                 "current_streak": 0,
                 "longest_streak": 6,
-                "don_declined": 70,
-                "don_accepted": 51,
+                "don_declined": 75,
+                "don_accepted": 52,
                 "don_successes": 30,
                 "categories": {
                     "Entertainment: Video Games": {
                         "correct": 18,
-                        "incorrect": 47
+                        "incorrect": 52
                     },
                     "Vehicles": {
                         "correct": 0,
@@ -4487,19 +4563,19 @@
                         "incorrect": 2
                     },
                     "Entertainment: Music": {
-                        "correct": 16,
-                        "incorrect": 15
+                        "correct": 17,
+                        "incorrect": 16
                     },
                     "Science: Gadgets": {
                         "correct": 3,
                         "incorrect": 3
                     },
                     "History": {
-                        "correct": 9,
-                        "incorrect": 9
+                        "correct": 12,
+                        "incorrect": 10
                     },
                     "Entertainment: Film": {
-                        "correct": 20,
+                        "correct": 21,
                         "incorrect": 12
                     },
                     "Science: Computers": {
@@ -4528,14 +4604,14 @@
                     },
                     "Entertainment: Comics": {
                         "correct": 1,
-                        "incorrect": 3
+                        "incorrect": 4
                     },
                     "Animals": {
                         "correct": 1,
                         "incorrect": 2
                     },
                     "Entertainment: Japanese Anime & Manga": {
-                        "correct": 2,
+                        "correct": 3,
                         "incorrect": 7
                     },
                     "Science: Mathematics": {
@@ -4548,7 +4624,7 @@
                     },
                     "Celebrities": {
                         "correct": 2,
-                        "incorrect": 2
+                        "incorrect": 3
                     },
                     "Mythology": {
                         "correct": 2,
@@ -4560,7 +4636,7 @@
                     },
                     "Entertainment: Television": {
                         "correct": 3,
-                        "incorrect": 7
+                        "incorrect": 8
                     },
                     "Art": {
                         "correct": 1,
@@ -4571,12 +4647,12 @@
                         "incorrect": 1
                     }
                 },
-                "all_time_score": 134,
-                "current_incorrect_streak": 1,
-                "all_time_timestamp": "2026-08-02T05:04:55.696888+00:00",
-                "participation_streak": 6,
+                "all_time_score": 139,
+                "current_incorrect_streak": 2,
+                "all_time_timestamp": "2026-08-19T13:37:53.137775+00:00",
+                "participation_streak": 4,
                 "longest_participation_streak": 55,
-                "last_participation_date": "2026-08-03"
+                "last_participation_date": "2026-08-21"
             },
             "824726854316589097": {
                 "correct": 0,
@@ -5181,13 +5257,13 @@
                 "last_participation_date": "2026-04-21"
             },
             "316282752515440640": {
-                "correct": 97,
-                "incorrect": 135,
-                "current_streak": 0,
+                "correct": 100,
+                "incorrect": 136,
+                "current_streak": 2,
                 "longest_streak": 5,
                 "don_declined": 10,
-                "don_accepted": 86,
-                "don_successes": 33,
+                "don_accepted": 89,
+                "don_successes": 35,
                 "categories": {
                     "Entertainment: Music": {
                         "correct": 13,
@@ -5202,7 +5278,7 @@
                         "incorrect": 1
                     },
                     "Entertainment: Japanese Anime & Manga": {
-                        "correct": 2,
+                        "correct": 3,
                         "incorrect": 9
                     },
                     "General Knowledge": {
@@ -5211,7 +5287,7 @@
                     },
                     "Entertainment: Video Games": {
                         "correct": 18,
-                        "incorrect": 30
+                        "incorrect": 31
                     },
                     "Entertainment: Film": {
                         "correct": 9,
@@ -5242,11 +5318,11 @@
                         "incorrect": 15
                     },
                     "Celebrities": {
-                        "correct": 2,
+                        "correct": 3,
                         "incorrect": 0
                     },
                     "History": {
-                        "correct": 5,
+                        "correct": 6,
                         "incorrect": 7
                     },
                     "Entertainment: Comics": {
@@ -5282,12 +5358,12 @@
                         "incorrect": 0
                     }
                 },
-                "all_time_score": 78,
-                "current_incorrect_streak": 6,
-                "all_time_timestamp": "2026-07-10T17:15:17.493285+00:00",
-                "participation_streak": 1,
+                "all_time_score": 82,
+                "current_incorrect_streak": 0,
+                "all_time_timestamp": "2026-08-20T11:58:20.528968+00:00",
+                "participation_streak": 2,
                 "longest_participation_streak": 81,
-                "last_participation_date": "2026-08-04"
+                "last_participation_date": "2026-08-20"
             },
             "1400285243147288636": {
                 "correct": 0,
@@ -7493,21 +7569,21 @@
                 "last_participation_date": "2026-04-06"
             },
             "462681318577405952": {
-                "correct": 14,
-                "incorrect": 31,
-                "current_streak": 0,
+                "correct": 17,
+                "incorrect": 41,
+                "current_streak": 1,
                 "longest_streak": 4,
-                "don_declined": 12,
+                "don_declined": 15,
                 "don_accepted": 2,
                 "don_successes": 0,
                 "categories": {
                     "Entertainment: Television": {
                         "correct": 2,
-                        "incorrect": 5
+                        "incorrect": 6
                     },
                     "Entertainment: Video Games": {
-                        "correct": 6,
-                        "incorrect": 6
+                        "correct": 7,
+                        "incorrect": 9
                     },
                     "Entertainment: Books": {
                         "correct": 0,
@@ -7523,18 +7599,18 @@
                     },
                     "History": {
                         "correct": 0,
-                        "incorrect": 1
+                        "incorrect": 4
                     },
                     "Science: Computers": {
                         "correct": 2,
                         "incorrect": 4
                     },
                     "Entertainment: Music": {
-                        "correct": 0,
-                        "incorrect": 2
+                        "correct": 1,
+                        "incorrect": 3
                     },
                     "Entertainment: Japanese Anime & Manga": {
-                        "correct": 0,
+                        "correct": 1,
                         "incorrect": 3
                     },
                     "Entertainment: Board Games": {
@@ -7555,15 +7631,19 @@
                     },
                     "Celebrities": {
                         "correct": 1,
+                        "incorrect": 2
+                    },
+                    "Entertainment: Comics": {
+                        "correct": 0,
                         "incorrect": 1
                     }
                 },
-                "all_time_score": 12,
-                "current_incorrect_streak": 1,
-                "all_time_timestamp": "2026-08-02T23:07:34.064104+00:00",
-                "participation_streak": 26,
-                "longest_participation_streak": 26,
-                "last_participation_date": "2026-08-03"
+                "all_time_score": 15,
+                "current_incorrect_streak": 0,
+                "all_time_timestamp": "2026-08-19T07:24:26.509766+00:00",
+                "participation_streak": 1,
+                "longest_participation_streak": 38,
+                "last_participation_date": "2026-08-19"
             },
             "1301801460559908955": {
                 "correct": 2,
@@ -8059,21 +8139,21 @@
                 "last_participation_date": "2026-06-11"
             },
             "889334500977426453": {
-                "correct": 2,
-                "incorrect": 3,
-                "current_streak": 0,
-                "longest_streak": 2,
-                "don_declined": 0,
-                "don_accepted": 2,
+                "correct": 6,
+                "incorrect": 7,
+                "current_streak": 3,
+                "longest_streak": 3,
+                "don_declined": 2,
+                "don_accepted": 4,
                 "don_successes": 0,
                 "categories": {
                     "Entertainment: Japanese Anime & Manga": {
-                        "correct": 1,
+                        "correct": 2,
                         "incorrect": 0
                     },
                     "Entertainment: Music": {
-                        "correct": 1,
-                        "incorrect": 0
+                        "correct": 2,
+                        "incorrect": 1
                     },
                     "Entertainment: Musicals & Theatres": {
                         "correct": 0,
@@ -8082,14 +8162,30 @@
                     "Sports": {
                         "correct": 0,
                         "incorrect": 2
+                    },
+                    "Celebrities": {
+                        "correct": 0,
+                        "incorrect": 1
+                    },
+                    "Entertainment: Television": {
+                        "correct": 0,
+                        "incorrect": 1
+                    },
+                    "Entertainment: Video Games": {
+                        "correct": 1,
+                        "incorrect": 1
+                    },
+                    "History": {
+                        "correct": 1,
+                        "incorrect": 0
                     }
                 },
-                "all_time_score": 0,
-                "current_incorrect_streak": 3,
-                "all_time_timestamp": "2026-05-31T04:12:39.569119+00:00",
-                "participation_streak": 1,
-                "longest_participation_streak": 1,
-                "last_participation_date": "2026-07-27"
+                "all_time_score": 2,
+                "current_incorrect_streak": 0,
+                "all_time_timestamp": "2026-08-20T23:09:19.150454+00:00",
+                "participation_streak": 3,
+                "longest_participation_streak": 3,
+                "last_participation_date": "2026-08-20"
             },
             "401461575426375682": {
                 "correct": 0,
@@ -8176,25 +8272,25 @@
                 "last_participation_date": "2026-05-09"
             },
             "395034720607666177": {
-                "correct": 6,
-                "incorrect": 4,
-                "current_streak": 2,
-                "longest_streak": 3,
-                "don_declined": 2,
-                "don_accepted": 4,
-                "don_successes": 2,
+                "correct": 15,
+                "incorrect": 9,
+                "current_streak": 1,
+                "longest_streak": 5,
+                "don_declined": 5,
+                "don_accepted": 10,
+                "don_successes": 6,
                 "categories": {
                     "Entertainment: Books": {
                         "correct": 1,
                         "incorrect": 1
                     },
                     "History": {
-                        "correct": 1,
-                        "incorrect": 0
+                        "correct": 5,
+                        "incorrect": 1
                     },
                     "Entertainment: Video Games": {
-                        "correct": 3,
-                        "incorrect": 1
+                        "correct": 5,
+                        "incorrect": 3
                     },
                     "General Knowledge": {
                         "correct": 0,
@@ -8203,14 +8299,30 @@
                     "Science: Computers": {
                         "correct": 1,
                         "incorrect": 1
+                    },
+                    "Entertainment: Music": {
+                        "correct": 1,
+                        "incorrect": 1
+                    },
+                    "Entertainment: Television": {
+                        "correct": 1,
+                        "incorrect": 0
+                    },
+                    "Entertainment: Comics": {
+                        "correct": 0,
+                        "incorrect": 1
+                    },
+                    "Entertainment: Japanese Anime & Manga": {
+                        "correct": 1,
+                        "incorrect": 0
                     }
                 },
-                "all_time_score": 6,
+                "all_time_score": 17,
                 "current_incorrect_streak": 0,
-                "all_time_timestamp": "2026-08-03T23:44:55.908904+00:00",
-                "participation_streak": 1,
-                "longest_participation_streak": 2,
-                "last_participation_date": "2026-08-03"
+                "all_time_timestamp": "2026-08-21T08:55:04.867845+00:00",
+                "participation_streak": 4,
+                "longest_participation_streak": 6,
+                "last_participation_date": "2026-08-21"
             },
             "1504143080666960096": {
                 "correct": 1,
@@ -8430,7 +8542,7 @@
             },
             "883169665961041981": {
                 "correct": 6,
-                "incorrect": 10,
+                "incorrect": 11,
                 "current_streak": 0,
                 "longest_streak": 2,
                 "don_declined": 6,
@@ -8464,14 +8576,18 @@
                     "Entertainment: Film": {
                         "correct": 0,
                         "incorrect": 3
+                    },
+                    "Entertainment: Japanese Anime & Manga": {
+                        "correct": 0,
+                        "incorrect": 1
                     }
                 },
                 "all_time_score": 6,
-                "current_incorrect_streak": 5,
+                "current_incorrect_streak": 6,
                 "all_time_timestamp": "2026-06-11T18:10:49.937275+00:00",
                 "participation_streak": 1,
                 "longest_participation_streak": 7,
-                "last_participation_date": "2026-07-05"
+                "last_participation_date": "2026-08-19"
             },
             "1103502008645857290": {
                 "correct": 5,
@@ -9286,185 +9402,209 @@
                 "participation_streak": 1,
                 "longest_participation_streak": 1,
                 "last_participation_date": "2026-08-04"
+            },
+            "1474968469694058518": {
+                "correct": 0,
+                "incorrect": 1,
+                "current_streak": 0,
+                "longest_streak": 0,
+                "don_declined": 0,
+                "don_accepted": 0,
+                "don_successes": 0,
+                "categories": {
+                    "Celebrities": {
+                        "correct": 0,
+                        "incorrect": 1
+                    }
+                },
+                "all_time_score": 0,
+                "current_incorrect_streak": 1,
+                "all_time_timestamp": null,
+                "participation_streak": 1,
+                "longest_participation_streak": 1,
+                "last_participation_date": "2026-08-05"
+            },
+            "1219056290274214008": {
+                "correct": 0,
+                "incorrect": 2,
+                "current_streak": 0,
+                "longest_streak": 0,
+                "don_declined": 0,
+                "don_accepted": 0,
+                "don_successes": 0,
+                "categories": {
+                    "Entertainment: Video Games": {
+                        "correct": 0,
+                        "incorrect": 1
+                    },
+                    "Entertainment: Television": {
+                        "correct": 0,
+                        "incorrect": 1
+                    }
+                },
+                "all_time_score": 0,
+                "current_incorrect_streak": 2,
+                "all_time_timestamp": null,
+                "participation_streak": 1,
+                "longest_participation_streak": 1,
+                "last_participation_date": "2026-08-07"
+            },
+            "485105048930615307": {
+                "correct": 6,
+                "incorrect": 5,
+                "current_streak": 1,
+                "longest_streak": 2,
+                "don_declined": 0,
+                "don_accepted": 6,
+                "don_successes": 5,
+                "categories": {
+                    "Entertainment: Video Games": {
+                        "correct": 2,
+                        "incorrect": 2
+                    },
+                    "Entertainment: Music": {
+                        "correct": 0,
+                        "incorrect": 1
+                    },
+                    "History": {
+                        "correct": 2,
+                        "incorrect": 1
+                    },
+                    "Entertainment: Comics": {
+                        "correct": 1,
+                        "incorrect": 0
+                    },
+                    "Entertainment: Film": {
+                        "correct": 0,
+                        "incorrect": 1
+                    },
+                    "Entertainment: Japanese Anime & Manga": {
+                        "correct": 1,
+                        "incorrect": 0
+                    }
+                },
+                "all_time_score": 10,
+                "current_incorrect_streak": 0,
+                "all_time_timestamp": "2026-08-21T04:57:28.259721+00:00",
+                "participation_streak": 7,
+                "longest_participation_streak": 7,
+                "last_participation_date": "2026-08-21"
+            },
+            "441547685020041236": {
+                "correct": 1,
+                "incorrect": 1,
+                "current_streak": 0,
+                "longest_streak": 1,
+                "don_declined": 0,
+                "don_accepted": 1,
+                "don_successes": 0,
+                "categories": {
+                    "History": {
+                        "correct": 1,
+                        "incorrect": 0
+                    },
+                    "Entertainment: Video Games": {
+                        "correct": 0,
+                        "incorrect": 1
+                    }
+                },
+                "all_time_score": 0,
+                "current_incorrect_streak": 1,
+                "all_time_timestamp": "2026-08-17T12:34:39.984411+00:00",
+                "participation_streak": 2,
+                "longest_participation_streak": 2,
+                "last_participation_date": "2026-08-18"
+            },
+            "576807190866952193": {
+                "correct": 0,
+                "incorrect": 1,
+                "current_streak": 0,
+                "longest_streak": 0,
+                "don_declined": 0,
+                "don_accepted": 0,
+                "don_successes": 0,
+                "categories": {
+                    "Entertainment: Video Games": {
+                        "correct": 0,
+                        "incorrect": 1
+                    }
+                },
+                "all_time_score": 0,
+                "current_incorrect_streak": 1,
+                "all_time_timestamp": null,
+                "participation_streak": 1,
+                "longest_participation_streak": 1,
+                "last_participation_date": "2026-08-18"
+            },
+            "691031987112116236": {
+                "correct": 1,
+                "incorrect": 1,
+                "current_streak": 1,
+                "longest_streak": 1,
+                "don_declined": 0,
+                "don_accepted": 1,
+                "don_successes": 1,
+                "categories": {
+                    "Entertainment: Video Games": {
+                        "correct": 0,
+                        "incorrect": 1
+                    },
+                    "Entertainment: Japanese Anime & Manga": {
+                        "correct": 1,
+                        "incorrect": 0
+                    }
+                },
+                "all_time_score": 2,
+                "current_incorrect_streak": 0,
+                "all_time_timestamp": "2026-08-20T03:39:56.749529+00:00",
+                "participation_streak": 1,
+                "longest_participation_streak": 1,
+                "last_participation_date": "2026-08-20"
+            },
+            "1160314554014765228": {
+                "correct": 1,
+                "incorrect": 0,
+                "current_streak": 1,
+                "longest_streak": 1,
+                "don_declined": 0,
+                "don_accepted": 1,
+                "don_successes": 0,
+                "categories": {
+                    "Entertainment: Japanese Anime & Manga": {
+                        "correct": 1,
+                        "incorrect": 0
+                    }
+                },
+                "all_time_score": 0,
+                "current_incorrect_streak": 0,
+                "all_time_timestamp": "2026-08-20T01:55:04.139369+00:00",
+                "participation_streak": 1,
+                "longest_participation_streak": 1,
+                "last_participation_date": "2026-08-20"
+            },
+            "1536360650924630076": {
+                "correct": 0,
+                "incorrect": 1,
+                "current_streak": 0,
+                "longest_streak": 0,
+                "don_declined": 0,
+                "don_accepted": 0,
+                "don_successes": 0,
+                "categories": {
+                    "Entertainment: Video Games": {
+                        "correct": 0,
+                        "incorrect": 1
+                    }
+                },
+                "all_time_score": 0,
+                "current_incorrect_streak": 1,
+                "all_time_timestamp": null,
+                "participation_streak": 1,
+                "longest_participation_streak": 1,
+                "last_participation_date": "2026-08-21"
             }
         },
         "question_cache": [
-            {
-                "question": "On the NBC show Community what was Star Burns' real name?",
-                "answers": [
-                    "Todd",
-                    "Neal",
-                    "Grimus",
-                    "Alex"
-                ],
-                "correct": "Alex",
-                "category": "Entertainment: Television"
-            },
-            {
-                "question": "Which of these is NOT the name of an album released by Miami-based producer DJ Khaled?",
-                "answers": [
-                    "Major Key",
-                    "Suffering From Success",
-                    "I Changed A Lot",
-                    "Don't Ever Play Yourself"
-                ],
-                "correct": "Don't Ever Play Yourself",
-                "category": "Entertainment: Music"
-            },
-            {
-                "question": "The 1985 Toyota Corolla \"AE86\" was the hero car for what anime? ",
-                "answers": [
-                    "Wangan Midnight",
-                    "Ghost MF",
-                    "Ex Driver",
-                    "Initial D"
-                ],
-                "correct": "Initial D",
-                "category": "Entertainment: Television"
-            },
-            {
-                "question": "What was the original name of  \"Minecraft\"?",
-                "answers": [
-                    "Minecraft: Order of the Stone",
-                    "Dig And Build",
-                    "Infiniminer",
-                    "Cave Game"
-                ],
-                "correct": "Cave Game",
-                "category": "Entertainment: Video Games"
-            },
-            {
-                "question": "Which actress's real name was Frances Ethel Gumm?",
-                "answers": [
-                    "Doris Day",
-                    "Julie Andrews",
-                    "Marilyn Monroe",
-                    "Judy Garland"
-                ],
-                "correct": "Judy Garland",
-                "category": "Celebrities"
-            },
-            {
-                "question": "Which of these actors/actresses is NOT a part of the cast for the 2016 movie \"Suicide Squad\"?",
-                "answers": [
-                    "Jared Leto",
-                    "Will Smith",
-                    "Margot Robbie",
-                    "Scarlett Johansson"
-                ],
-                "correct": "Scarlett Johansson",
-                "category": "Entertainment: Film"
-            },
-            {
-                "question": "Which member of the English band \"The xx\" released their solo album \"In Colour\" in 2015?",
-                "answers": [
-                    "Romy Madley Croft",
-                    "Oliver Sim",
-                    "Baria Qureshi",
-                    "Jamie xx"
-                ],
-                "correct": "Jamie xx",
-                "category": "Entertainment: Music"
-            },
-            {
-                "question": "In the game series \"The Legend of Zelda\", what was the first 3D game?",
-                "answers": [
-                    "Majora's Mask",
-                    "A Link to the Past",
-                    "The Wind Waker",
-                    "Ocarina of Time"
-                ],
-                "correct": "Ocarina of Time",
-                "category": "Entertainment: Video Games"
-            },
-            {
-                "question": "In \"Homestuck\" the \"Kingdom of Darkness\" is also known as?",
-                "answers": [
-                    "Skaia",
-                    "Prospit",
-                    "The Medium",
-                    "Derse"
-                ],
-                "correct": "Derse",
-                "category": "Entertainment: Comics"
-            },
-            {
-                "question": "In the game \"Red Dead Redemption\", what is the name of John Marston's dog?",
-                "answers": [
-                    "Rutus",
-                    "Finn",
-                    "Apollo",
-                    "Rufus"
-                ],
-                "correct": "Rufus",
-                "category": "Entertainment: Video Games"
-            },
-            {
-                "question": "Which actor auditioned for the role of Luke Skywalker?",
-                "answers": [
-                    "Christopher Lambert",
-                    "Laurence Fishburne",
-                    "James Remar",
-                    "Kurt Russell"
-                ],
-                "correct": "Kurt Russell",
-                "category": "Entertainment: Film"
-            },
-            {
-                "question": "In the Black Mirror episode \"Bandersnatch\", PAC-MAN stands for:",
-                "answers": [
-                    "Postgraduate Aplications Centre Man",
-                    "Political Action Committee Man",
-                    "Physics & Astronomy Classification Man",
-                    "Program And Control Man"
-                ],
-                "correct": "Program And Control Man",
-                "category": "Entertainment: Television"
-            },
-            {
-                "question": "Which of these companies does NOT manufacture motorcycles?",
-                "answers": [
-                    "Honda",
-                    "Kawasaki",
-                    "Yamaha",
-                    "Toyota"
-                ],
-                "correct": "Toyota",
-                "category": "Vehicles"
-            },
-            {
-                "question": "Which of the following is not the name of a \"Bond Girl\"? ",
-                "answers": [
-                    "Pam Bouvier",
-                    "Mary Goodnight",
-                    "Wai Lin",
-                    "Vanessa Kensington"
-                ],
-                "correct": "Vanessa Kensington",
-                "category": "Entertainment: Film"
-            },
-            {
-                "question": "Who is the main character in One Piece?",
-                "answers": [
-                    "Shanks",
-                    "Zoro",
-                    "Smoker",
-                    "Luffy"
-                ],
-                "correct": "Luffy",
-                "category": "Entertainment: Japanese Anime & Manga"
-            },
-            {
-                "question": "Who plays Jack Burton in the movie \"Big Trouble in Little China?\"",
-                "answers": [
-                    "Patrick Swayze",
-                    "John Cusack",
-                    "Harrison Ford",
-                    "Kurt Russell"
-                ],
-                "correct": "Kurt Russell",
-                "category": "Entertainment: Film"
-            },
             {
                 "question": "In \"One Piece,\" what color is Tony Tony Chopper's nose?",
                 "answers": [
@@ -9477,292 +9617,436 @@
                 "category": "Entertainment: Japanese Anime & Manga"
             },
             {
-                "question": "The Rio 2016 Summer Olympics held it's closing ceremony on what date?",
+                "question": "In what year was the card game Magic: the Gathering first introduced?",
                 "answers": [
-                    "August 23",
-                    "August 19",
-                    "August 17",
-                    "August 21"
+                    "1987",
+                    "1998",
+                    "2003",
+                    "1993"
                 ],
-                "correct": "August 21",
-                "category": "Sports"
+                "correct": "1993",
+                "category": "Entertainment: Board Games"
             },
             {
-                "question": "In \"Earthbound\", how does one enter \"Master Belch's\" factory?",
+                "question": "Who is the creator of Touhou project?",
                 "answers": [
-                    "Enter the password \"Fly Honey\"",
-                    "Enter the password \"Master Belch Rules\"",
-                    "Enter the password \"Mr Saturn Drools\"",
-                    "Wait 3 Minutes"
+                    "Jun",
+                    "Twilight Frontier",
+                    "Tasofro",
+                    "Zun"
                 ],
-                "correct": "Wait 3 Minutes",
+                "correct": "Zun",
                 "category": "Entertainment: Video Games"
+            },
+            {
+                "question": "How many seasons did the Sci-Fi television show \"Stargate Atlantis\" have?",
+                "answers": [
+                    "10",
+                    "2",
+                    "7",
+                    "5"
+                ],
+                "correct": "5",
+                "category": "Entertainment: Television"
+            },
+            {
+                "question": "What was the name of Sonic the Hedgehog's original human girlfriend?",
+                "answers": [
+                    "Celeste",
+                    "Sierra",
+                    "Nina",
+                    "Madonna"
+                ],
+                "correct": "Madonna",
+                "category": "Entertainment: Video Games"
+            },
+            {
+                "question": "In the PAYDAY series, where did Dallas start his criminal career?",
+                "answers": [
+                    "Dallas, Texas",
+                    "New York City, New York",
+                    "Boston, Massachusetts",
+                    "Chicago, Illinois"
+                ],
+                "correct": "Chicago, Illinois",
+                "category": "Entertainment: Video Games"
+            },
+            {
+                "question": "When did the Crisis of the Third Century begin?",
+                "answers": [
+                    "235 BC",
+                    "242 AD",
+                    "210 AD",
+                    "235 AD"
+                ],
+                "correct": "235 AD",
+                "category": "History"
+            },
+            {
+                "question": "In Dragon Ball Z, who was the first character to go Super Saiyan 2?",
+                "answers": [
+                    "Goku",
+                    "Vegeta",
+                    "Trunks",
+                    "Gohan"
+                ],
+                "correct": "Gohan",
+                "category": "Entertainment: Japanese Anime & Manga"
+            },
+            {
+                "question": "According to Overwatch's lore, who was once a member of the Deadlock Gang?",
+                "answers": [
+                    "Roadhog",
+                    "Soldier 76",
+                    "Junkrat",
+                    "McCree"
+                ],
+                "correct": "McCree",
+                "category": "Entertainment: Video Games"
+            },
+            {
+                "question": "Who created the digital distribution platform Steam?",
+                "answers": [
+                    "Pixeltail Games",
+                    "Ubisoft",
+                    "Electronic Arts",
+                    "Valve"
+                ],
+                "correct": "Valve",
+                "category": "Entertainment: Video Games"
+            },
+            {
+                "question": "In Rust, how many Timed Explosive Charges does it take to destroy a Ladder Hatch?",
+                "answers": [
+                    "3",
+                    "2",
+                    "5",
+                    "1"
+                ],
+                "correct": "1",
+                "category": "Entertainment: Video Games"
+            },
+            {
+                "question": "In the \"Call Of Duty: Zombies\" map \"Moon\", there is a secondary called the QED. What does QED stand for?",
+                "answers": [
+                    "Quad Ectoplasmic Driver",
+                    "Question Every Dog",
+                    "Quality Edward Device",
+                    "Quantum Entanglement Device"
+                ],
+                "correct": "Quantum Entanglement Device",
+                "category": "Entertainment: Video Games"
+            },
+            {
+                "question": "To which biological phylum do all mammals, birds and reptiles belong?",
+                "answers": [
+                    "Echinodermata",
+                    "Annelida",
+                    "Placazoa",
+                    "Chordata"
+                ],
+                "correct": "Chordata",
+                "category": "Animals"
+            },
+            {
+                "question": "What is the fastest animal?",
+                "answers": [
+                    "Golden Eagle",
+                    "Cheetah",
+                    "Horsefly",
+                    "Peregrine Falcon"
+                ],
+                "correct": "Peregrine Falcon",
+                "category": "Animals"
+            },
+            {
+                "question": "What is the collective noun for rats?",
+                "answers": [
+                    "Pack",
+                    "Race",
+                    "Drift",
+                    "Mischief"
+                ],
+                "correct": "Mischief",
+                "category": "Animals"
             }
         ],
         "daily_question_data": {
-            "question": "Which famous rapper is featured in Jack \u00dc (Skrillex and Diplo)'s 2015 single called \"Febreze\"?",
+            "question": "In vanilla Minecraft, which of the following cannot be made into a block?",
             "answers": [
-                "Kendrick Lamar",
-                "Future",
-                "Fatman Scoop",
-                "2 Chainz"
+                "Coal",
+                "Wheat",
+                "String",
+                "Charcoal"
             ],
-            "correct": "2 Chainz",
-            "category": "Entertainment: Music"
+            "correct": "Charcoal",
+            "category": "Entertainment: Video Games"
         },
         "daily_don_question_data": {
-            "question": "Which of the following spacecraft never touched the moon?",
+            "question": "How many teeth does an adult rabbit have?",
             "answers": [
-                "Apollo 11",
-                "Luna 2",
-                "SMART-1",
-                "Mariner 4"
+                "30",
+                "26",
+                "24",
+                "28"
             ],
-            "correct": "Mariner 4",
-            "category": "Science & Nature"
+            "correct": "28",
+            "category": "Animals"
         },
         "daily_interactions": [
             {
-                "user_id": "739592205265535007",
-                "correct": false,
-                "participation_streak": 21
-            },
-            {
-                "user_id": "356774449032331264",
-                "correct": true,
-                "participation_streak": 1,
-                "leap": 6,
-                "old_rank": 16,
-                "new_rank": 10,
-                "missed_before": 2
-            },
-            {
                 "user_id": "676148847147483137",
                 "correct": false,
-                "participation_streak": 28
+                "participation_streak": 45
             },
             {
-                "user_id": "767189722723909642",
-                "correct": false,
-                "participation_streak": 1
-            },
-            {
-                "user_id": "1093366641825419345",
-                "correct": false,
-                "participation_streak": 1
-            },
-            {
-                "user_id": "732384312200003605",
+                "user_id": "739592205265535007",
                 "correct": true,
-                "participation_streak": 1,
-                "leap": 11,
-                "old_rank": 22,
-                "new_rank": 11,
-                "missed_before": 1
-            }
-        ],
-        "daily_don_interactions": [],
-        "daily_don_answer_times": [],
-        "daily_answer_times": [
+                "participation_streak": 8,
+                "leap": 1,
+                "old_rank": 5,
+                "new_rank": 4
+            },
             {
                 "user_id": "356774449032331264",
-                "time": 11.463263
+                "correct": false,
+                "participation_streak": 11
             },
             {
-                "user_id": "732384312200003605",
-                "time": 6.753292
+                "user_id": "350399886950268941",
+                "correct": false,
+                "participation_streak": 4
+            },
+            {
+                "user_id": "485105048930615307",
+                "correct": true,
+                "participation_streak": 7,
+                "missed_before": 1
+            },
+            {
+                "user_id": "343220200432467970",
+                "correct": false,
+                "participation_streak": 12
+            },
+            {
+                "user_id": "1536360650924630076",
+                "correct": false,
+                "participation_streak": 1
+            },
+            {
+                "user_id": "395034720607666177",
+                "correct": true,
+                "participation_streak": 4,
+                "missed_before": 1
+            },
+            {
+                "user_id": "500243292890333184",
+                "correct": true,
+                "participation_streak": 1,
+                "leap": 1,
+                "old_rank": 11,
+                "new_rank": 10
+            },
+            {
+                "user_id": "756992075353948243",
+                "correct": false,
+                "participation_streak": 171
+            }
+        ],
+        "daily_don_interactions": [
+            {
+                "user_id": "739592205265535007",
+                "correct": false
+            },
+            {
+                "user_id": "485105048930615307",
+                "correct": true
+            },
+            {
+                "user_id": "500243292890333184",
+                "correct": false
+            }
+        ],
+        "daily_don_answer_times": [
+            {
+                "user_id": "485105048930615307",
+                "time": 15.739627
+            }
+        ],
+        "daily_answer_times": [
+            {
+                "user_id": "739592205265535007",
+                "time": 5.72136
+            },
+            {
+                "user_id": "485105048930615307",
+                "time": 11.162802
+            },
+            {
+                "user_id": "395034720607666177",
+                "time": 8.816566
+            },
+            {
+                "user_id": "500243292890333184",
+                "time": 3.93412
             }
         ],
         "yesterdays_recap_data": {
             "daily_question": {
-                "question": "Which franchise was NOT featured in the 2015 video game \"Lego Dimensions\"?",
+                "question": "When was Finland's 100th year of being independent?",
                 "answers": [
-                    "Portal",
-                    "Doctor Who",
-                    "Back to the Future",
-                    "Breaking Bad"
+                    "2016",
+                    "2018",
+                    "2015",
+                    "2017"
                 ],
-                "correct": "Breaking Bad",
-                "category": "Entertainment: Video Games"
+                "correct": "2017",
+                "category": "History"
             },
             "daily_don_question": {
-                "question": "In the server hosting industry IaaS stands for...",
+                "question": "Which of these species is not extinct?",
                 "answers": [
-                    "Internet as a Service",
-                    "Internet and a Server",
-                    "Infrastructure as a Server",
-                    "Infrastructure as a Service"
+                    "Japanese sea lion",
+                    "Tasmanian tiger",
+                    "Saudi gazelle",
+                    "Komodo dragon"
                 ],
-                "correct": "Infrastructure as a Service",
-                "category": "Science: Computers"
+                "correct": "Komodo dragon",
+                "category": "Animals"
             },
             "daily_interactions": [
                 {
-                    "user_id": "462681318577405952",
-                    "correct": false,
-                    "participation_streak": 26
+                    "user_id": "739592205265535007",
+                    "correct": true,
+                    "participation_streak": 7,
+                    "missed_before": 3
                 },
                 {
-                    "user_id": "739592205265535007",
+                    "user_id": "356774449032331264",
                     "correct": false,
-                    "participation_streak": 20
+                    "participation_streak": 10
+                },
+                {
+                    "user_id": "767189722723909642",
+                    "correct": true,
+                    "participation_streak": 3
                 },
                 {
                     "user_id": "676148847147483137",
-                    "correct": true,
-                    "participation_streak": 27,
-                    "leap": 1,
-                    "old_rank": 2,
-                    "new_rank": 1
-                },
-                {
-                    "user_id": "560914996549386242",
-                    "correct": true,
-                    "participation_streak": 124,
-                    "missed_before": 1
-                },
-                {
-                    "user_id": "1482599581681455156",
                     "correct": false,
-                    "participation_streak": 1
-                },
-                {
-                    "user_id": "848050994553028608",
-                    "correct": true,
-                    "participation_streak": 1,
-                    "leap": 1,
-                    "old_rank": 9,
-                    "new_rank": 8
+                    "participation_streak": 44
                 },
                 {
                     "user_id": "756992075353948243",
+                    "correct": false,
+                    "participation_streak": 170
+                },
+                {
+                    "user_id": "316282752515440640",
                     "correct": true,
-                    "participation_streak": 153,
-                    "leap": 1,
-                    "old_rank": 5,
-                    "new_rank": 4,
-                    "missed_before": 1
+                    "participation_streak": 2,
+                    "leap": 3,
+                    "old_rank": 19,
+                    "new_rank": 16
                 },
                 {
                     "user_id": "350399886950268941",
                     "correct": false,
-                    "participation_streak": 6
+                    "participation_streak": 3
                 },
                 {
-                    "user_id": "500243292890333184",
-                    "correct": true,
-                    "participation_streak": 1,
-                    "leap": 8,
-                    "old_rank": 16,
-                    "new_rank": 8
+                    "user_id": "560914996549386242",
+                    "correct": false,
+                    "participation_streak": 141
+                },
+                {
+                    "user_id": "395034720607666177",
+                    "correct": false,
+                    "participation_streak": 3
+                },
+                {
+                    "user_id": "485105048930615307",
+                    "correct": false,
+                    "participation_streak": 6
                 },
                 {
                     "user_id": "343220200432467970",
                     "correct": true,
-                    "participation_streak": 40,
-                    "missed_before": 1
+                    "participation_streak": 11,
+                    "leap": 1,
+                    "old_rank": 4,
+                    "new_rank": 3
                 },
                 {
-                    "user_id": "395034720607666177",
+                    "user_id": "889334500977426453",
                     "correct": true,
-                    "participation_streak": 1,
-                    "leap": 8,
-                    "old_rank": 17,
-                    "new_rank": 9
+                    "participation_streak": 3,
+                    "leap": 1,
+                    "old_rank": 22,
+                    "new_rank": 21
                 },
                 {
-                    "user_id": "790607080976285696",
+                    "user_id": "732384312200003605",
                     "correct": false,
-                    "participation_streak": 1
-                },
-                {
-                    "user_id": "403683278126841867",
-                    "correct": false,
-                    "participation_streak": 1
-                },
-                {
-                    "user_id": "316282752515440640",
-                    "correct": false,
-                    "participation_streak": 1
-                },
-                {
-                    "user_id": "767189722723909642",
-                    "correct": false,
-                    "participation_streak": 1
+                    "participation_streak": 2
                 }
             ],
             "daily_don_interactions": [
                 {
-                    "user_id": "560914996549386242",
+                    "user_id": "739592205265535007",
                     "correct": true
                 },
                 {
-                    "user_id": "848050994553028608",
-                    "correct": false
-                },
-                {
-                    "user_id": "500243292890333184",
-                    "correct": false
+                    "user_id": "316282752515440640",
+                    "correct": true
                 },
                 {
                     "user_id": "343220200432467970",
-                    "correct": true
-                },
-                {
-                    "user_id": "395034720607666177",
                     "correct": true
                 }
             ],
             "daily_answer_times": [
                 {
-                    "user_id": "676148847147483137",
-                    "time": 5.029839
+                    "user_id": "739592205265535007",
+                    "time": 5.915922
                 },
                 {
-                    "user_id": "560914996549386242",
-                    "time": 10.655548
+                    "user_id": "767189722723909642",
+                    "time": 2.015119
                 },
                 {
-                    "user_id": "848050994553028608",
-                    "time": 5.557088
-                },
-                {
-                    "user_id": "756992075353948243",
-                    "time": 7.15982
-                },
-                {
-                    "user_id": "500243292890333184",
-                    "time": 5.103814
+                    "user_id": "316282752515440640",
+                    "time": 4.973022
                 },
                 {
                     "user_id": "343220200432467970",
-                    "time": 7.665801
+                    "time": 5.008416
                 },
                 {
-                    "user_id": "395034720607666177",
-                    "time": 5.82015
+                    "user_id": "889334500977426453",
+                    "time": 3.137791
                 }
             ],
             "daily_don_answer_times": [
                 {
-                    "user_id": "560914996549386242",
-                    "time": 9.319153
+                    "user_id": "739592205265535007",
+                    "time": 4.6513
+                },
+                {
+                    "user_id": "316282752515440640",
+                    "time": 5.735657
                 },
                 {
                     "user_id": "343220200432467970",
-                    "time": 10.241375
-                },
-                {
-                    "user_id": "395034720607666177",
-                    "time": 13.67099
+                    "time": 6.146656
                 }
             ]
         },
         "blocked_users": [],
         "cheater_test_users": {},
         "recent_question_groups": [
-            "Video Games",
-            "Entertainment"
+            "History",
+            "Video Games"
         ]
     },
     "guild_settings": {
@@ -9994,8 +10278,8 @@
             "enabled": true,
             "admin_role_id": null,
             "last_winner_announcement": "2026-08-01T00:00:12.241667-04:00",
-            "last_posted_date": "2026-08-04",
-            "gateway_message_id": 1534048384980226230,
+            "last_posted_date": "2026-08-21",
+            "gateway_message_id": 1540208871019126858,
             "last_post_hour": 0,
             "yesterdays_recap_data": null,
             "winner_role_id": 1431565435790164020,

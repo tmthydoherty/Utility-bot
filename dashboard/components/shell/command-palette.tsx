@@ -11,7 +11,10 @@ import { transitions } from "@/lib/motion";
 import { navItems } from "@/lib/nav";
 import { MODULES } from "@/lib/schema/modules";
 import { CATEGORY_LABELS } from "@/lib/schema/types";
+import { endSession } from "@/app/actions/auth";
 import { useGuild } from "@/components/providers/guild-provider";
+import { useAppearance } from "@/components/providers/theme-provider";
+import { useToast } from "@/components/ui/toast";
 import { Icon } from "@/components/ui/icon";
 
 /**
@@ -22,10 +25,12 @@ import { Icon } from "@/components/ui/icon";
  * touch, and a floating "⌘K" button on a phone would be a hit target
  * permanently covering content.
  */
-export function CommandPalette() {
+export function CommandPalette({ isOwner }: { isOwner: boolean }) {
   const [open, setOpen] = React.useState(false);
   const router = useRouter();
   const guild = useGuild();
+  const { resolvedTheme, setTheme } = useAppearance();
+  const toast = useToast();
 
   React.useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -41,6 +46,20 @@ export function CommandPalette() {
   const go = (href: string) => {
     setOpen(false);
     router.push(href);
+  };
+
+  // An action closes the palette first, then runs — the same shape as `go`, so
+  // selecting a command never leaves the overlay hanging over its own effect.
+  const run = (fn: () => void) => {
+    setOpen(false);
+    fn();
+  };
+
+  const copyLink = () => {
+    navigator.clipboard
+      .writeText(window.location.href)
+      .then(() => toast.success("Link copied"))
+      .catch(() => toast.error("Couldn't copy the link"));
   };
 
   return (
@@ -93,7 +112,7 @@ export function CommandPalette() {
                 heading="Pages"
                 className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:pb-1 [&_[cmdk-group-heading]]:pt-2 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wide [&_[cmdk-group-heading]]:text-fg-subtle"
               >
-                {navItems(guild.id).map((item) => (
+                {navItems(guild.id, isOwner).map((item) => (
                   <PaletteItem
                     key={item.href}
                     icon={item.icon}
@@ -102,6 +121,36 @@ export function CommandPalette() {
                     onSelect={() => go(item.href)}
                   />
                 ))}
+              </Command.Group>
+
+              <Command.Group
+                heading="Actions"
+                className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:pb-1 [&_[cmdk-group-heading]]:pt-3 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wide [&_[cmdk-group-heading]]:text-fg-subtle"
+              >
+                <PaletteItem
+                  icon={resolvedTheme === "dark" ? "Sun" : "Moon"}
+                  label={resolvedTheme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+                  keywords={["theme", "appearance", "dark", "light", "mode"]}
+                  onSelect={() => run(() => setTheme(resolvedTheme === "dark" ? "light" : "dark"))}
+                />
+                <PaletteItem
+                  icon="Monitor"
+                  label="Match system theme"
+                  keywords={["theme", "appearance", "system", "auto"]}
+                  onSelect={() => run(() => setTheme("system"))}
+                />
+                <PaletteItem
+                  icon="Link"
+                  label="Copy link to this page"
+                  keywords={["copy", "share", "url", "link"]}
+                  onSelect={() => run(copyLink)}
+                />
+                <PaletteItem
+                  icon="LogOut"
+                  label="Sign out"
+                  keywords={["logout", "log out", "sign out", "leave"]}
+                  onSelect={() => run(() => void endSession())}
+                />
               </Command.Group>
 
               <Command.Group
@@ -130,16 +179,20 @@ function PaletteItem({
   icon,
   label,
   hint,
+  keywords,
   onSelect,
 }: {
   icon: string;
   label: string;
   hint?: string;
+  /** Extra terms cmdk should match on, beyond the visible label. */
+  keywords?: string[];
   onSelect: () => void;
 }) {
   return (
     <Command.Item
       value={label}
+      keywords={keywords}
       onSelect={onSelect}
       className={cn(
         "flex cursor-pointer items-center gap-3 rounded-md px-2.5 py-2.5 text-sm",

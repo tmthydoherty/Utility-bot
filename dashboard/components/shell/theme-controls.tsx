@@ -5,18 +5,16 @@ import { Monitor, Moon, Sun } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
   useAppearance,
-  type Density,
-  type MotionPreference,
   type ThemePreference,
 } from "@/components/providers/theme-provider";
 
 /**
  * Appearance controls, shared by the mobile "More" sheet and the settings page.
  *
- * Motion is a first-class preference rather than something buried, because
- * this design leans hard on movement and some people need it to stop. The
- * control only ever *adds* restriction — someone whose OS already asks for
- * reduced motion gets it regardless of what is selected here.
+ * Just the theme now. Motion is left to the OS `prefers-reduced-motion` setting
+ * (honoured globally in globals.css and by MotionConfig), which is where people
+ * who need less movement already express it — a second in-app toggle for it, and
+ * a density toggle, were more surface than they earned.
  */
 
 function SegmentedControl<T extends string>({
@@ -68,7 +66,7 @@ function SegmentedControl<T extends string>({
 }
 
 export function ThemeControls() {
-  const { theme, setTheme, motion, setMotion, density, setDensity } = useAppearance();
+  const { theme, setTheme } = useAppearance();
 
   return (
     <div className="space-y-5">
@@ -80,24 +78,6 @@ export function ThemeControls() {
           { value: "dark", label: "Dark", icon: Moon },
           { value: "light", label: "Light", icon: Sun },
           { value: "system", label: "Auto", icon: Monitor },
-        ]}
-      />
-      <SegmentedControl<MotionPreference>
-        label="Motion"
-        value={motion}
-        onChange={setMotion}
-        options={[
-          { value: "full", label: "Full" },
-          { value: "reduced", label: "Reduced" },
-        ]}
-      />
-      <SegmentedControl<Density>
-        label="Density"
-        value={density}
-        onChange={setDensity}
-        options={[
-          { value: "comfortable", label: "Comfortable" },
-          { value: "compact", label: "Compact" },
         ]}
       />
     </div>

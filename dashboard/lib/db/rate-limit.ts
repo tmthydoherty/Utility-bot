@@ -47,6 +47,10 @@ export function checkRateLimit(bucket: Bucket, key: string): RateLimitResult {
 
   const count = row?.count ?? 1;
 
+  // Opportunistic cleanup: without this the table only ever grows. Doing it on
+  // roughly one call in fifty keeps it bounded without a DELETE on every write.
+  if (Math.random() < 0.02) pruneRateLimits();
+
   return {
     allowed: count <= max,
     remaining: Math.max(0, max - count),

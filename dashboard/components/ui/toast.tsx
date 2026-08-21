@@ -114,6 +114,13 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
                   "glass glass-highlight pointer-events-auto flex items-start gap-3",
                   "rounded-lg p-3.5 shadow-[var(--elev-4)]",
                 )}
+                // The default glass background is nearly clear, so a toast over a
+                // scrolling settings page reads the content straight through it.
+                // A near-solid surface keeps the blur and highlight but makes the
+                // message legible — the same fix the Save bar uses.
+                style={{
+                  backgroundColor: "color-mix(in srgb, var(--surface-solid) 94%, transparent)",
+                }}
               >
                 <ToastIcon className={cn("mt-0.5 size-4 shrink-0", ACCENTS[item.variant])} />
                 <div className="min-w-0 flex-1 space-y-0.5">

@@ -1,0 +1,36 @@
+import type { Metadata } from "next";
+import Link from "next/link";
+import { ArrowLeft } from "lucide-react";
+import { getGuildConfig } from "@/lib/roles-and-alerts/store";
+import { Button } from "@/components/ui/button";
+import { PageHeader } from "@/components/ui/page-header";
+import { TiersForm } from "./form";
+
+export const metadata: Metadata = { title: "Gate & VIP Roles" };
+
+export default async function TiersPage({
+  params,
+}: {
+  params: Promise<{ guildId: string }>;
+}) {
+  const { guildId } = await params;
+  const config = getGuildConfig(guildId);
+
+  return (
+    <div className="space-y-6">
+      <Button asChild variant="ghost" size="sm" className="-ml-3">
+        <Link href={`/dashboard/${guildId}/modules/roles-and-alerts`}>
+          <ArrowLeft aria-hidden />
+          Roles &amp; Alerts
+        </Link>
+      </Button>
+
+      <PageHeader
+        title="Gate & VIP Roles"
+        description="Configure the roles required to access Tier 2 and Tier 3 colors, and their associated VIP roles."
+      />
+
+      <TiersForm guildId={guildId} initialConfig={config} />
+    </div>
+  );
+}

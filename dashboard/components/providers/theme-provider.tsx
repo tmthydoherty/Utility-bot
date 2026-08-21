@@ -11,24 +11,16 @@ import {
 import { MotionConfig } from "motion/react";
 
 export type ThemePreference = "dark" | "light" | "system";
-export type MotionPreference = "full" | "reduced";
-export type Density = "comfortable" | "compact";
 
 export const STORAGE_KEYS = {
   theme: "vibey.theme",
-  motion: "vibey.motion",
-  density: "vibey.density",
 } as const;
 
 type Appearance = {
   theme: ThemePreference;
   /** What is actually painted right now — `system` resolved against the OS. */
   resolvedTheme: "dark" | "light";
-  motion: MotionPreference;
-  density: Density;
   setTheme: (value: ThemePreference) => void;
-  setMotion: (value: MotionPreference) => void;
-  setDensity: (value: Density) => void;
 };
 
 const AppearanceContext = createContext<Appearance | null>(null);
@@ -53,8 +45,6 @@ var d=document.documentElement;
 var t=localStorage.getItem('${STORAGE_KEYS.theme}')||'dark';
 var resolved=t==='system'?(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'):t;
 d.setAttribute('data-theme',resolved);
-d.setAttribute('data-motion',localStorage.getItem('${STORAGE_KEYS.motion}')||'full');
-d.setAttribute('data-density',localStorage.getItem('${STORAGE_KEYS.density}')||'comfortable');
 }catch(e){document.documentElement.setAttribute('data-theme','dark');}})();
 `.trim();
 
@@ -75,12 +65,6 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [theme, setThemeState] = useState<ThemePreference>(() =>
     readStored<ThemePreference>(STORAGE_KEYS.theme, "dark"),
   );
-  const [motionPref, setMotionState] = useState<MotionPreference>(() =>
-    readStored<MotionPreference>(STORAGE_KEYS.motion, "full"),
-  );
-  const [density, setDensityState] = useState<Density>(() =>
-    readStored<Density>(STORAGE_KEYS.density, "comfortable"),
-  );
   const [systemTheme, setSystemTheme] = useState<"dark" | "light">("dark");
 
   useEffect(() => {
@@ -100,14 +84,6 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     const meta = document.querySelector('meta[name="theme-color"]');
     meta?.setAttribute("content", resolvedTheme === "light" ? "#f6f6fa" : "#0a0a0f");
   }, [resolvedTheme]);
-
-  useEffect(() => {
-    document.documentElement.setAttribute("data-motion", motionPref);
-  }, [motionPref]);
-
-  useEffect(() => {
-    document.documentElement.setAttribute("data-density", density);
-  }, [density]);
 
   // A backgrounded tab still composites CSS animations, so the aurora would
   // keep the GPU busy behind another window forever. Park it.
@@ -135,31 +111,19 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     () => ({
       theme,
       resolvedTheme,
-      motion: motionPref,
-      density,
       setTheme: (next) => {
         setThemeState(next);
         persist(STORAGE_KEYS.theme, next);
       },
-      setMotion: (next) => {
-        setMotionState(next);
-        persist(STORAGE_KEYS.motion, next);
-      },
-      setDensity: (next) => {
-        setDensityState(next);
-        persist(STORAGE_KEYS.density, next);
-      },
     }),
-    [theme, resolvedTheme, motionPref, density, persist],
+    [theme, resolvedTheme, persist],
   );
 
   return (
     <AppearanceContext.Provider value={value}>
-      {/* "user" defers to the OS setting; the in-app toggle can only ever be
-          more restrictive, never less. */}
-      <MotionConfig reducedMotion={motionPref === "reduced" ? "always" : "user"}>
-        {children}
-      </MotionConfig>
+      {/* "user" defers to the OS `prefers-reduced-motion` setting — the only
+          place motion preference lives now. */}
+      <MotionConfig reducedMotion="user">{children}</MotionConfig>
     </AppearanceContext.Provider>
   );
 }

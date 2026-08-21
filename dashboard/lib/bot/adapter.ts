@@ -3,6 +3,40 @@ import "server-only";
 import { getDb } from "@/lib/db";
 import { defaultsFor, type SettingsValues } from "@/lib/schema/types";
 import { getModule } from "@/lib/schema/modules";
+import {
+  isBotBacked,
+  economyStoreAvailable,
+  readEconomyModuleValues,
+  readEconomyMeta,
+  writeEconomyModuleValues,
+} from "@/lib/bot/economy-config";
+import {
+  isModuleSynced,
+  moduleConfigStoreAvailable,
+  readModuleValues,
+  readModuleMeta,
+  writeModuleValues,
+} from "@/lib/bot/module-config";
+
+export { isBotBacked, EconomyConfigUnavailable } from "@/lib/bot/economy-config";
+export { isModuleSynced, ModuleConfigUnavailable } from "@/lib/bot/module-config";
+
+/**
+ * A module is "live" when a save here reaches the running bot rather than
+ * sitting in the dashboard's draft table — economy and leveling through their
+ * own config bridge, welcome/security/suggestions through the shared per-guild
+ * one. Everything else still drafts.
+ */
+export function isLive(moduleId: string): boolean {
+  return isBotBacked(moduleId) || isModuleSynced(moduleId);
+}
+
+/** Whether the store behind a live module is reachable right now. */
+export function storeReachable(moduleId: string): boolean {
+  if (isBotBacked(moduleId)) return economyStoreAvailable();
+  if (isModuleSynced(moduleId)) return moduleConfigStoreAvailable();
+  return false;
+}
 
 /**
  * The seam between the dashboard and the bot.
@@ -26,18 +60,6 @@ export interface ModuleState {
   updatedAt: number | null;
 }
 
-/** Overview numbers. Placeholder shapes, real shapes — see note in stats(). */
-export interface GuildStats {
-  members: number;
-  online: number;
-  messages7d: number;
-  messagesTrend: number[];
-  voiceMinutes7d: number;
-  newMembers7d: number;
-  activeModules: number;
-  totalModules: number;
-}
-
 interface DraftRow {
   data: string;
   updated_at: number;
@@ -47,6 +69,12 @@ interface DraftRow {
 export function readSettings(guildId: string, moduleId: string): SettingsValues {
   const moduleSchema = getModule(moduleId);
   if (!moduleSchema) return {};
+
+  // Economy and Leveling read their live values from the bot's config store
+  // rather than the draft table — see lib/bot/economy-config.ts.
+  if (isBotBacked(moduleId)) return readEconomyModuleValues(moduleSchema);
+  // Welcome/Security/Suggestions read from the shared per-guild bridge.
+  if (isModuleSynced(moduleId)) return readModuleValues(moduleSchema, guildId);
 
   const base = defaultsFor(moduleSchema);
 
@@ -69,6 +97,17 @@ export function readSettingsMeta(
   guildId: string,
   moduleId: string,
 ): { updatedAt: number; updatedBy: string } | null {
+  if (isBotBacked(moduleId)) {
+    const moduleSchema = getModule(moduleId);
+    const meta = moduleSchema ? readEconomyMeta(moduleSchema) : null;
+    return meta ? { updatedAt: meta.updatedAt, updatedBy: "" } : null;
+  }
+  if (isModuleSynced(moduleId)) {
+    const moduleSchema = getModule(moduleId);
+    const meta = moduleSchema ? readModuleMeta(moduleSchema, guildId) : null;
+    return meta ? { updatedAt: meta.updatedAt, updatedBy: "" } : null;
+  }
+
   const row = getDb()
     .prepare(`SELECT data, updated_at, updated_by FROM settings_draft WHERE guild_id = ? AND module_id = ?`)
     .get(guildId, moduleId) as DraftRow | undefined;
@@ -81,6 +120,19 @@ export function writeSettings(
   values: SettingsValues,
   actorId: string,
 ): void {
+  const moduleSchema = getModule(moduleId);
+  if (moduleSchema && isBotBacked(moduleId)) {
+    // Throws EconomyConfigUnavailable if the bot has not created the store yet;
+    // the caller turns that into a friendly "the bot isn't running" message.
+    writeEconomyModuleValues(moduleSchema, values, actorId);
+    return;
+  }
+  if (moduleSchema && isModuleSynced(moduleId)) {
+    // Throws ModuleConfigUnavailable if the bridge doesn't exist yet.
+    writeModuleValues(moduleSchema, guildId, values, actorId);
+    return;
+  }
+
   getDb()
     .prepare(
       `INSERT INTO settings_draft (guild_id, module_id, data, updated_at, updated_by)
@@ -115,41 +167,7 @@ export function setModuleEnabled(guildId: string, moduleId: string, enabled: boo
     .run(guildId, moduleId, enabled ? 1 : 0, Date.now());
 }
 
-/**
- * Overview statistics.
- *
- * The member and presence counts are real — Discord returns them with the
- * guild. Everything below them is placeholder: the bot already records this in
- * tracking_data.db, but reading it is out of scope for this pass, and inventing
- * a plausible-looking number is better than shipping an empty page as long as
- * the UI says so out loud. Every caller renders these behind a "sample data"
- * marker.
- */
-export function stats(
-  guildId: string,
-  memberCount: number,
-  presenceCount: number,
-  moduleCounts: { active: number; total: number },
-): GuildStats {
-  // Seeded off the guild ID so the numbers are stable across renders instead
-  // of flickering on every request.
-  const seed = Number(BigInt(guildId) % 997n);
-  const trend = Array.from({ length: 14 }, (_, i) => {
-    const wave = Math.sin((i + seed) / 2.4) * 0.28 + Math.sin((i + seed) / 5.1) * 0.16;
-    return Math.max(120, Math.round(900 * (1 + wave)));
-  });
-
-  return {
-    members: memberCount,
-    online: presenceCount,
-    messages7d: trend.slice(-7).reduce((a, b) => a + b, 0),
-    messagesTrend: trend,
-    voiceMinutes7d: 4200 + (seed % 900),
-    newMembers7d: 12 + (seed % 20),
-    activeModules: moduleCounts.active,
-    totalModules: moduleCounts.total,
-  };
-}
-
-/** True while the numbers above are not yet coming from the bot. */
-export const STATS_ARE_SAMPLE = true;
+// Overview statistics used to live here as seeded placeholder numbers. They now
+// come from the bot's own databases, read-only — see lib/bot/tracker-stats.ts
+// and lib/bot/tracker-view.ts, which the overview and the Activity Tracker page
+// consume directly.

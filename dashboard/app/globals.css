@@ -13,6 +13,12 @@
 [data-theme="dark"] {
   color-scheme: dark;
 
+  /* Deploy revision. The stylesheet is served content-hashed and immutable, so
+     its URL only changes when its bytes do. Bumping this forces a fresh hash so
+     a client that cached a broken copy of a prior build fetches the new file
+     instead of reusing the stale immutable URL. */
+  --asset-rev: 2;
+
   --bg: #0a0a0f;
   --bg-elevated: #101017;
   --bg-inset: #08080c;
@@ -35,6 +41,10 @@
   --accent-2: #d946ef;
   --accent-fg: #ffffff;
   --accent-soft: rgb(139 92 246 / 0.14);
+
+  /* Second categorical series colour for charts (e.g. member-vs-member). Amber,
+     validated CVD-safe against --accent for this surface (dataviz skill). */
+  --chart-2: #d97706;
 
   --success: #34d399;
   --success-soft: rgb(52 211 153 / 0.14);
@@ -87,6 +97,9 @@
   --accent-fg: #ffffff;
   --accent-soft: rgb(124 58 237 / 0.1);
 
+  /* Amber, validated CVD-safe against --accent on the light surface. */
+  --chart-2: #f59e0b;
+
   --success: #059669;
   --success-soft: rgb(5 150 105 / 0.1);
   --warning: #b45309;
@@ -128,6 +141,7 @@
   --color-accent-2: var(--accent-2);
   --color-accent-fg: var(--accent-fg);
   --color-accent-soft: var(--accent-soft);
+  --color-chart-2: var(--chart-2);
   --color-success: var(--success);
   --color-success-soft: var(--success-soft);
   --color-warning: var(--warning);
@@ -332,12 +346,6 @@
       padding-left: var(--sidebar-width, 17rem);
     }
   }
-
-  /* Compact density tightens the vertical rhythm without changing type size —
-   * shrinking the text would trade scannability for the same win. */
-  [data-density="compact"] .shell-content main {
-    --density-gap: 1rem;
-  }
 }
 
 @keyframes pop-in {
@@ -510,11 +518,4 @@
     animation: none !important;
     opacity: 0.5;
   }
-}
-
-/* Same, but user-chosen from the dashboard's own settings rather than the OS. */
-[data-motion="reduced"] .aurora::before,
-[data-motion="reduced"] .aurora::after,
-[data-motion="reduced"] .aurora > span {
-  animation: none !important;
 }

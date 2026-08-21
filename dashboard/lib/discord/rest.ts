@@ -106,12 +106,89 @@ export function getChannels(guildId: string): Promise<DiscordChannel[]> {
   return cached(`channels:${guildId}`, `/guilds/${guildId}/channels`);
 }
 
+/**
+ * The guild's active (non-archived) threads, including forum posts.
+ *
+ * Threads don't appear in the channel list, but the tracker logs per thread, so
+ * the channel picker needs them to be searchable. One call returns every active
+ * thread the bot can see. Archived threads aren't included — that would be a
+ * fan-out of per-channel calls — so a long-dead thread stays unlisted. 403/404
+ * degrade to an empty list rather than erroring the whole page.
+ */
+export async function getActiveThreads(guildId: string): Promise<DiscordChannel[]> {
+  try {
+    const data = await cached<{ threads: DiscordChannel[] }>(
+      `threads:${guildId}`,
+      `/guilds/${guildId}/threads/active`,
+    );
+    return data.threads ?? [];
+  } catch (error) {
+    if (error instanceof DiscordApiError && (error.status === 403 || error.status === 404)) {
+      return [];
+    }
+    throw error;
+  }
+}
+
+/**
+ * A single channel by ID, or null when it is gone or hidden from the bot.
+ *
+ * The guild channel list doesn't include threads, and the activity tracker logs
+ * per thread, so a top-thread lookup falls through to this. 404 (deleted) and
+ * 403 (the bot can't see it) are both "no name to show", not errors to surface.
+ */
+export async function getChannel(channelId: string): Promise<DiscordChannel | null> {
+  try {
+    return await cached<DiscordChannel>(`channel:${channelId}`, `/channels/${channelId}`);
+  } catch (error) {
+    if (error instanceof DiscordApiError && (error.status === 404 || error.status === 403)) {
+      return null;
+    }
+    throw error;
+  }
+}
+
 export function getRoles(guildId: string): Promise<DiscordRole[]> {
   return cached(`roles:${guildId}`, `/guilds/${guildId}/roles`);
 }
 
 export function getEmojis(guildId: string): Promise<DiscordEmoji[]> {
   return cached(`emojis:${guildId}`, `/guilds/${guildId}/emojis`);
+}
+
+/**
+ * Every server the bot is in, as partial guilds (id + name is all we need).
+ *
+ * Used to gather custom emoji from all of them — a button can carry an emoji
+ * from any server the bot shares, not just the one being administered.
+ */
+export function getBotGuilds(): Promise<{ id: string; name: string }[]> {
+  return cached("bot-guilds", "/users/@me/guilds");
+}
+
+/**
+ * A page of guild members, for the tracker's user picker.
+ *
+ * Needs the GUILD_MEMBERS privileged intent; the bot has it (it tracks joins).
+ * If it's ever off Discord answers 403, which we treat as "no roster to offer"
+ * — the picker falls back to whoever is already selected rather than erroring.
+ * One call, cached 60s like the rest; `limit` caps at Discord's 1000.
+ */
+export async function listMembers(
+  guildId: string,
+  limit = 1000,
+): Promise<DiscordMember[]> {
+  try {
+    return await cached<DiscordMember[]>(
+      `members:${guildId}:${limit}`,
+      `/guilds/${guildId}/members?limit=${limit}`,
+    );
+  } catch (error) {
+    if (error instanceof DiscordApiError && (error.status === 403 || error.status === 404)) {
+      return [];
+    }
+    throw error;
+  }
 }
 
 /**

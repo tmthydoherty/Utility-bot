@@ -61,6 +61,22 @@ export function formatDuration(seconds: number): string {
   return parts.slice(0, 2).join(" ");
 }
 
+/** Seconds of voice time as a compact "3h 20m" / "45m" / "2h". */
+export function formatVoice(seconds: number): string {
+  if (!seconds || seconds <= 0) return "0m";
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (hours === 0) return `${minutes}m`;
+  return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+}
+
+/** Whole-percent change from `previous` to `current`, or null when there's no
+ *  baseline to compare against (a first week has nothing to be up or down on). */
+export function percentChange(current: number, previous: number): number | null {
+  if (previous <= 0) return null;
+  return Math.round(((current - previous) / previous) * 100);
+}
+
 export function initials(name: string): string {
   return name
     .split(/[\s_-]+/)

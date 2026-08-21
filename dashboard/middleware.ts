@@ -39,7 +39,12 @@ function buildCsp(nonce: string, isDev: boolean): string {
     // Inline *style* is a far weaker vector than inline script, and script is
     // locked down properly above, so this is the accepted trade.
     `style-src 'self' 'unsafe-inline'`,
-    `img-src 'self' data: blob: https://cdn.discordapp.com https://media.discordapp.net`,
+    // `https:` so a ticketing panel's preview can load a banner/thumbnail from
+    // whatever host an admin pastes — the same arbitrary URL the bot embeds in
+    // Discord — not only Discord's own CDN. Images are an inert content type and
+    // script is locked down separately above, so allowing any https image is a
+    // safe trade for an admin-only dashboard that previews user-supplied URLs.
+    `img-src 'self' data: blob: https:`,
     `font-src 'self' data:`,
     // Discord's OAuth token exchange is server-side; the browser never needs
     // to reach anything off-origin.

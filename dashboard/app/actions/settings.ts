@@ -7,7 +7,13 @@ import { getActiveSession } from "@/auth";
 import { env } from "@/lib/env";
 import { diffValues, recordAudit } from "@/lib/db/audit";
 import { checkRateLimit, clientIp } from "@/lib/db/rate-limit";
-import { readSettings, setModuleEnabled, writeSettings } from "@/lib/bot/adapter";
+import {
+  EconomyConfigUnavailable,
+  ModuleConfigUnavailable,
+  readSettings,
+  setModuleEnabled,
+  writeSettings,
+} from "@/lib/bot/adapter";
 import { getModule } from "@/lib/schema/modules";
 import { validateModule } from "@/lib/schema/validate";
 import type { SettingsValues } from "@/lib/schema/types";
@@ -105,7 +111,20 @@ export async function saveModuleSettings(
     return { ok: true };
   }
 
-  writeSettings(guildId, moduleId, validation.values, session.user.id);
+  try {
+    writeSettings(guildId, moduleId, validation.values, session.user.id);
+  } catch (error) {
+    if (
+      error instanceof EconomyConfigUnavailable ||
+      error instanceof ModuleConfigUnavailable
+    ) {
+      return {
+        ok: false,
+        error: "Vibey isn't running, so its settings can't be updated right now.",
+      };
+    }
+    throw error;
+  }
 
   recordAudit({
     actorId: session.user.id,
@@ -119,6 +138,13 @@ export async function saveModuleSettings(
   });
 
   revalidatePath(`/dashboard/${guildId}/modules/${moduleId}`);
+  // A relocated module (Economy) is edited from its own section, whose pages
+  // read the same values through the same bridge — revalidate that whole
+  // subtree too, or a save on one tab would leave the others showing stale
+  // numbers until the next full load.
+  if (moduleSchema.relocated && moduleSchema.link) {
+    revalidatePath(`/dashboard/${guildId}${moduleSchema.link}`, "layout");
+  }
   return { ok: true };
 }
 

@@ -30,6 +30,14 @@ export interface GuildRole {
   managed: boolean;
 }
 
+export interface GuildEmoji {
+  id: string;
+  name: string;
+  animated: boolean;
+  /** Which server this emoji is from — only set for cross-server emoji. */
+  guildName?: string;
+}
+
 export interface GuildContextValue {
   id: string;
   name: string;
@@ -37,6 +45,14 @@ export interface GuildContextValue {
   memberCount: number;
   channels: GuildChannel[];
   roles: GuildRole[];
+  /** This server's custom emoji — all a reaction here can use. */
+  emojis: GuildEmoji[];
+  /**
+   * Custom emoji from every server the bot is in, tagged with their server
+   * name for grouping. Used by fields that can carry any of them, like a
+   * button's emoji.
+   */
+  allEmojis: GuildEmoji[];
 }
 
 const GuildContext = createContext<GuildContextValue | null>(null);
@@ -64,12 +80,22 @@ const CHANNEL_GLYPHS: Record<number, string> = {
   [ChannelType.GuildStageVoice]: "🎙",
   [ChannelType.GuildForum]: "💬",
   [ChannelType.GuildMedia]: "🖼",
+  [ChannelType.AnnouncementThread]: "🧵",
+  [ChannelType.PublicThread]: "🧵",
+  [ChannelType.PrivateThread]: "🧵",
 };
+
+const THREAD_TYPES = new Set<number>([
+  ChannelType.AnnouncementThread,
+  ChannelType.PublicThread,
+  ChannelType.PrivateThread,
+]);
 
 /**
  * Channels as picker items, grouped under their category the way Discord shows
  * them — an alphabetical flat list of sixty channels is unnavigable when the
- * mental model is the sidebar.
+ * mental model is the sidebar. Threads and forum posts group under their parent
+ * channel's name instead of a category, since that's where they live.
  */
 export function useChannelItems(allowedTypes?: number[]): PickerItem[] {
   const { channels } = useGuild();
@@ -80,15 +106,26 @@ export function useChannelItems(allowedTypes?: number[]): PickerItem[] {
         .filter((c) => c.type === ChannelType.GuildCategory)
         .map((c) => [c.id, c.name]),
     );
+    // Parent channel names, so a thread can be filed under "in #general".
+    const channelNames = new Map(channels.map((c) => [c.id, c.name]));
+
+    const groupFor = (channel: GuildChannel): string => {
+      if (THREAD_TYPES.has(channel.type)) {
+        const parent = channel.parentId ? channelNames.get(channel.parentId) : undefined;
+        return parent ? `Threads · ${parent}` : "Threads";
+      }
+      return channel.parentId
+        ? (categories.get(channel.parentId) ?? "Uncategorised")
+        : "Uncategorised";
+    };
 
     return channels
-      .filter((c) => c.type !== ChannelType.GuildCategory)
-      .filter((c) => !allowedTypes || allowedTypes.includes(c.type))
+      .filter((c) => allowedTypes ? allowedTypes.includes(c.type) : c.type !== ChannelType.GuildCategory)
       .sort((a, b) => a.position - b.position)
       .map((channel) => ({
         value: channel.id,
         label: channel.name,
-        group: channel.parentId ? (categories.get(channel.parentId) ?? "Uncategorised") : "Uncategorised",
+        group: groupFor(channel),
         glyph: CHANNEL_GLYPHS[channel.type] ?? "#",
       }));
   }, [channels, allowedTypes]);

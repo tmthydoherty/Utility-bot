@@ -23,26 +23,3 @@ export function PageHeader({
     </div>
   );
 }
-
-/**
- * Marks numbers that are not yet coming from the bot.
- *
- * The alternative to shipping placeholder figures is an empty overview, but
- * unlabelled placeholders are how someone ends up making a decision on an
- * invented number. This is the compromise, and it stays until the tracker data
- * is wired in.
- */
-export function SampleDataNotice({ className }: { className?: string }) {
-  return (
-    <p
-      className={cn(
-        "inline-flex items-center gap-1.5 rounded-full bg-[var(--warning-soft)] px-2.5 py-1",
-        "text-xs font-medium text-[var(--warning)]",
-        className,
-      )}
-    >
-      <span className="size-1.5 rounded-full bg-current" aria-hidden />
-      Sample data — not yet connected to the bot
-    </p>
-  );
-}

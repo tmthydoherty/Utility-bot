@@ -58,9 +58,85 @@ MemoryDenyWriteExecute=false
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 
 # ProtectHome=read-only makes the whole home tree read-only; these are the only
-# two places the process legitimately writes.
+# places the process legitimately writes.
 ReadWritePaths=/home/tmthy/Vibey/dashboard/data
 ReadWritePaths=/home/tmthy/Vibey/dashboard/.next
+
+# The bot's automations database. The one thing outside the dashboard's own
+# directory it may write, and the exception is deliberate: an automation built
+# on the website has to be one the engine actually runs, which means writing
+# where the engine reads. See lib/automations/store.ts.
+#
+# It is a directory rather than a file because SQLite in WAL mode writes three
+# of them — a grant on the .db alone yields SQLITE_CANTOPEN the moment anything
+# writes, because the -wal and -shm siblings cannot be created. That is exactly
+# why this database lives in a directory of its own instead of beside the other
+# fourteen: this grant must not reach any of them, or the bot's economy,
+# tickets and audit log would all be writable by the internet-facing process.
+ReadWritePaths=/home/tmthy/Vibey/data/automations
+
+# The shared Economy/Leveling config bridge, same reasoning and shape as the
+# grants around it. See lib/bot/economy-config.ts and cogs/economy/config_sync.py.
+ReadWritePaths=/home/tmthy/Vibey/data/economy_config
+
+# The shared per-guild module config bridge (welcome, security, suggestions).
+# Same reasoning and same shape as the automations grant above: a directory of
+# its own, because WAL writes three files, and because a broader grant would
+# expose the bot's other databases to the internet-facing process. See
+# lib/bot/module-config.ts and utils/module_config_sync.py.
+ReadWritePaths=/home/tmthy/Vibey/data/module_config
+
+# The ticketing config bridge (topics, panels, responses). Same reasoning and
+# same shape as the grants above: a directory of its own, because WAL writes
+# three files, and because a broader grant would expose the bot's other
+# databases to the internet-facing process. See lib/ticketing/store.ts and
+# cogs/ticketing/config_sync.py.
+ReadWritePaths=/home/tmthy/Vibey/data/ticketing_config
+
+# The QOTD question-pool bridge (add/edit/delete questions, tomorrow's queued
+# question). Same reasoning and same shape as the grants above: a directory of
+# its own, because WAL writes three files, and because a broader grant would
+# expose the bot's other databases to the internet-facing process. QOTD's flat
+# settings ride the module_config bridge above instead. See lib/qotd/store.ts
+# and cogs/qotd_config_sync.py.
+ReadWritePaths=/home/tmthy/Vibey/data/qotd_config
+
+# The Utility database (reminders, one-off messages, stickies, reaction rules,
+# media channels). Same reasoning and same shape as the grants above: a
+# directory of its own, because WAL writes three files, and because a broader
+# grant would expose the bot's other databases to the internet-facing process.
+# See lib/utility/store.ts and cogs/utility/storage.py.
+ReadWritePaths=/home/tmthy/Vibey/data/utility
+ReadWritePaths=/home/tmthy/Vibey/data/custom_commands
+
+# The Welcome & Onboarding bridge (intro question pool, blacklist, per-member
+# points, ranked lists, game→LFG mappings). Same reasoning and same shape as the
+# grants above: a directory of its own, because WAL writes three files, and a
+# broader grant would expose the bot's other databases to the internet-facing
+# process. Onboarding's flat settings ride the module_config bridge above
+# instead. See lib/onboarding/store.ts and cogs/onboarding_config_sync.py.
+ReadWritePaths=/home/tmthy/Vibey/data/onboarding_config
+
+# The Custom Matches command bridge (edit a game, adjust a player's MMR, clear a
+# penalty …). Same reasoning and same shape as the grants above: a directory of
+# its own, because WAL writes three files, and a broader grant would expose the
+# bot's other databases to the internet-facing process. This is the *write* half
+# only — the module reads custommatch.db directly, read-only, which needs no
+# grant under ProtectSystem=strict. See lib/custommatch/store.ts and
+# cogs/custommatch_config_sync.py.
+ReadWritePaths=/home/tmthy/Vibey/data/custommatch_config
+
+# The Roles & Alerts store (per-guild config.json plus a commands.db of role
+# shuffles). Same reasoning and same shape as the grants above: a directory of
+# its own, because SQLite in WAL mode writes three files and a broader grant
+# would expose the bot's other databases to the internet-facing process. See
+# lib/roles-and-alerts/store.ts.
+ReadWritePaths=/home/tmthy/Vibey/data/roles_and_alerts_config
+
+# The Game Poll database (game library, vote ledger, and the draft the dashboard
+# hands the cog to post). Same reasoning and same shape as the grants above. See
+# lib/game-poll/store.ts.
+ReadWritePaths=/home/tmthy/Vibey/data/game_poll_config
 
 # Comfortably above the ~200MB it actually uses; a leak gets killed rather than
 # taking the bots down with it.

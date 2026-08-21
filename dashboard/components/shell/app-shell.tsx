@@ -29,10 +29,13 @@ export interface ShellUser {
 export function AppShell({
   guild,
   user,
+  isOwner,
   children,
 }: {
   guild: GuildContextValue;
   user: ShellUser;
+  /** Whether the viewer is the bot owner — gates the owner-only nav items. */
+  isOwner: boolean;
   children: React.ReactNode;
 }) {
   const [collapsed, setCollapsed] = React.useState(false);
@@ -71,7 +74,7 @@ export function AppShell({
         // content column instead of the viewport.
         style={{ ["--sidebar-width" as string]: collapsed ? "4.5rem" : "17rem" }}
       >
-        <Sidebar collapsed={collapsed} onToggle={toggle} />
+        <Sidebar collapsed={collapsed} onToggle={toggle} isOwner={isOwner} />
 
         <div className="shell-content flex min-h-dvh flex-col transition-[padding] duration-300 ease-out">
           <Topbar user={user} onSignOut={handleSignOut} />
@@ -87,8 +90,8 @@ export function AppShell({
           </main>
         </div>
 
-        <MobileNav user={user} onSignOut={handleSignOut} />
-        <CommandPalette />
+        <MobileNav />
+        <CommandPalette isOwner={isOwner} />
       </div>
     </GuildProvider>
   );

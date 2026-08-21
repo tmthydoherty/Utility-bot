@@ -24,13 +24,15 @@ import { Tooltip } from "@/components/ui/tooltip";
 export function Sidebar({
   collapsed,
   onToggle,
+  isOwner,
 }: {
   collapsed: boolean;
   onToggle: () => void;
+  isOwner: boolean;
 }) {
   const pathname = usePathname();
   const guild = useGuild();
-  const items = navItems(guild.id);
+  const items = navItems(guild.id, isOwner).filter((item) => item.sidebar);
 
   return (
     <aside
@@ -56,7 +58,7 @@ export function Sidebar({
 
       <div className="rule mx-4" />
 
-      <nav className="flex-1 space-y-1 overflow-y-auto p-3">
+      <nav className="flex-1 space-y-2.5 overflow-y-auto p-3">
         {items.map((item) => {
           const active = isActive(item.href, pathname, item.label === "Overview");
           const link = (
@@ -65,8 +67,8 @@ export function Sidebar({
               href={item.href}
               aria-current={active ? "page" : undefined}
               className={cn(
-                "group relative flex h-11 items-center gap-3 rounded-md px-3",
-                "text-sm font-medium transition-colors duration-150",
+                "group relative flex h-[64px] items-center gap-4 rounded-xl px-4",
+                "text-base font-medium transition-colors duration-150",
                 active ? "text-fg" : "text-fg-muted hover:text-fg",
                 collapsed && "justify-center px-0",
               )}
@@ -75,20 +77,20 @@ export function Sidebar({
                 <motion.span
                   layoutId="sidebar-active"
                   transition={SPRING}
-                  className="absolute inset-0 rounded-md bg-[var(--accent-soft)]"
+                  className="absolute inset-0 rounded-xl bg-[var(--accent-soft)]"
                 />
               )}
               {active && (
                 <motion.span
                   layoutId="sidebar-active-edge"
                   transition={SPRING}
-                  className="accent-gradient absolute left-0 top-1/2 h-6 w-[3px] -translate-y-1/2 rounded-r-full"
+                  className="accent-gradient absolute left-0 top-1/2 h-9 w-[3px] -translate-y-1/2 rounded-r-full"
                 />
               )}
               <Icon
                 name={item.icon}
                 className={cn(
-                  "relative z-10 size-[18px] shrink-0",
+                  "relative z-10 size-[22px] shrink-0",
                   active && "text-[var(--accent)]",
                 )}
               />

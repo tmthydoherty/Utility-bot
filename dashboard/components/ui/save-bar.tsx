@@ -55,6 +55,11 @@ export function SaveBar({
             className={cn(
               "glass glass-highlight mx-auto flex max-w-3xl items-center gap-3 rounded-xl p-3 shadow-[var(--elev-4)]",
             )}
+            // The default glass background is nearly clear, so a floating bar
+            // over a scrolling page reads the content straight through it. This
+            // is a bar you must not miss, so it sits on a near-solid surface
+            // while keeping the blur and highlight.
+            style={{ backgroundColor: "color-mix(in srgb, var(--surface-solid) 94%, transparent)" }}
           >
             <div className="min-w-0 flex-1">
               {error ? (

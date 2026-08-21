@@ -29,6 +29,21 @@ interface Crumb {
   href?: string;
 }
 
+/**
+ * Sections whose crumb is the same as their nav label and needs no lookup.
+ *
+ * Listed rather than derived from the URL segment, because "audit" has to read
+ * as "Audit log" — and because a section missing from here shows the guild's
+ * own name on every one of its pages, which is how the automations section
+ * spent its first render claiming to be the Overview.
+ */
+const SECTION_LABELS: Record<string, string> = {
+  automations: "Automations",
+  modules: "Modules",
+  audit: "Audit log",
+  settings: "Settings",
+};
+
 function useCrumbs(guildId: string): Crumb[] {
   const pathname = usePathname();
   const base = `/dashboard/${guildId}`;
@@ -39,18 +54,24 @@ function useCrumbs(guildId: string): Crumb[] {
   if (segments.length === 0) return crumbs;
 
   const [first, second] = segments;
+  if (!first) return crumbs;
+
+  const label = SECTION_LABELS[first];
+  if (!label) return crumbs;
+
+  crumbs.push({ label, href: `${base}/${first}` });
+  if (!second) return crumbs;
 
   if (first === "modules") {
-    crumbs.push({ label: "Modules", href: `${base}/modules` });
-    if (second) {
-      // Fall back to the raw segment so an unknown module still shows a
-      // sensible trail rather than a blank crumb.
-      crumbs.push({ label: getModule(second)?.name ?? second });
-    }
-  } else if (first === "audit") {
-    crumbs.push({ label: "Audit log" });
-  } else if (first === "settings") {
-    crumbs.push({ label: "Settings" });
+    // Fall back to the raw segment so an unknown module still shows a sensible
+    // trail rather than a blank crumb.
+    crumbs.push({ label: getModule(second)?.name ?? second });
+  } else if (first === "automations") {
+    // An automation's name lives in the bot's database, not in the URL, and
+    // this component is deliberately client-only. The page below already shows
+    // the name as its heading, so the crumb says where you are instead of
+    // repeating it.
+    crumbs.push({ label: second === "new" ? "New" : "Edit" });
   }
 
   return crumbs;

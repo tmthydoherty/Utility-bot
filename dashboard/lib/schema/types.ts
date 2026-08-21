@@ -89,6 +89,13 @@ export interface Field {
   choices?: Choice[];
   /** CHANNEL / ROLE / USER: a list rather than a single value. */
   multi?: boolean;
+  /**
+   * EMOJI only. `"all"` offers custom emoji from every server the bot is in
+   * (for a button, which can carry any of them); the default `"guild"` offers
+   * just this server's, which is all a reaction can use. `"all"` fields hold a
+   * single emoji rather than a list.
+   */
+  emojiScope?: "guild" | "all";
   /** NUMBER / DURATION bounds; also the length bounds for TEXT. */
   min?: number;
   max?: number;
@@ -116,6 +123,7 @@ export interface Section {
 
 export type ModuleCategory =
   | "engagement"
+  | "leveling"
   | "economy"
   | "moderation"
   | "community"
@@ -134,12 +142,43 @@ export interface ModuleSchema {
   cog: string;
   /** False while a module is listed but not yet configurable from the web. */
   configurable: boolean;
+  /**
+   * A module whose web page is a live read-only dashboard rather than a
+   * settings form — the Activity Tracker. It counts as "supported" alongside
+   * configurable modules (a real page, out of the not-yet-supported section),
+   * but its page renders analytics instead of fields.
+   */
+  analytics?: boolean;
+  /**
+   * A module that is really a shortcut to a section elsewhere in the dashboard
+   * (Automations). It's "supported" so it sits in the main grid, but its card
+   * links to {@link link} and carries no enable/disable toggle.
+   */
+  external?: boolean;
+  /** Path suffix under `/dashboard/<guildId>` the external card links to. */
+  link?: string;
+  /**
+   * A module that has no on/off switch because it is always running — Bot
+   * Presence. Discord always shows the bot *some* presence, so there is no
+   * "off" state to offer; the page and grid say "Always on" instead of a toggle.
+   */
+  alwaysOn?: boolean;
+  /**
+   * A module that has been lifted out of the Modules grid into its own
+   * top-level dashboard section — the Economy, whose four sub-pages (Points,
+   * Shop, Config, Audit log) don't fit a single settings form. It stays in
+   * {@link MODULES} so `getModule` and the config bridge still resolve it, but
+   * the grid filters it out and its old `/modules/<id>` route redirects to
+   * {@link link}.
+   */
+  relocated?: boolean;
   sections?: Section[];
 }
 
 export const CATEGORY_LABELS: Record<ModuleCategory, string> = {
   engagement: "Engagement",
-  economy: "Economy & Levels",
+  leveling: "Leveling",
+  economy: "Economy",
   moderation: "Moderation & Safety",
   community: "Community",
   esports: "Esports",
@@ -149,6 +188,7 @@ export const CATEGORY_LABELS: Record<ModuleCategory, string> = {
 
 export const CATEGORY_ORDER: ModuleCategory[] = [
   "engagement",
+  "leveling",
   "economy",
   "community",
   "moderation",

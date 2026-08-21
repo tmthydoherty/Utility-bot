@@ -1,6 +1,7 @@
 import { notFound, redirect } from "next/navigation";
 
 import { getActiveSession } from "@/auth";
+import { isOwnerId } from "@/lib/auth/owner";
 import { loadGuild, primaryGuildId } from "@/lib/guild";
 import { avatarUrl } from "@/lib/discord/types";
 import { AppShell } from "@/components/shell/app-shell";
@@ -34,6 +35,7 @@ export default async function GuildLayout({
   return (
     <AppShell
       guild={guild}
+      isOwner={isOwnerId(session.user.id)}
       user={{
         name: session.user.name ?? "Admin",
         avatarUrl: session.user.image ?? avatarUrl({ id: session.user.id, avatar: null }),

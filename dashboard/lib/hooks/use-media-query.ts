@@ -28,3 +28,35 @@ export function useMediaQuery(query: string): boolean {
 export function useIsMobile(): boolean {
   return useMediaQuery("(max-width: 639px)");
 }
+
+/**
+ * Height, in pixels, of the on-screen keyboard (or any bottom-docked virtual
+ * widget) currently covering the layout viewport — 0 when nothing is.
+ *
+ * Read from the VisualViewport API, which both iOS Safari (keyboard overlays,
+ * `offsetTop` moves) and Android Chrome (viewport shrinks) report through, so
+ * the difference from the layout viewport is the covered strip either way. A
+ * bottom sheet lifts itself by this amount so its search results don't end up
+ * behind the keyboard the search box just summoned.
+ */
+export function useKeyboardInset(): number {
+  const [inset, setInset] = useState(0);
+
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const update = () => {
+      const covered = window.innerHeight - vv.height - vv.offsetTop;
+      setInset(Math.max(0, Math.round(covered)));
+    };
+    update();
+    vv.addEventListener("resize", update);
+    vv.addEventListener("scroll", update);
+    return () => {
+      vv.removeEventListener("resize", update);
+      vv.removeEventListener("scroll", update);
+    };
+  }, []);
+
+  return inset;
+}

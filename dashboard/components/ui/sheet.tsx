@@ -7,7 +7,7 @@ import { X } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { SPRING_SOFT, transitions } from "@/lib/motion";
-import { useIsMobile } from "@/lib/hooks/use-media-query";
+import { useIsMobile, useKeyboardInset } from "@/lib/hooks/use-media-query";
 
 /**
  * One overlay component, two presentations.
@@ -58,6 +58,10 @@ export function Sheet({
   children,
 }: SheetProps) {
   const isMobile = useIsMobile();
+  // Only lifts the sheet on mobile; on desktop there's no virtual keyboard and
+  // the centring transform owns the position.
+  const keyboardInset = useKeyboardInset();
+  const lift = isMobile ? keyboardInset : 0;
 
   return (
     <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
@@ -97,11 +101,46 @@ export function Sheet({
                       onOpenChange(false);
                     }
                   }}
-                  initial={isMobile ? { y: "100%" } : { opacity: 0, scale: 0.97, x: "-50%", y: "-50%" }}
-                  animate={isMobile ? { y: 0 } : { opacity: 1, scale: 1, x: "-50%", y: "-50%" }}
-                  exit={isMobile ? { y: "100%" } : { opacity: 0, scale: 0.98, x: "-50%", y: "-50%" }}
+                  // Both presentations animate the *same four properties*, and
+                  // that is load-bearing rather than tidiness.
+                  //
+                  // `useIsMobile` starts false — it has to, since the server
+                  // cannot know the viewport — and flips in an effect after the
+                  // first paint. So on a phone this element is mounted with the
+                  // desktop `initial` and then handed the mobile variants one
+                  // frame later. Any property present in the first set and
+                  // absent from the second is simply abandoned wherever it was:
+                  // the sheet kept `opacity: 0` forever and was invisible while
+                  // still trapping focus, which reads as the page freezing.
+                  //
+                  // Normally the desktop `animate` wins the race and nobody
+                  // notices. With "reduce motion" on it does not, which is how
+                  // this surfaced — but the race was always there.
+                  initial={
+                    isMobile
+                      ? { opacity: 0, scale: 1, x: 0, y: "100%" }
+                      : { opacity: 0, scale: 0.97, x: "-50%", y: "-50%" }
+                  }
+                  animate={
+                    isMobile
+                      ? { opacity: 1, scale: 1, x: 0, y: 0 }
+                      : { opacity: 1, scale: 1, x: "-50%", y: "-50%" }
+                  }
+                  exit={
+                    isMobile
+                      ? { opacity: 0, scale: 1, x: 0, y: "100%" }
+                      : { opacity: 0, scale: 0.98, x: "-50%", y: "-50%" }
+                  }
                   transition={SPRING_SOFT}
-                  style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
+                  style={{
+                    paddingBottom: lift > 0 ? undefined : "env(safe-area-inset-bottom)",
+                    // Raise the sheet clear of the on-screen keyboard and cap its
+                    // height to the space that leaves, so the search results the
+                    // keyboard was summoned for stay above it rather than behind.
+                    ...(lift > 0
+                      ? { bottom: lift, maxHeight: `calc(100dvh - ${lift}px - 8px)` }
+                      : {}),
+                  }}
                 >
                   {/* Grab handle: the only affordance that says this can be
                       thrown away, so it belongs only where dragging works. */}

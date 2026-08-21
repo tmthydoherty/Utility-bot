@@ -24,6 +24,11 @@ import { Sheet } from "./sheet";
 export interface PickerItem {
   value: string;
   label: string;
+  /**
+   * Extra terms the search should match besides the label — a member's
+   * username as well as their display name, say. Never shown, only searched.
+   */
+  keywords?: string[];
   /** Optional heading to group under, e.g. a Discord category name. */
   group?: string;
   /** Rendered as a leading dot — role colours. */
@@ -130,10 +135,14 @@ export function EntityPicker(props: EntityPickerProps) {
   const list = (
     <Command
       // Values are snowflakes, so cmdk's default substring match on `value`
-      // would search IDs rather than names. Match on the label instead.
+      // would search IDs rather than names. Match on the label — and on any
+      // keywords (a member's username alongside their display name).
       filter={(value, search) => {
-        const label = byValue.get(value)?.label ?? value;
-        return label.toLowerCase().includes(search.toLowerCase()) ? 1 : 0;
+        const item = byValue.get(value);
+        const hay = [item?.label ?? value, ...(item?.keywords ?? [])]
+          .join(" ")
+          .toLowerCase();
+        return hay.includes(search.toLowerCase()) ? 1 : 0;
       }}
       className="flex max-h-full flex-col overflow-hidden"
     >

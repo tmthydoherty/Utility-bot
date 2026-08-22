@@ -5,6 +5,7 @@ import aiosqlite
 import asyncio
 import logging
 import os
+import shutil
 import io
 import json
 import re
@@ -34,6 +35,7 @@ from .models import (
     RIVALS_ROLES, RIVALS_ROSTER, FONTS_PATH,
     is_valorant_game, is_rivals_game, is_overwatch_game, OW_ROLES,
     OW_ROLE_EMOJI, OW_ROLE_DISPLAY_ORDER, ow_can_form_222, ow_coverage_panel,
+    build_ladder_remap,
     _parse_tracker_url, _streak_bonus_multiplier,
     _role_diversity_penalty, generate_short_id, resolve_short_name, parse_duration_to_minutes,
     normalize_ign, find_best_ign_match, resolve_ocr_ign, normalize_rivals_role,
@@ -944,6 +946,23 @@ class CustomMatch(commands.Cog):
             return
         if ctype == "rank_remove":
             await DatabaseHelper.remove_mmr_role(int(p["game_id"]), int(p["role_id"]))
+            return
+
+        if ctype == "ladder_remap":
+            # Re-space the rank ladder and remap every player onto it. Payload:
+            # {game_id, tiers: [{role_id, mmr_value, label}]} — the full new ladder.
+            game_id = int(p["game_id"])
+            game = await DatabaseHelper.get_game(game_id)
+            if not game:
+                raise ValueError(f"ladder_remap: unknown game {game_id}")
+            new = {
+                int(t["role_id"]): {"mmr": int(t["mmr_value"]), "label": t.get("label")}
+                for t in (p.get("tiers") or [])
+            }
+            floors = sorted(d["mmr"] for d in new.values())
+            if floors != sorted(set(floors)):
+                raise ValueError("ladder_remap: tier floors must be strictly increasing")
+            await self.remap_ladder(guild, game, new)
             return
 
         if ctype in ("player_mmr_set", "player_offset_set"):
@@ -2516,6 +2535,181 @@ class CustomMatch(commands.Cog):
         except Exception as e:
             logger.error(f"Error updating MMR roles for player {player_id}: {e}")
 
+    # -------------------------------------------------------------------------
+    # Ladder remap — insert/re-space rank tiers without wiping earned rating
+    # -------------------------------------------------------------------------
+    async def _backup_db(self) -> str:
+        """Snapshot the live DB to a timestamped ``.bak`` beside it, first
+        checkpointing the WAL so the copy is a complete, standalone database."""
+        try:
+            async with DatabaseHelper._get_db() as db:
+                await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                await db.commit()
+        except Exception as e:
+            logger.warning(f"ladder remap: WAL checkpoint before backup failed: {e}")
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        dst = DB_PATH.with_name(f"{DB_PATH.stem}.{ts}.bak")
+        await asyncio.to_thread(shutil.copy2, DB_PATH, dst)
+        logger.info(f"ladder remap: backed up DB to {dst}")
+        return str(dst)
+
+    @staticmethod
+    def _rank_label_for(floors: Dict[int, dict], eff_mmr: int) -> str:
+        """Rank label an effective MMR earns under ``floors``
+        ({role_id: {'mmr', 'label'}}) — the highest floor <= the MMR."""
+        best = None
+        for _rid, d in floors.items():
+            if eff_mmr >= d['mmr'] and (best is None or d['mmr'] > best[0]):
+                best = (d['mmr'], d['label'])
+        if best is None:
+            return "Unranked"
+        return best[1] or f"{best[0]} MMR"
+
+    @staticmethod
+    def _build_ladder_remap(old: Dict[int, dict], new: Dict[int, dict]):
+        """Build the piecewise-linear remap from old→new floors, matching ranks
+        by ``role_id`` (only ranks in both ladders anchor the map)."""
+        control = [(old[rid]['mmr'], new[rid]['mmr']) for rid in old if rid in new]
+        return build_ladder_remap(control)
+
+    async def _preview_ladder_remap(self, game, new: Dict[int, dict]) -> dict:
+        """Dry run: how the staged ``new`` ladder would remap this game's players.
+
+        Returns counts and a few sample lines; writes nothing. ``new`` is
+        {role_id: {'mmr': int, 'label': str|None}} — the full intended ladder.
+        """
+        old = await DatabaseHelper.get_mmr_roles_with_labels(game.game_id)
+        remap = self._build_ladder_remap(old, new)
+        mmr_changed = 0
+        label_changes: Dict[Tuple[str, str], int] = {}
+        samples: List[str] = []
+        async with DatabaseHelper._get_db() as db:
+            async with db.execute(
+                """SELECT player_id, mmr + COALESCE(admin_offset, 0) AS eff
+                     FROM player_game_stats WHERE game_id = ? ORDER BY eff""",
+                (game.game_id,)
+            ) as cursor:
+                rows = await cursor.fetchall()
+        for r in rows:
+            old_eff = r["eff"]
+            new_eff = remap(old_eff)
+            old_label = self._rank_label_for(old, old_eff)
+            new_label = self._rank_label_for(new, new_eff)
+            if new_eff != old_eff:
+                mmr_changed += 1
+            if new_label != old_label:
+                key = (old_label, new_label)
+                label_changes[key] = label_changes.get(key, 0) + 1
+                if len(samples) < 8:
+                    samples.append(f"`{old_eff:>4}`→`{new_eff:>4}`  {old_label} → **{new_label}**")
+        return {
+            "players": len(rows),
+            "mmr_changed": mmr_changed,
+            "label_changes": label_changes,
+            "label_changed_total": sum(label_changes.values()),
+            "samples": samples,
+        }
+
+    async def remap_ladder(self, guild: Optional[discord.Guild], game,
+                           new: Dict[int, dict]) -> dict:
+        """Apply a staged ladder (``new`` = {role_id: {'mmr', 'label'}}), remapping
+        every player's rating onto the new floors so earned progress rides along.
+
+        Steps: back up the DB, write the new floors, remap ``player_game_stats``
+        and (Overwatch) ``ow_role_stats`` effective-preserving, repair aggregate +
+        floor via :meth:`_audit_ratings_for_game`, then reapply rank roles now
+        rather than waiting for the hourly audit. Returns a summary dict.
+        """
+        gid = game.game_id
+        old = await DatabaseHelper.get_mmr_roles_with_labels(gid)
+        remap = self._build_ladder_remap(old, new)
+        is_ow = is_overwatch_game(game)
+
+        backup = await self._backup_db()
+
+        # Write the new ladder: upsert every staged rung, drop any that were removed.
+        for role_id, d in new.items():
+            await DatabaseHelper.set_mmr_role(gid, role_id, int(d['mmr']), d.get('label'))
+        for role_id in old:
+            if role_id not in new:
+                await DatabaseHelper.remove_mmr_role(gid, role_id)
+
+        # Remap stored ratings, preserving effective_mmr = mmr + admin_offset.
+        pg_changed = 0
+        role_changed = 0
+        async with DatabaseHelper._get_db() as db:
+            async with db.execute(
+                """SELECT player_id, mmr, COALESCE(admin_offset, 0) AS off
+                     FROM player_game_stats WHERE game_id = ?""",
+                (gid,)
+            ) as cursor:
+                pg_rows = await cursor.fetchall()
+            for r in pg_rows:
+                new_mmr = remap(r["mmr"] + r["off"]) - r["off"]
+                if new_mmr != r["mmr"]:
+                    await db.execute(
+                        "UPDATE player_game_stats SET mmr = ? WHERE player_id = ? AND game_id = ?",
+                        (new_mmr, r["player_id"], gid)
+                    )
+                    pg_changed += 1
+            if is_ow:
+                async with db.execute(
+                    """SELECT player_id, role, mmr, COALESCE(admin_offset, 0) AS off
+                         FROM ow_role_stats WHERE game_id = ?""",
+                    (gid,)
+                ) as cursor:
+                    role_rows = await cursor.fetchall()
+                for r in role_rows:
+                    new_mmr = remap(r["mmr"] + r["off"]) - r["off"]
+                    if new_mmr != r["mmr"]:
+                        await db.execute(
+                            "UPDATE ow_role_stats SET mmr = ? WHERE player_id = ? AND game_id = ? AND role = ?",
+                            (new_mmr, r["player_id"], gid, r["role"])
+                        )
+                        role_changed += 1
+            await db.commit()
+
+        # Re-derive the OW aggregate (= peak per-role) and lift anything under the
+        # new floor — the same invariants the hourly audit enforces.
+        await self._audit_ratings_for_game(game)
+
+        # Reapply rank roles immediately so labels update now, not in an hour —
+        # but only when rank-role granting is on. It's off by default here (the
+        # ladder still drives seeding, labels and the loss floor without it), so
+        # normally this is a no-op and we skip the whole loop.
+        granting = await DatabaseHelper.get_rank_roles_enabled()
+        roles_applied = 0
+        if granting and guild is not None:
+            player_ids = [r["player_id"] for r in pg_rows]
+            for pid in player_ids:
+                stats = await DatabaseHelper.get_player_stats(pid, gid)
+                try:
+                    await self.update_mmr_roles(guild, pid, gid, stats.effective_mmr)
+                    roles_applied += 1
+                except Exception as e:
+                    logger.warning(f"ladder remap: reapply role for {pid} failed: {e}")
+
+        summary = {
+            "backup": backup,
+            "players": len(pg_rows),
+            "mmr_changed": pg_changed,
+            "role_rows_changed": role_changed,
+            "roles_applied": roles_applied,
+            "granting": granting,
+        }
+        if guild is not None:
+            role_note = (f", {roles_applied} role(s) reapplied" if granting
+                         else " (rank roles off — labels/seeding only)")
+            await self.log_action(
+                guild,
+                f"Rank ladder re-spaced for **{game.name}**: {len(new)} tiers, "
+                f"{pg_changed} player rating(s) remapped{role_note}. "
+                f"Backup: `{os.path.basename(backup)}`.",
+                prefix="🪜",
+            )
+        logger.info(f"ladder remap: {game.name} {summary}")
+        return summary
+
     async def log_action(self, guild: discord.Guild, message: str, prefix: str = ""):
         """Log an action to the log channel. Optional prefix (e.g. emoji) before timestamp."""
         channel_id = await DatabaseHelper.get_config("log_channel_id")
@@ -3559,6 +3753,38 @@ class CustomMatch(commands.Cog):
             )
             return
 
+        # Rivals (and any other role_required game): the balancer needs a
+        # primary/secondary role preference, and the join gate in
+        # handle_queue_join enforces exactly that. Self-setup bypasses that gate
+        # by finishing the join directly, so ask for prefs here too — otherwise
+        # a self-registered player slips into the queue with no roles on file.
+        if game.role_required:
+            async def after_save(inter: discord.Interaction, primary, secondary):
+                desc = f"**Primary:** {primary.title()}"
+                desc += f"\n**Secondary:** {secondary.title()}" if secondary else "\n**Secondary:** Fill"
+                try:
+                    await inter.response.edit_message(
+                        content=f"**Roles set for {game.name}!**\n{desc}\n-# Joining the queue…",
+                        view=None,
+                    )
+                except Exception as e:
+                    logger.error(f"Rivals self-setup: failed to ack role prefs for {inter.user.id}: {e}")
+                    return
+                await self._finish_queue_join(
+                    inter, game, queue_id, responded=True,
+                    join_confirm=f"✅ You're all set up and in the **{game.name}** queue!",
+                )
+
+            view = RoleRequiredView(self, game.game_id, game.name, after_save=after_save)
+            await interaction.response.edit_message(
+                content=(
+                    f"**You're set up for {game.name}!**\n"
+                    "Last step — select your **primary role** below:"
+                ),
+                view=view,
+            )
+            return
+
         await interaction.response.edit_message(
             content=f"**You're set up for {game.name}!** Joining the queue…",
             view=None,
@@ -3810,6 +4036,50 @@ class CustomMatch(commands.Cog):
         # from the queue message itself.
         queue_channel = (self.bot.get_channel(queue_state.channel_id)
                          if queue_state.channel_id else None) or interaction.channel
+
+        # Final safety net: role preferences must be on file before a player can
+        # take a queue slot. The front-door gate in handle_queue_join is the
+        # usual place this is enforced, but every path that finishes a join —
+        # self-setup, the OW role dropdown, any future shortcut — funnels
+        # through here, so guard the choke point too. A missing selection is a
+        # silent downgrade: the balancer treats it as "fill". Prefs are already
+        # saved by the time a role-picker hands back here, so this only fires
+        # for a player who somehow reached the queue add without them.
+        if is_overwatch_game(game):
+            if not await DatabaseHelper.get_ow_role_selection(user.id, game_id):
+                async def _ow_after(inter, ordered):
+                    await self._ow_join_after_role_select(inter, ordered, game, queue_id)
+                await interaction.followup.send(
+                    f"**Select your roles to join {game.name}.**\n"
+                    "Pick every role you're willing to play — matches form strict 2-2-2 from these.",
+                    view=OWRoleSelectView(
+                        self, game_id, game.name, rejoin_hint=False,
+                        after_save=_ow_after, preselected=[],
+                    ),
+                    ephemeral=True,
+                )
+                return
+        elif game.role_required:
+            if not await DatabaseHelper.get_player_role_prefs(user.id, game_id):
+                async def _rivals_after(inter, primary, secondary):
+                    desc = f"**Primary:** {primary.title()}"
+                    desc += f"\n**Secondary:** {secondary.title()}" if secondary else "\n**Secondary:** Fill"
+                    try:
+                        await inter.response.edit_message(
+                            content=f"**Roles set for {game.name}!**\n{desc}\n-# Joining the queue…",
+                            view=None,
+                        )
+                    except Exception as e:
+                        logger.error(f"Role-prefs guard: failed to ack prefs for {inter.user.id}: {e}")
+                        return
+                    await self._finish_queue_join(inter, game, queue_id, responded=True)
+                await interaction.followup.send(
+                    f"**Set your role to join {game.name}.**\n\n"
+                    "Select your **primary role** below:",
+                    view=RoleRequiredView(self, game_id, game.name, after_save=_rivals_after),
+                    ephemeral=True,
+                )
+                return
 
         queue_full = False  # also read by the except handler below
         try:
@@ -8345,13 +8615,17 @@ class CustomMatch(commands.Cog):
                     {**r, "medal_count": sum((r.get("medals") or {}).values())}
                     for r in rows_out if (r.get("team") or "").upper() == "BLUE"
                 ]
+                target_channel, map_name = await self._rivals_results_target(
+                    message.guild, match_id
+                )
                 image_buf = await self.stats_generator.generate_rivals_results_image(
                     red_players=red_players,
                     blue_players=blue_players,
                     winning_team=result.winning_team or "",
+                    map_name=map_name,
                 )
-                if image_buf:
-                    await message.channel.send(
+                if image_buf and target_channel is not None:
+                    await target_channel.send(
                         file=discord.File(image_buf, filename=f"rivals_match_{match_id}.png")
                     )
             except Exception as e:
@@ -8799,6 +9073,44 @@ class CustomMatch(commands.Cog):
             inline=False
         )
         await channel.send(embed=embed)
+
+    async def _rivals_results_target(
+        self, guild: discord.Guild, match_id: int
+    ) -> tuple[Optional[discord.abc.Messageable], Optional[str]]:
+        """Resolve where a Rivals results card should be posted, plus the map name.
+
+        The card goes to the game's configured game/results channel
+        (``game.game_channel_id``) and nowhere else — never the lobby, never the
+        log channel. If that channel isn't set or can't be resolved the card is
+        simply not posted (caller skips on ``None``). Returns
+        ``(channel, map_name)``.
+        """
+        channel = None
+        map_name = None
+        try:
+            match_row = await DatabaseHelper.get_match(match_id)
+            if match_row:
+                map_name = match_row.get("map_name")
+                game_id = match_row.get("game_id")
+                if game_id:
+                    game = await DatabaseHelper.get_game(game_id)
+                    if game and game.game_channel_id:
+                        channel = guild.get_channel(game.game_channel_id)
+                        if channel is None:
+                            logger.warning(
+                                f"Rivals results card for match #{match_id}: game "
+                                f"channel {game.game_channel_id} not found in guild; "
+                                f"card not posted."
+                            )
+                    else:
+                        logger.warning(
+                            f"Rivals results card for match #{match_id}: game has no "
+                            f"game_channel_id configured; card not posted."
+                        )
+        except Exception as e:
+            logger.error(f"Failed to resolve Rivals game channel for match #{match_id}: {e}")
+
+        return channel, map_name
 
     async def _send_rivals_stats_log(
         self,
@@ -10020,7 +10332,8 @@ class CustomMatch(commands.Cog):
                 blue_players_list.append(pdata)
 
         image = await self.stats_generator.generate_rivals_results_image(
-            red_players_list, blue_players_list, winning_team
+            red_players_list, blue_players_list, winning_team,
+            map_name=match.get('map_name'),
         )
         if image:
             image.seek(0)
@@ -10339,19 +10652,19 @@ class CustomMatch(commands.Cog):
                     {**r, "medal_count": sum((r.get("medals") or {}).values())}
                     for r in rows_out if (r.get("team") or "").upper() == "BLUE"
                 ]
+                target_channel, map_name = await self._rivals_results_target(
+                    interaction.guild, mid
+                )
                 image_buf = await self.stats_generator.generate_rivals_results_image(
                     red_players=red_players,
                     blue_players=blue_players,
                     winning_team=result.winning_team or "",
+                    map_name=map_name,
                 )
-                if image_buf:
-                    log_channel_id = await DatabaseHelper.get_config("log_channel_id")
-                    if log_channel_id:
-                        log_ch = interaction.guild.get_channel(int(log_channel_id))
-                        if log_ch:
-                            await log_ch.send(
-                                file=discord.File(image_buf, filename=f"rivals_match_{mid}.png")
-                            )
+                if image_buf and target_channel is not None:
+                    await target_channel.send(
+                        file=discord.File(image_buf, filename=f"rivals_match_{mid}.png")
+                    )
             except Exception as e:
                 logger.error(f"Failed to render results card from retry: {e}")
 

@@ -746,7 +746,7 @@ class RivalsIGNResolverView(ExpiringView):
             )
             return
 
-        # Render + post results card to log channel (lobby is already gone)
+        # Render + post results card to the game channel (lobby is already gone)
         try:
             red_players = [
                 {**r, "medal_count": sum((r.get("medals") or {}).values())}
@@ -756,19 +756,19 @@ class RivalsIGNResolverView(ExpiringView):
                 {**r, "medal_count": sum((r.get("medals") or {}).values())}
                 for r in self.rows_out if (r.get("team") or "").upper() == "BLUE"
             ]
+            target_channel, map_name = await self.cog._rivals_results_target(
+                self.guild, self.match_id
+            )
             image_buf = await self.cog.stats_generator.generate_rivals_results_image(
                 red_players=red_players,
                 blue_players=blue_players,
                 winning_team=self.winning_team or "",
+                map_name=map_name,
             )
-            if image_buf:
-                log_channel_id = await DatabaseHelper.get_config("log_channel_id")
-                if log_channel_id:
-                    log_ch = self.guild.get_channel(int(log_channel_id))
-                    if log_ch:
-                        await log_ch.send(
-                            file=discord.File(image_buf, filename=f"rivals_match_{self.match_id}.png")
-                        )
+            if image_buf and target_channel is not None:
+                await target_channel.send(
+                    file=discord.File(image_buf, filename=f"rivals_match_{self.match_id}.png")
+                )
         except Exception as e:
             logger.error(f"Failed to render results card from resolver: {e}")
 
@@ -1904,6 +1904,21 @@ class RankLadderPage(SettingsPage):
             return
         await RemoveRankPage(self.cog, self, self.game, roles, interaction.guild).render(interaction)
 
+    @discord.ui.button(label="Insert / Re-space Tier", style=discord.ButtonStyle.primary, row=2)
+    async def remap_ladder(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Add / Update Rank edits a rung in place. This flow instead re-spaces the
+        # whole ladder and *remaps every player onto it* so a new tier (e.g.
+        # Emerald) can be inserted without wiping earned rating. Staged first,
+        # previewed, then applied — see LadderRemapPage.
+        staged = await DatabaseHelper.get_mmr_roles_with_labels(self.game.game_id)
+        if not staged:
+            await interaction.response.send_message(
+                "Configure at least a couple of ranks first — there's nothing to re-space.",
+                ephemeral=True,
+            )
+            return
+        await LadderRemapPage(self.cog, self, self.game, staged).render(interaction)
+
     @discord.ui.button(label="Toggle Role Granting", style=discord.ButtonStyle.secondary, row=1)
     async def toggle_granting(self, interaction: discord.Interaction, button: discord.ui.Button):
         # Global, not per-game: the switch is about whether the bot manages rank
@@ -2053,6 +2068,236 @@ class RemoveRankPage(SettingsPage):
     async def _on_pick(self, interaction: discord.Interaction):
         await DatabaseHelper.remove_mmr_role(self.game.game_id, int(self.select.values[0]))
         await self.parent_page.render(interaction, flash="✅ Rank removed.")
+
+
+class _EditTierModal(discord.ui.Modal, title="Tier"):
+    """Add or edit a staged tier (label + MMR). Edits the in-memory staged ladder
+    on the LadderRemapPage — nothing is written to the DB until Apply.
+
+    Rank roles are off in this deployment, so a tier is just a label + an MMR
+    floor: a brand-new tier gets a synthetic negative id as its ladder key (never
+    a real Discord role), and existing tiers keep whatever id they already have.
+    """
+
+    tier_label = discord.ui.TextInput(label="Rank Label", placeholder="e.g., Emerald", required=True)
+    mmr_value = discord.ui.TextInput(label="MMR Value", placeholder="e.g., 2900", required=True)
+
+    def __init__(self, page: 'LadderRemapPage', role_id: Optional[int]):
+        super().__init__()
+        self.page = page
+        self.role_id = role_id
+        existing = page.staged.get(role_id) if role_id is not None else None
+        if existing:
+            self.tier_label.default = existing['label'] or ""
+            self.mmr_value.default = str(existing['mmr'])
+            self.title = f"Edit {existing['label'] or existing['mmr']}"[:45]
+        else:
+            self.title = "Add a new tier"
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            mmr = int(self.mmr_value.value)
+        except ValueError:
+            await interaction.response.send_message("Invalid MMR value.", ephemeral=True)
+            return
+        label = self.tier_label.value.strip() or None
+        rid = self.role_id
+        if rid is None:
+            # Synthetic, always-negative key — real Discord snowflakes are positive,
+            # so this can never collide with a role and is simply never granted.
+            rid = -int(datetime.now().timestamp() * 1000)
+        self.page.staged[rid] = {'mmr': mmr, 'label': label}
+        self.page.preview = None  # staged changed — old preview is stale
+        await self.page.render(
+            interaction,
+            flash=f"Staged **{label or mmr}** at **{mmr}** MMR. Hit **Preview** to see the impact.",
+        )
+
+
+class LadderRemapPage(SettingsPage):
+    """Insert or re-space rank tiers, remapping every player onto the new ladder.
+
+    Unlike *Add / Update Rank* (which edits one rung in place), this stages the
+    whole ladder in memory so the *old* floors survive to build the remap, then —
+    on Apply — backs up the DB, writes the new floors and slides every player's
+    rating onto them so earned progress rides along. That's what lets a new tier
+    (e.g. Emerald between Platinum and Diamond) be inserted without wiping or
+    distorting anyone's rating. Preview is a dry run; nothing is written until
+    Apply is confirmed. See ``cog.remap_ladder`` / ``cog._preview_ladder_remap``.
+    """
+
+    def __init__(self, cog: 'CustomMatch', parent: RankLadderPage, game: GameConfig,
+                 live: Dict[int, dict]):
+        super().__init__(cog, parent, timeout=600)
+        self.game = game
+        self.live = {rid: {'mmr': int(d['mmr']), 'label': d.get('label')} for rid, d in live.items()}
+        self.staged = {rid: {'mmr': int(d['mmr']), 'label': d.get('label')} for rid, d in live.items()}
+        self.preview: Optional[dict] = None
+        self._edit_select: Optional[discord.ui.Select] = None
+        self._remove_select: Optional[discord.ui.Select] = None
+        self._build_items()
+
+    def _build_items(self):
+        self.clear_items()
+        edit_opts = [discord.SelectOption(
+            label="➕ Add a new tier", value="__add__",
+            description="Insert a tier (e.g. Emerald) — label + MMR floor",
+        )]
+        for rid, d in sorted(self.staged.items(), key=lambda x: x[1]['mmr'], reverse=True):
+            label = d['label'] or f"{d['mmr']} MMR"
+            edit_opts.append(discord.SelectOption(
+                label=f"{label} — {d['mmr']} MMR"[:100], value=str(rid),
+                description="Edit this tier's label or MMR floor",
+            ))
+        edit = discord.ui.Select(placeholder="Add or edit a tier…", options=edit_opts[:25], row=0)
+        edit.callback = self._on_edit
+        self._edit_select = edit
+        self.add_item(edit)
+
+        opts = []
+        for rid, d in sorted(self.staged.items(), key=lambda x: x[1]['mmr'], reverse=True):
+            label = d['label'] or f"{d['mmr']} MMR"
+            opts.append(discord.SelectOption(label=f"{label} — {d['mmr']} MMR"[:100], value=str(rid)))
+        if opts:
+            rem = discord.ui.Select(placeholder="Remove a staged tier…", options=opts[:25], row=1)
+            rem.callback = self._on_remove
+            self._remove_select = rem
+            self.add_item(rem)
+
+        prev = discord.ui.Button(label="Preview", style=discord.ButtonStyle.primary, row=2)
+        prev.callback = self._on_preview
+        self.add_item(prev)
+        apply = discord.ui.Button(label="Apply", style=discord.ButtonStyle.success, row=2,
+                                  disabled=self.preview is None)
+        apply.callback = self._on_apply
+        self.add_item(apply)
+        reset = discord.ui.Button(label="Reset", style=discord.ButtonStyle.secondary, row=2)
+        reset.callback = self._on_reset
+        self.add_item(reset)
+
+        if self.parent_page is not None:
+            self.add_item(BackButton(self.parent_page, row=self.back_row))
+
+    async def render(self, interaction: discord.Interaction, *, flash: Optional[str] = None):
+        # Own render (not SettingsPage's): rebuild items each time so the staged
+        # ladder + Apply-enabled state stay in sync, and don't blanket-enable
+        # buttons the way the base does (that would un-gate Apply before Preview).
+        self._build_items()
+        embed = await self.build_embed(interaction.guild)
+        if flash:
+            embed.description = f"{flash}\n\n{embed.description or ''}".strip()
+        if interaction.response.is_done():
+            await interaction.edit_original_response(embed=embed, view=self)
+        else:
+            await interaction.response.edit_message(embed=embed, view=self)
+        self.message = interaction.message
+
+    async def build_embed(self, guild: discord.Guild) -> discord.Embed:
+        lines = []
+        for rid, d in sorted(self.staged.items(), key=lambda x: x[1]['mmr'], reverse=True):
+            label = d['label'] or f"{d['mmr']} MMR"
+            tag = ""
+            if rid not in self.live:
+                tag = "  🆕 *inserted*"
+            elif self.live[rid]['mmr'] != d['mmr']:
+                tag = f"  ↕ *was {self.live[rid]['mmr']}*"
+            lines.append(f"`{d['mmr']:>5}` **{label}**{tag}")
+        for rid, d in self.live.items():
+            if rid not in self.staged:
+                label = d['label'] or f"{d['mmr']} MMR"
+                lines.append(f"~~`{d['mmr']:>5}` **{label}**~~  🗑️ *removed*")
+
+        desc = (
+            "**Staged ladder** (not saved yet). Use the pickers to insert a tier or "
+            "restage a floor, then **Preview** the impact and **Apply**. Applying "
+            "backs up the database, writes the new floors and remaps every player "
+            "onto them — earned rating is preserved, only the ladder geometry moves."
+            "\n\n" + "\n".join(lines)
+        )
+
+        if self.preview is not None:
+            pv = self.preview
+            trans = "\n".join(
+                f"• {a} → **{b}**: {n}"
+                for (a, b), n in sorted(pv["label_changes"].items(), key=lambda kv: -kv[1])
+            ) or "• none"
+            sample = "\n".join(pv["samples"]) if pv["samples"] else "_no rank-label changes_"
+            desc += (
+                f"\n\n**Preview** — {pv['players']} player(s): "
+                f"**{pv['mmr_changed']}** rating(s) remapped, "
+                f"**{pv['label_changed_total']}** rank label(s) change.\n"
+                f"__Label moves__\n{trans}\n\n__Sample__\n{sample}\n\n"
+                "-# Apply is now enabled. Re-preview after any further edit."
+            )
+        else:
+            desc += "\n\n-# Preview to enable Apply."
+
+        return discord.Embed(
+            title=f"{self.game.name} · Insert / Re-space Tier",
+            description=desc[:4000],
+            color=COLOR_NEUTRAL,
+        )
+
+    def _order_error(self) -> Optional[str]:
+        floors = [d['mmr'] for d in self.staged.values()]
+        if len(self.staged) < 2:
+            return "Keep at least two tiers on the ladder."
+        if len(set(floors)) != len(floors):
+            return "Two tiers share an MMR floor — give each a distinct value."
+        return None
+
+    async def _on_edit(self, interaction: discord.Interaction):
+        val = self._edit_select.values[0]
+        role_id = None if val == "__add__" else int(val)
+        await interaction.response.send_modal(_EditTierModal(self, role_id))
+
+    async def _on_remove(self, interaction: discord.Interaction):
+        rid = int(self._remove_select.values[0])
+        self.staged.pop(rid, None)
+        self.preview = None
+        await self.render(interaction, flash="Tier unstaged. Preview to see the impact.")
+
+    async def _on_reset(self, interaction: discord.Interaction):
+        self.staged = {rid: dict(d) for rid, d in self.live.items()}
+        self.preview = None
+        await self.render(interaction, flash="Reset to the live ladder.")
+
+    async def _on_preview(self, interaction: discord.Interaction):
+        err = self._order_error()
+        if err:
+            await interaction.response.send_message(err, ephemeral=True)
+            return
+        self.preview = await self.cog._preview_ladder_remap(self.game, self.staged)
+        await self.render(interaction)
+
+    async def _on_apply(self, interaction: discord.Interaction):
+        if self.preview is None:
+            await interaction.response.send_message("Run **Preview** first.", ephemeral=True)
+            return
+        err = self._order_error()
+        if err:
+            await interaction.response.send_message(err, ephemeral=True)
+            return
+        await interaction.response.defer()
+        try:
+            summary = await self.cog.remap_ladder(interaction.guild, self.game, self.staged)
+        except Exception as e:
+            logger.error(f"ladder remap apply failed: {e}", exc_info=True)
+            await interaction.followup.send(f"Remap failed: {e}", ephemeral=True)
+            return
+        self.live = {rid: dict(d) for rid, d in self.staged.items()}
+        self.preview = None
+        backup_name = str(summary.get("backup", "")).rpartition("/")[2]
+        role_note = (f", **{summary['roles_applied']}** role(s) reapplied"
+                     if summary.get("granting") else "")
+        flash = (
+            f"✅ Ladder re-spaced. **{summary['mmr_changed']}** rating(s) remapped"
+            f"{role_note}. Backup `{backup_name}`."
+        )
+        self._build_items()
+        embed = await self.build_embed(interaction.guild)
+        embed.description = f"{flash}\n\n{embed.description or ''}".strip()
+        await interaction.edit_original_response(embed=embed, view=self)
 
 
 class DeleteGamePage(SettingsPage):

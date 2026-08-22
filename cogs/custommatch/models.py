@@ -389,6 +389,48 @@ def pc_seed_mmr(
     return int(base + (nxt - base) * frac)
 
 
+def build_ladder_remap(control_points) -> "callable":
+    """Return a monotonic piecewise-linear MMR remap ``f(mmr) -> mmr``.
+
+    ``control_points`` is an iterable of ``(old_floor, new_floor)`` for the ranks
+    present in *both* the old and new ladder, matched by role. A rank whose floor
+    moved contributes a shifting anchor; one that stayed put contributes an
+    identity anchor. A newly *inserted* rank (e.g. Emerald) is deliberately not a
+    control point — it only adds a label boundary on the new axis — so players
+    ride the surviving anchors and keep their rank name unless they land in the
+    freshly-carved slice.
+
+    Between two anchors the map interpolates linearly, so a player keeps their
+    *fractional position* within the band: when a band's width is unchanged their
+    earned points above the floor are preserved exactly, and when it changes the
+    earned delta scales with the band. Below the lowest anchor and above the
+    highest it translates by that endpoint's delta (an unchanged endpoint ⇒
+    identity there), which keeps the map continuous and monotonic.
+
+    Requires the anchors to be strictly increasing in *both* coordinates; the
+    caller validates ladder order before building.
+    """
+    pts = sorted({(int(o), int(n)) for o, n in control_points})
+    if not pts:
+        return lambda m: int(round(m))
+
+    def remap(m):
+        m = float(m)
+        if m <= pts[0][0]:
+            return int(round(m + (pts[0][1] - pts[0][0])))
+        if m >= pts[-1][0]:
+            return int(round(m + (pts[-1][1] - pts[-1][0])))
+        for (o0, n0), (o1, n1) in zip(pts, pts[1:]):
+            if o0 <= m <= o1:
+                if o1 == o0:
+                    return int(round(n0))
+                frac = (m - o0) / (o1 - o0)
+                return int(round(n0 + frac * (n1 - n0)))
+        return int(round(m))
+
+    return remap
+
+
 def ow_can_form_222(
     selections: Dict[int, "set"],
     per_role: Optional[Dict[str, int]] = None,

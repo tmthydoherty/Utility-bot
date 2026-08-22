@@ -2892,9 +2892,11 @@ class OWSetupRoleRankView(discord.ui.View):
         # Lowest rung first, matching the single-rank setup dropdown — the ladder
         # reads bottom-up everywhere an admin picks a *player's* rank.
         for role_id, data in sorted(mmr_roles.items(), key=lambda x: x[1]['mmr']):
+            # Players setting themselves up see rank names only — MMR is a hidden
+            # rating, not something to surface to them. Admins still see it.
             options.append(discord.SelectOption(
                 label=data['label'] or f"{data['mmr']} MMR",
-                description=f"{data['mmr']} MMR",
+                description=None if self.self_service else f"{data['mmr']} MMR",
                 value=str(role_id),
             ))
 
@@ -3164,9 +3166,10 @@ class SetupUserRankSelectView(discord.ui.View):
         options = []
         for role_id, data in sorted(mmr_roles.items(), key=lambda x: x[1]['mmr']):
             display = data['label'] or f"{data['mmr']} MMR"
+            # Self-service players see rank names only; admins still see the MMR.
             options.append(discord.SelectOption(
                 label=display,
-                description=f"{data['mmr']} MMR",
+                description=None if self_service else f"{data['mmr']} MMR",
                 value=str(role_id)
             ))
 
@@ -4859,12 +4862,18 @@ class RoleRequiredView(discord.ui.View):
     Uses a single ephemeral message that gets edited through each step.
     """
 
-    def __init__(self, cog: 'CustomMatch', game_id: int, game_name: str):
+    def __init__(self, cog: 'CustomMatch', game_id: int, game_name: str,
+                 after_save=None):
         super().__init__(timeout=60)
         self.cog = cog
         self.game_id = game_id
         self.game_name = game_name
         self.primary_role = None
+        # Optional async hook(interaction, primary, secondary) that takes over
+        # the response after the prefs are saved. Used by self-setup to carry
+        # straight on into the queue join instead of asking the player to click
+        # Join a second time.
+        self.after_save = after_save
 
         primary_select = discord.ui.Select(
             placeholder="Select your primary role...",
@@ -4906,13 +4915,18 @@ class RoleRequiredView(discord.ui.View):
             interaction.user.id, self.game_id, self.primary_role, secondary_val
         )
 
+        self.clear_items()
+        if self.after_save:
+            await self.after_save(interaction, self.primary_role, secondary_val)
+            self.stop()
+            return
+
         desc = f"**Primary:** {self.primary_role.title()}"
         if secondary_val:
             desc += f"\n**Secondary:** {secondary_val.title()}"
         else:
             desc += "\n**Secondary:** Fill"
 
-        self.clear_items()
         await interaction.response.edit_message(
             content=f"**Roles set for {self.game_name}!**\n{desc}\n\n"
             "Please click **Join** again to enter the queue.",

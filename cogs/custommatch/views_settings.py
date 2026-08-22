@@ -1713,8 +1713,9 @@ class PlayerMMRPage(SettingsPage):
         detected = max((r for r in member.roles if r.id in ranks),
                        key=lambda r: ranks[r.id], default=None)
         if detected is None:
+            labelled = await DatabaseHelper.get_mmr_roles_with_labels(self.game.game_id)
             await PlayerRankPickPage(
-                self.cog, self, self.game, member, ranks, interaction.guild
+                self.cog, self, self.game, member, labelled, interaction.guild
             ).render(interaction)
             return
 
@@ -1732,16 +1733,18 @@ class PlayerRankPickPage(SettingsPage):
     """Which rank to seed from, for a player who holds none of them."""
 
     def __init__(self, cog: 'CustomMatch', parent: PlayerMMRPage, game: GameConfig,
-                 member: discord.Member, ranks: Dict[int, int], guild: discord.Guild):
+                 member: discord.Member, ranks: Dict[int, dict], guild: discord.Guild):
         super().__init__(cog, parent, timeout=180)
         self.game = game
         self.member = member
+        # {role_id: {'mmr', 'label'}} — label first so role-less rungs (rank roles
+        # are off here) read as their rank name, not "Unknown (<id>)".
         self.ranks = ranks
         options = []
-        for role_id, mmr in sorted(ranks.items(), key=lambda x: x[1], reverse=True):
+        for role_id, data in sorted(ranks.items(), key=lambda x: x[1]['mmr'], reverse=True):
             role = guild.get_role(role_id)
-            name = role.name if role else f"Unknown ({role_id})"
-            options.append(discord.SelectOption(label=f"{name} — {mmr} MMR"[:100],
+            name = data['label'] or (role.name if role else f"{data['mmr']} MMR")
+            options.append(discord.SelectOption(label=f"{name} — {data['mmr']} MMR"[:100],
                                                 value=str(role_id)))
         self.select = discord.ui.Select(placeholder="Pick a rank…", options=options[:25], row=0)
         self.select.callback = self._on_pick
@@ -1759,15 +1762,17 @@ class PlayerRankPickPage(SettingsPage):
 
     async def _on_pick(self, interaction: discord.Interaction):
         role_id = int(self.select.values[0])
-        mmr = self.ranks.get(role_id, 1000)
+        data = self.ranks.get(role_id) or {}
+        mmr = data.get('mmr', 1000)
         seeded = await _seed_player_from_rank(
             self.cog, interaction.guild, self.member.id, self.game.game_id, mmr
         )
         role = interaction.guild.get_role(role_id)
+        from_name = data.get('label') or (role.name if role else str(role_id))
         await self.parent_page.render(
             interaction,
             flash=f"✅ **{self.member.display_name}** set to {mmr} MMR "
-                  f"(from {role.name if role else role_id}).{seeded}",
+                  f"(from {from_name}).{seeded}",
         )
 
 
@@ -1898,7 +1903,7 @@ class RankLadderPage(SettingsPage):
 
     @discord.ui.button(label="Remove Rank", style=discord.ButtonStyle.danger, row=0)
     async def remove_rank(self, interaction: discord.Interaction, button: discord.ui.Button):
-        roles = await DatabaseHelper.get_mmr_roles(self.game.game_id)
+        roles = await DatabaseHelper.get_mmr_roles_with_labels(self.game.game_id)
         if not roles:
             await interaction.response.send_message("No ranks configured yet.", ephemeral=True)
             return
@@ -2043,14 +2048,14 @@ class RemoveRankPage(SettingsPage):
     """Drop a rung off the ladder."""
 
     def __init__(self, cog: 'CustomMatch', parent: RankLadderPage, game: GameConfig,
-                 mmr_roles: Dict[int, int], guild: discord.Guild):
+                 mmr_roles: Dict[int, dict], guild: discord.Guild):
         super().__init__(cog, parent, timeout=300)
         self.game = game
         options = []
-        for role_id, mmr in sorted(mmr_roles.items(), key=lambda x: x[1], reverse=True):
+        for role_id, data in sorted(mmr_roles.items(), key=lambda x: x[1]['mmr'], reverse=True):
             role = guild.get_role(role_id)
-            name = role.name if role else f"Unknown ({role_id})"
-            options.append(discord.SelectOption(label=f"{name} — {mmr} MMR"[:100], value=str(role_id)))
+            name = data['label'] or (role.name if role else f"{data['mmr']} MMR")
+            options.append(discord.SelectOption(label=f"{name} — {data['mmr']} MMR"[:100], value=str(role_id)))
         self.select = discord.ui.Select(placeholder="Rank to remove…", options=options[:25], row=0)
         self.select.callback = self._on_pick
         self.add_item(self.select)
